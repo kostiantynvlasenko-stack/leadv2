@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # leadv2-daemon.sh — long-running daemon for Phase 4 autonomous operation.
-# Polls PO QUEUE, spawns /leadv2 next per item.
+# Polls task queue, spawns /leadv2 next per item.
 # Implements: quiet hours, outcome-based circuit breaker, parallel tasks, state file, resume.
 #
 # CHANGES (W1):

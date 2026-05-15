@@ -4,12 +4,7 @@
 # Reads JSONL transcripts, extracts: first user prompt, branches, top files touched, outcome.
 # Output: memory/project_history_digest.md (per-session) + project_history_index.yaml (searchable).
 #
-# Ported from m3-market/.claude/scripts/leadv2-history-primer.sh
-# Sanitized for persona-engine conventions:
 #   - project slug auto-detected from git remote or CWD name
-#   - no m3/MythicalGames path hardcoding
-#   - stripped mp-api.yaml api-contract-change detection (m3-specific)
-# Linear integration intentionally omitted in PE port.
 set -euo pipefail
 
 LIMIT=50

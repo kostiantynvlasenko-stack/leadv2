@@ -26,19 +26,19 @@ Before writing mission file, lead runs from main session:
 mcp__codebase-memory-mcp__search_graph(
   query="<mission keywords — natural language>",
   limit=10,
-  project="Users-kostiantyn.vlasenko-Projects-persona-engine"
+  project="${LEADV2_CODEBASE_PROJECT}"
 )
 
 # If there's a clear central symbol:
 mcp__codebase-memory-mcp__trace_path(
   function_name="<symbol>",
   depth=2,
-  project="Users-kostiantyn.vlasenko-Projects-persona-engine"
+  project="${LEADV2_CODEBASE_PROJECT}"
 )
 
 # For Heavy tasks only:
 mcp__codebase-memory-mcp__get_architecture(
-  project="Users-kostiantyn.vlasenko-Projects-persona-engine"
+  project="${LEADV2_CODEBASE_PROJECT}"
 )
 ```
 
@@ -192,7 +192,7 @@ Last line: DELIVERABLE_COMPLETE
 Chat summary back: ≤50 words + pointer to file.
 
 Skills active: plan-review, devils-advocate, systematic-debugging, leadv2-subagent-protocol, etc. Use them.
-Codebase graph project: Users-kostiantyn.vlasenko-Projects-persona-engine
+Codebase graph project: ${LEADV2_CODEBASE_PROJECT}
 ",
   run_in_background: true
 )
@@ -263,7 +263,7 @@ Write to: docs/handoff/<id>/critic.md ending with DELIVERABLE_COMPLETE.
 Chat summary: ≤50 words — just severity counts + pointer.
 
 Skills active: code-review-patterns, codex-review, devils-advocate, systematic-debugging, leadv2-subagent-protocol.
-Codebase graph project: Users-kostiantyn.vlasenko-Projects-persona-engine
+Codebase graph project: ${LEADV2_CODEBASE_PROJECT}
 "
 )
 ```
@@ -301,7 +301,7 @@ Before writing `context.yaml`, check for per-repo toolset overrides:
 import yaml
 from pathlib import Path
 
-# Load override file if present (persona-engine worktree-relative path)
+# Load override file if present (project worktree-relative path)
 override_path = Path(".claude/leadv2-overrides/toolsets.yaml")
 overrides = yaml.safe_load(override_path.read_text()) if override_path.is_file() else {}
 phase_overrides = overrides.get("phase_overrides") or {}

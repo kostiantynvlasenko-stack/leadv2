@@ -82,7 +82,7 @@ mkdir -p "$HANDOFF_DIR"
 PROMPT_FILE="/tmp/codex-plan-${TASK_ID}.md"
 
 cat > "$PROMPT_FILE" <<EOF
-Outcome: a 2nd-opinion plan for the persona-engine task below, ready for the lead orchestrator to synthesize against an Opus architect's plan.
+Outcome: a 2nd-opinion plan for the task below, ready for the lead orchestrator to synthesize against an Opus architect's plan.
 
 Mission: $MISSION
 
@@ -92,10 +92,10 @@ Deliver these sections, in this order, plain paragraphs (no headings unless they
 2. Recommended option with a one-paragraph rationale grounded in the mission.
 3. Top 3 risks for the recommendation, each paired with a concrete mitigation.
 4. Rollback plan if the change ships and degrades production.
-5. Likely-touched file paths in persona-engine (be specific when inferable; otherwise say "unknown — needs discovery").
+5. Likely-touched file paths (be specific when inferable; otherwise say "unknown — needs discovery").
 
 Decision rules:
-- Respect persona-engine invariants: Supabase is source of truth; safety gate is mandatory on publish; one persona per VPS; model routing is Sonnet/Opus/Haiku via Claude Code.
+- Review changes for correctness, security, and performance.
 - Propose an architectural rewrite only when the mission cannot be met without one.
 - Stop and surface a clarifying question instead of guessing when the mission underspecifies success criteria.
 

@@ -3,21 +3,17 @@
 # Appends a one-liner to ## History notes in STATE.md.
 # Called by lead at end of session OR at start of resume.
 #
-# Ported from m3-market/.claude/scripts/leadv2-session-note.sh
-# Sanitized for persona-engine conventions:
-#   - STATE.md at docs/leadv2/tasks/<id>/STATE.md (PE convention)
-#   - Removed dependency on leadv2_hub_root() (not in PE helpers)
-#   - Removed dependency on leadv2_now() (not in PE helpers) — using date directly
+# STATE.md at docs/leadv2/tasks/<id>/STATE.md
 set -euo pipefail
 
-# shellcheck source=/Users/kostiantyn.vlasenko/Projects/persona-engine/.claude/scripts/leadv2-helpers.sh
+# shellcheck source=/dev/null
 source "$(dirname "${BASH_SOURCE[0]}")/leadv2-helpers.sh"
 
 TASK_ID="${1:-}"
 NOTE="${2:-}"
 [[ -z "$TASK_ID" || -z "$NOTE" ]] && { echo "usage: $0 <task-id> <note>" >&2; exit 1; }
 
-# PE convention: STATE.md lives in docs/leadv2/tasks/<id>/STATE.md
+# STATE.md lives in docs/leadv2/tasks/<id>/STATE.md
 STATE="$LEADV2_PROJECT_ROOT/docs/leadv2/tasks/$TASK_ID/STATE.md"
 [[ -f "$STATE" ]] || { echo "ERR: STATE.md not found for $TASK_ID at $STATE" >&2; exit 1; }
 

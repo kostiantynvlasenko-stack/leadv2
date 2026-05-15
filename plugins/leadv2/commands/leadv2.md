@@ -147,8 +147,8 @@ For each phase: trigger the named skill, run the inline housekeeping, exit when 
 - `leadv2_threshold_warn_if_inverted || true` — sanity check
 - `leadv2_live_update intake startup` — LIVE tracker
 - `export LEADV2_TASK_ID=<id> && .claude/scripts/leadv2-mcp-cache.sh warm <id>` — warm MCP cache, then dispatch standard queries (detect_changes, get_architecture) and write results via `leadv2-mcp-cache.sh set`
-- Determine task source (user / PO QUEUE / RECOVERY)
-- If queue cache stale → `leadv2-persona-meeting` skill
+- Determine task source (user / task-queue / RECOVERY)
+- If queue cache stale → `leadv2-subsession` skill
 > **Optimization:** Run `lead-classify` skill FIRST (Phase 1), then execute EnterWorktree + MCP warm only if class ≥ Standard. This avoids ~2K tokens of worktree setup for Trivial/Light tasks. If classify returns Trivial/Light → jump directly to Phase 4 Build without worktree.
 
 - **Enter worktree:** `EnterWorktree(name="<task-id>")` — creates `.claude/worktrees/<task-id>` on branch `task/<task-id>` off current HEAD. Session cwd switches into it. ALL Phase 1-5 edits and commits happen here. Skip for `Trivial/Light` tasks where deploy isn't expected (worktree adds friction). Skip if user's invocation is `/leadv2 status`/`help`/`meeting`/`questions`/`sessions`.

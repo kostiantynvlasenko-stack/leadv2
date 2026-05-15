@@ -121,7 +121,7 @@ Agent(
 Agent(
   developer, sonnet,
   isolation: "worktree",   # ← parallel-safe checkout, see §2b
-  prompt="Codebase graph project: Users-kostiantyn.vlasenko-Projects-persona-engine
+  prompt="Codebase graph project: ${LEADV2_CODEBASE_PROJECT}
   
   Mission: <plan.steps[1].mission>
   Read docs/handoff/<id>/context.yaml FIRST. Respect decisions and off_limits.

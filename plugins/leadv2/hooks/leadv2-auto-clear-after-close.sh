@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stop hook: prompt for /clear when a leadv2 task just closed.
-# Detects via phase11-passed.flag (m3) or phase8-passed.flag (persona-engine).
+# Detects via phase11-passed.flag or phase8-passed.flag in the task directory.
 set -euo pipefail
 trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 

@@ -48,7 +48,7 @@ Read the pending YAML `question:` field. If it starts with `graph:` — this is 
 - `graph: get_architecture`
 - `graph: query_graph cypher="<Cypher>"`
 
-**Action:** parse → call `mcp__codebase-memory-mcp__<tool>` with `project="Users-kostiantyn.vlasenko-Projects-persona-engine"` → write the JSON/text output into `<qid>-answered.yaml` as `answer:` field → done.
+**Action:** parse → call `mcp__codebase-memory-mcp__<tool>` with `project="${LEADV2_CODEBASE_PROJECT}"` → write the JSON/text output into `<qid>-answered.yaml` as `answer:` field → done.
 
 **Do NOT use AskUserQuestion** for `graph:` questions. Founder shouldn't see these — they're subagent infrastructure.
 

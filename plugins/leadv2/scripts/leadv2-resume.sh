@@ -2,15 +2,6 @@
 # leadv2-resume.sh <task-id>
 # Multi-source status snapshot for a paused task. Reads STATE.md, shows prior notes,
 # checks git status for the current branch.
-#
-# Ported from m3-market/.claude/scripts/leadv2-resume.sh
-# Sanitized for persona-engine conventions:
-#   - Task state in docs/leadv2/tasks/<id>/STATE.md (PE convention)
-#   - Active registry in docs/leadv2/active.yaml
-#   - Stripped: Linear integration (intentionally omitted in PE port)
-#   - Stripped: CircleCI integration (m3-specific)
-#   - Stripped: multi-repo (pf3-backend/environment-platform) loop
-# Linear integration intentionally omitted in PE port.
 set -euo pipefail
 
 [[ $# -lt 1 ]] && { echo "usage: $(basename "$0") <task-id>" >&2; exit 64; }
@@ -19,10 +10,10 @@ TASK_ID="$1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# PE task state convention: docs/leadv2/tasks/<id>/STATE.md
+# Task state convention: docs/leadv2/tasks/<id>/STATE.md
 TASK_DIR="$PROJECT_ROOT/docs/leadv2/tasks/$TASK_ID"
 STATE_FILE="$TASK_DIR/STATE.md"
-# ACTIVE_FILE kept for reference — PE uses docs/leadv2/active.yaml
+# ACTIVE_FILE kept for reference — uses docs/leadv2/active.yaml
 # shellcheck disable=SC2034
 ACTIVE_FILE="$PROJECT_ROOT/docs/leadv2/active.yaml"
 
@@ -53,7 +44,7 @@ echo ""
 echo "--- Git status ---"
 BR="$(git -C "$PROJECT_ROOT" branch --show-current 2>/dev/null || echo '')"
 DIRTY="$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-printf "  %-18s branch=%s dirty=%s\n" "persona-engine:" "${BR:-?}" "$DIRTY"
+printf "  %-18s branch=%s dirty=%s\n" "project:" "${BR:-?}" "$DIRTY"
 
 # === PR status (gh if available) ===
 PR_MANIFEST="$TASK_DIR/pr-manifest.yaml"

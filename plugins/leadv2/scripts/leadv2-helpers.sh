@@ -86,15 +86,8 @@ path_key_map = {
     "leadv2_dir":        "LEADV2_LEADV2_DIR",
     "queue_archive_dir": "LEADV2_QUEUE_ARCHIVE_DIR",
 }
-# Non-path keys — used as-is (host strings, repo paths already absolute)
-str_key_map = {
-    "nik_host":      "LEADV2_NIK_HOST",
-    "nik_repo":      "LEADV2_NIK_REPO",
-    "nik_root":      "LEADV2_NIK_ROOT",
-    "respiro_host":  "LEADV2_RESPIRO_HOST",
-    "respiro_repo":  "LEADV2_RESPIRO_REPO",
-    "respiro_root":  "LEADV2_RESPIRO_ROOT",
-}
+# Non-path keys — for project-specific extensions via state-paths.yaml.
+str_key_map = {}
 out = dict(path_defaults)
 for yk, ek in path_key_map.items():
     if yk in d:
@@ -130,19 +123,9 @@ for ek, val in out.items():
   [[ -z "${_lv2_produced[LEADV2_HANDOFF_DIR]+x}"       ]] && : "${LEADV2_HANDOFF_DIR:=${LEADV2_PROJECT_ROOT}/docs/handoff}"
   [[ -z "${_lv2_produced[LEADV2_LEADV2_DIR]+x}"        ]] && : "${LEADV2_LEADV2_DIR:=${LEADV2_PROJECT_ROOT}/docs/leadv2}"
   [[ -z "${_lv2_produced[LEADV2_QUEUE_ARCHIVE_DIR]+x}" ]] && : "${LEADV2_QUEUE_ARCHIVE_DIR:=${LEADV2_PROJECT_ROOT}/docs/agents/product-owner/queue/_archive}"
-  # VPS vars default to empty (populated via state-paths.yaml in PE; empty in other repos)
-  [[ -z "${_lv2_produced[LEADV2_NIK_HOST]+x}"          ]] && : "${LEADV2_NIK_HOST:=}"
-  [[ -z "${_lv2_produced[LEADV2_NIK_REPO]+x}"          ]] && : "${LEADV2_NIK_REPO:=}"
-  [[ -z "${_lv2_produced[LEADV2_NIK_ROOT]+x}"          ]] && : "${LEADV2_NIK_ROOT:=}"
-  [[ -z "${_lv2_produced[LEADV2_RESPIRO_HOST]+x}"      ]] && : "${LEADV2_RESPIRO_HOST:=}"
-  [[ -z "${_lv2_produced[LEADV2_RESPIRO_REPO]+x}"      ]] && : "${LEADV2_RESPIRO_REPO:=}"
-  [[ -z "${_lv2_produced[LEADV2_RESPIRO_ROOT]+x}"      ]] && : "${LEADV2_RESPIRO_ROOT:=}"
-
   export LEADV2_BOARD_PATH LEADV2_DIALOGUE_PATH LEADV2_QUEUE_PATH \
          LEADV2_LEAD_STATE_PATH LEADV2_HANDOFF_DIR LEADV2_LEADV2_DIR \
-         LEADV2_QUEUE_ARCHIVE_DIR \
-         LEADV2_NIK_HOST LEADV2_NIK_REPO LEADV2_NIK_ROOT \
-         LEADV2_RESPIRO_HOST LEADV2_RESPIRO_REPO LEADV2_RESPIRO_ROOT
+         LEADV2_QUEUE_ARCHIVE_DIR
 }
 
 # ── Codex policy ──────────────────────────────────────────────────────────
@@ -484,43 +467,32 @@ leadv2_codex_ready() {
 # PE values live in state-paths.yaml; other repos leave these keys absent.
 # shellcheck disable=SC2034  # exported for VPS helper callers
 
-# Deploy latest main to both VPS. Returns 0 all-success, 1 partial, 2 all-failed.
-leadv2_deploy_both_vps() {
-  local nik_ok=0 respiro_ok=0
+# Deploy via project-specific override script.
+# Reads .claude/leadv2-overrides/deploy.sh, executes with LEAD_V2_TASK_ID env.
+# Returns deploy.sh's exit code (0 = success). If override missing, returns 2.
+leadv2_deploy_via_override() {
+  local project_root override
+  project_root="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  override="$project_root/.claude/leadv2-overrides/deploy.sh"
 
-  if leadv2_maybe_dry_run_echo "deploy to Nik"; then
-    nik_ok=1
-  else
-    if ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new "$LEADV2_NIK_HOST" "cd '$LEADV2_NIK_REPO' && git fetch && git reset --hard origin/main"; then
-      if ssh -o ConnectTimeout=15 "$LEADV2_NIK_ROOT" "systemctl restart persona-engine.service && systemctl is-active persona-engine.service"; then
-        nik_ok=1
-        echo "[helpers] Nik deploy: ✓"
-      else
-        echo "[helpers] Nik systemctl restart failed" >&2
-      fi
-    else
-      echo "[helpers] Nik git fetch/reset failed" >&2
-    fi
+  if leadv2_maybe_dry_run_echo "deploy via $override"; then
+    return 0
   fi
 
-  if leadv2_maybe_dry_run_echo "deploy to Respiro"; then
-    respiro_ok=1
-  else
-    if ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new "$LEADV2_RESPIRO_HOST" "cd '$LEADV2_RESPIRO_REPO' && git fetch && git reset --hard origin/main"; then
-      if ssh -o ConnectTimeout=15 "$LEADV2_RESPIRO_ROOT" "systemctl restart persona-engine.service && systemctl is-active persona-engine.service"; then
-        respiro_ok=1
-        echo "[helpers] Respiro deploy: ✓"
-      else
-        echo "[helpers] Respiro systemctl restart failed" >&2
-      fi
-    else
-      echo "[helpers] Respiro git fetch/reset failed" >&2
-    fi
+  if [[ ! -x "$override" ]]; then
+    echo "[helpers] deploy override not found or not executable: $override" >&2
+    echo "[helpers] run /leadv2 first to scaffold overrides, then fill in deploy.sh" >&2
+    return 2
   fi
 
-  if [[ $nik_ok -eq 1 && $respiro_ok -eq 1 ]]; then return 0; fi
-  if [[ $nik_ok -eq 0 && $respiro_ok -eq 0 ]]; then return 2; fi
-  return 1
+  if "$override"; then
+    echo "[helpers] deploy: ✓"
+    return 0
+  else
+    local rc=$?
+    echo "[helpers] deploy failed (exit $rc)" >&2
+    return "$rc"
+  fi
 }
 
 # ── Atomic YAML write (PO-057) ────────────────────────────────────────────
@@ -1380,13 +1352,13 @@ leadv2_settings_release() {
   return "$cleanup_rc"
 }
 
-# ── PO QUEUE claim/release wrappers (lane-based, M2: multi-session safety) ─
+# ── task queue claim/release wrappers (lane-based, M2: multi-session safety) ─
 # These call leadv2-queue-claim.sh / leadv2-queue-release.sh using LEADV2_TASK_ID.
 # On successful claim, LEADV2_PO_LANE and LEADV2_PO_ITEM_ID are exported.
 # Source .claude/scripts/leadv2-helpers.sh before using.
 
 leadv2_po_claim() {
-  # Claim the next available PO QUEUE item across all lanes (recovery → action → intelligence).
+  # Claim the next available task queue item across all lanes (recovery → action → intelligence).
   # Optional arg $1: prefer lane name (exact match tried first, then normal order).
   # Outputs: claimed item id on stdout (legacy contract preserved).
   # On success, exports LEADV2_PO_ITEM_ID and LEADV2_PO_LANE, and writes crash-protection sidecar.
@@ -1465,7 +1437,7 @@ leadv2_po_lane_for_id() {
 }
 
 leadv2_po_release() {
-  # Release a previously claimed PO QUEUE item.
+  # Release a previously claimed task queue item.
   # Args: <item_id> [<release_status=done|failed|poison|rejected>] [<lane>] [<reject_reason>]
   # Lane resolution order: $3 if non-empty → $LEADV2_PO_LANE env → leadv2_po_lane_for_id $1 → error.
   # reject_reason ($4) is only meaningful for failed/rejected/poison statuses.
@@ -1515,7 +1487,7 @@ leadv2_po_release() {
   return "$_rel_rc"
 }
 
-# ── PO QUEUE claim sidecar helpers (M2/J3: crash protection) ─────────────
+# ── task queue claim sidecar helpers (M2/J3: crash protection) ─────────────
 # Sidecar dir: docs/agents/product-owner/.claims/
 # Sidecar file: <task_id>.claim  contains: "pid=<pid>\nclaimed_at=<ISO>\n"
 #
@@ -1870,7 +1842,7 @@ if [[ -n "${BASH_VERSION:-}" ]]; then
   export -f leadv2_live_update
   export -f leadv2_status_summary
   export -f leadv2_codex_ready
-  export -f leadv2_deploy_both_vps
+  export -f leadv2_deploy_via_override
   export -f leadv2_task_id
   export -f leadv2_task_dir
   export -f leadv2_state_path

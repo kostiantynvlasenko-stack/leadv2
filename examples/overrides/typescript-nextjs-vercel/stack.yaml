@@ -1,0 +1,5 @@
+lang: typescript
+db: supabase             # or postgres, mysql, none — set per project
+hosting: vercel
+ci: github-actions
+deploy_method: vercel-deploy

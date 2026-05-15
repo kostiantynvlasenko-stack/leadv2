@@ -21,7 +21,7 @@ except Exception:
 
 # Match codex adversarial-review launches
 if [[ "$CMD" == *"codex-task.sh adversarial-review"* ]] || [[ "$CMD" == *"codex-task.sh "* && "$CMD" == *"adversarial"* ]]; then
-  GATE="/Users/kostiantyn.vlasenko/Projects/persona-engine/.claude/scripts/leadv2-codex-round-gate.sh"
+  GATE="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/.claude/scripts/leadv2-codex-round-gate.sh"
   if [[ -x "$GATE" ]]; then
     if ! bash "$GATE" "${LEADV2_TASK_ID:-}" 2>&1; then
       python3 - <<'PYEOF'

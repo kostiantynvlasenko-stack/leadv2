@@ -50,20 +50,20 @@ verify-probe.sh --timeout 180 --corroborate /tmp/verify-<task-id>.yaml
 Config format:
 ```yaml
 positive:
-  type: log-grep          # signal-file | log-grep | http-check | supabase-check
-  host: persona@<ip>
-  path: /home/persona/logs/cycle.log
-  pattern: "cycle_complete|action_published"
+  type: log-grep          # signal-file | log-grep | http-check
+  host: <user>@<host>
+  path: <your-app-log-path>
+  pattern: "<expected-success-signal>"
   window_min: 5
 no_regression:
   - type: no-5xx-spike    # checks nginx access log for 5xx spike vs prior window
-    host: persona@<ip>
+    host: <user>@<host>
     path: /var/log/nginx/access.log
     window_min: 10
     threshold_multiplier: 2.0
   - type: error-log-quiet # checks app log error count recent vs baseline
-    host: persona@<ip>
-    path: /home/persona/logs/cycle.log
+    host: <user>@<host>
+    path: <your-app-log-path>
     window_min: 10
     threshold_multiplier: 2.0
     error_pattern: "(ERROR|CRITICAL|Traceback|Exception)"  # optional, shown is default
@@ -91,7 +91,7 @@ Compose probe command based on type:
 
 For **log-grep on VPS**, wrap via ssh (both VPS in parallel or whichever is relevant):
 ```bash
-ssh <vps> "tail -F /home/persona/logs/<file>" | verify-probe.sh --log-grep /dev/stdin "<pattern>" --timeout <N> \
+ssh <host> "tail -F <your-app-log-path>" | verify-probe.sh --log-grep /dev/stdin "<pattern>" --timeout <N> \
   --result-file "docs/handoff/<id>/verify-probe-result.yaml" &
 ```
 
@@ -161,7 +161,7 @@ If no override exists: escalate via `leadv2-founder-input` with message:
 **Publish cycle log grep:**
 ```
 log-grep on host:
-  path: /home/persona/logs/cycle.log     # example — use stack.yaml vps.nik.log
+  path: <your-app-log-path>     # example — fill from .claude/leadv2-overrides/stack.yaml
   pattern: "cycle_complete|action_published"
   timeout: 3600
 ```

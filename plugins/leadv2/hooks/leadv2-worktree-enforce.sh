@@ -19,7 +19,7 @@ trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 # Resolve active task — exit if no live session
 ACTIVE_YAML=""
 for candidate in "$PWD/docs/leadv2/active.yaml" \
-                 "/Users/kostiantyn.vlasenko/Projects/persona-engine/docs/leadv2/active.yaml"; do
+                 "${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/docs/leadv2/active.yaml"; do
   [[ -f "$candidate" ]] && ACTIVE_YAML="$candidate" && break
 done
 [[ -n "$ACTIVE_YAML" ]] || exit 0
@@ -84,7 +84,7 @@ case "$FILE_PATH" in
   file: $FILE_PATH
 
 All code edits during a /leadv2 task MUST happen in the per-task worktree:
-  /Users/kostiantyn.vlasenko/Projects/persona-engine/.claude/worktrees/${LIVE_TASK}/...
+  <repo>/.claude/worktrees/${LIVE_TASK}/...
 
 Why: concurrent leadv2 tasks share main repo → race conditions, parallel-session diff overwrites.
 

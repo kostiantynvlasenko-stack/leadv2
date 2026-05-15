@@ -43,7 +43,7 @@ except Exception:
     print('')
 " 2>/dev/null || true)"
 
-[[ -z "$PROJECT_ROOT" ]] && PROJECT_ROOT="${PROJECT_ROOT:-/Users/kostiantyn.vlasenko/Projects/persona-engine}"
+[[ -z "$PROJECT_ROOT" ]] && PROJECT_ROOT="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
 # Bust per-task MCP cache files (docs/handoff/<id>/mcp-cache/*.yaml)
 HANDOFF_BASE="$PROJECT_ROOT/docs/handoff"

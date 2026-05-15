@@ -30,7 +30,7 @@ trap '_hook_profile_end; exit 0' EXIT
 if [[ -z "${LEADV2_TASK_ID:-}" ]]; then
   CWD_ACTIVE=""
   for candidate in "$PWD/docs/leadv2/active.yaml" \
-                   "/Users/kostiantyn.vlasenko/Projects/persona-engine/docs/leadv2/active.yaml"; do
+                   "${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/docs/leadv2/active.yaml"; do
     [[ -f "$candidate" ]] && CWD_ACTIVE="$candidate" && break
   done
   [[ -z "$CWD_ACTIVE" ]] && exit 0

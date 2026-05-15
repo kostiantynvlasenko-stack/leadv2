@@ -1,19 +1,9 @@
 #!/usr/bin/env bash
 # leadv2-task-init-pattern.sh <task-id>
 # Creates per-task STATE.md, registers in docs/leadv2/active.yaml.
-# PATTERN VARIANT: reference implementation for PE task init conventions.
-# PE's actual intake is handled by the /leadv2 orchestrator — use this script
+# PATTERN VARIANT: reference implementation for task init conventions.
+# The actual intake is handled by the /leadv2 orchestrator — use this script
 # for manual init or testing of the init flow.
-#
-# Ported from m3-market/.claude/scripts/leadv2-task-init.sh
-# Sanitized for persona-engine conventions:
-#   - Task-id regex: LEADV2|LOCAL (PE) — NOT PENG (m3/Linear)
-#   - Task state dir: docs/leadv2/tasks/<id>/ (PE convention)
-#   - Active registry: docs/leadv2/active.yaml (PE convention)
-#   - Template: docs/leadv2/tasks/.template/STATE.md (PE convention)
-#   - Stripped: Linear API integration
-#   - Stripped: CircleCI integration
-# Linear integration intentionally omitted in PE port.
 set -euo pipefail
 
 usage() {

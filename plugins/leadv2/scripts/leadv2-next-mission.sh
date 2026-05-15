@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # leadv2-next-mission.sh — print the next pending+unclaimed mission ID + path.
-# Multi-session safe: under flock on docs/leadv2/.campaign-queue.lock.
+# Multi-session safe: under flock on docs/leadv2/.task-queue.lock
 #
 # Usage:
 #   leadv2-next-mission.sh                    # prints "<id>\t<mission_file>"
@@ -15,8 +15,8 @@
 
 set -euo pipefail
 
-QUEUE="docs/leadv2/campaign-queue.yaml"
-LOCK_PATH="docs/leadv2/.campaign-queue.lock"
+QUEUE="${LEADV2_TASK_QUEUE:-docs/leadv2/tasks.yaml}"
+LOCK_PATH="docs/leadv2/.task-queue.lock"
 [[ -f "$LOCK_PATH" ]] || : > "$LOCK_PATH"
 JSON="false"
 CLAIM="false"
@@ -87,7 +87,7 @@ if "$CLAIM" == "true":
     # Use parent shell PID (lead session), not ephemeral python helper PID.
     eligible["claim_pid"] = int(os.environ.get("LEADV2_LEAD_PID", os.getppid()))
     eligible["claimed_at"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".campaign-queue.", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".queue.", suffix=".tmp")
     with os.fdopen(fd, "w") as f:
         yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
     os.replace(tmp, p)

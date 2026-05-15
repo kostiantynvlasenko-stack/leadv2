@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# leadv2-mark-mission.sh — update a mission's fields in campaign-queue.yaml.
-# Multi-session safe: all mutations under flock on docs/leadv2/.campaign-queue.lock
+# leadv2-mark-mission.sh — update a mission's fields in the campaign queue.
+# Multi-session safe: all mutations under flock on docs/leadv2/.task-queue.lock
 #
 # Usage:
 #   leadv2-mark-mission.sh <mission-id> --status STATE [--deliverable PATH] [--review STATE] [--findings PATH] [--mission-file PATH] [--notes TEXT] [--claim] [--release]
@@ -10,8 +10,8 @@
 
 set -euo pipefail
 
-QUEUE="docs/leadv2/campaign-queue.yaml"
-LOCK_PATH="docs/leadv2/.campaign-queue.lock"
+QUEUE="${LEADV2_TASK_QUEUE:-docs/leadv2/tasks.yaml}"
+LOCK_PATH="docs/leadv2/.task-queue.lock"
 mkdir -p "$(dirname "$LOCK_PATH")"
 [[ -f "$LOCK_PATH" ]] || : > "$LOCK_PATH"
 [[ -f "$QUEUE" ]] || { echo "ERROR: $QUEUE not found" >&2; exit 1; }
@@ -110,7 +110,7 @@ if "$RELEASE" == "true":
     for k in ("claimed_by", "claim_pid", "claimed_at"):
         target.pop(k, None)
 
-fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".campaign-queue.", suffix=".tmp")
+fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".queue.", suffix=".tmp")
 try:
     with os.fdopen(fd, "w") as f:
         yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)

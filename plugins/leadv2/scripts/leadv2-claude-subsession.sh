@@ -2,7 +2,7 @@
 # .claude/scripts/leadv2-claude-subsession.sh
 #
 # Drop-in wrapper around ~/.claude/scripts/claude-subsession.sh that enables
-# tool-output compression for /leadv2 persona-meeting and long subsessions.
+# tool-output compression for /leadv2 subsessions.
 #
 # Usage: identical to claude-subsession.sh — all arguments are forwarded.
 #

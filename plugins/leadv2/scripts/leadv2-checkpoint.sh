@@ -8,8 +8,8 @@
 
 set -euo pipefail
 
-QUEUE="docs/leadv2/campaign-queue.yaml"
-LOCK_PATH="docs/leadv2/.campaign-queue.lock"
+QUEUE="${LEADV2_TASK_QUEUE:-docs/leadv2/tasks.yaml}"
+LOCK_PATH="docs/leadv2/.task-queue.lock"
 [[ -f "$LOCK_PATH" ]] || : > "$LOCK_PATH"
 PRINT_PATH="false"
 [[ "${1:-}" == "--print" ]] && PRINT_PATH="true"
@@ -69,7 +69,7 @@ print()
 print("## Resume in fresh /leadv2 session — paste this")
 print()
 print("> Read `docs/leadv2/CAMPAIGN_RESUME.md`. Skip standard /leadv2 PO/BOARD/RECOVERY")
-print("> reads — campaign mode only. Read `docs/leadv2/campaign-queue.yaml` and the latest")
+print("> reads — campaign mode only. Read the campaign queue file and the latest")
 print(f"> SESSION-RESUME at `{os.environ['RESUME_PATH']}`. Run")
 print("> `bash .claude/scripts/leadv2-next-mission.sh --claim` to claim and dispatch the next mission.")
 print()
@@ -136,7 +136,7 @@ while True:
 p = Path(os.environ["QUEUE"])
 data = yaml.safe_load(p.read_text())
 data["checkpoint_at"] = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=2))).strftime("%Y-%m-%dT%H:%M+02:00")
-fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".campaign-queue.", suffix=".tmp")
+fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".queue.", suffix=".tmp")
 with os.fdopen(fd, "w") as f:
     yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
 os.replace(tmp, p)

@@ -4,10 +4,12 @@
 set -euo pipefail
 trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 
+PROJECT_ROOT="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+
 ACTIVE_YAML=""
 for candidate in \
-  "/Users/kostiantyn.vlasenko/Projects/persona-engine/docs/leadv2/active.yaml" \
-  "/Users/kostiantyn.vlasenko/MythicalGames/m3-market/docs/leadv2/active.yaml"; do
+  "$PWD/docs/leadv2/active.yaml" \
+  "$PROJECT_ROOT/docs/leadv2/active.yaml"; do
   [[ -f "$candidate" ]] && ACTIVE_YAML="$candidate"
   [[ -z "$ACTIVE_YAML" ]] || python3 - "$ACTIVE_YAML" <<'PYEOF'
 import yaml, sys, os

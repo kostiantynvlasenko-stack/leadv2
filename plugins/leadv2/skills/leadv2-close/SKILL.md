@@ -150,9 +150,9 @@ Never auto-run `/compact` or `/clear` — only suggest. Founder decides.
 
 Emit the line to chat as the LAST message of Close phase, after cost log. Do NOT write it into `LEAD_V2_STATE.md` (it's ephemeral advice, not state).
 
-### Step 7b. Release PO QUEUE item (if task came from QUEUE)
+### Step 7b. Release task queue item (if task came from QUEUE)
 
-If this task was sourced from the PO QUEUE, release the claimed item now.
+If this task was sourced from the task queue, release the claimed item now.
 `TASK_OUTCOME` is set earlier in close to `done` (success path) or `failed` (recovery path).
 
 `LEADV2_PO_LANE` is exported by `leadv2_po_claim` at intake — the release resolves the lane automatically from this env var.

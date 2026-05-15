@@ -15,7 +15,7 @@ set -euo pipefail
 trap 'exit 0' ERR
 
 HOOK_NAME="leadv2-schema-audit-pre-gate"
-REPO="/Users/kostiantyn.vlasenko/Projects/persona-engine"
+REPO="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
 # ── PO-064: profiling ───────────────────────────────────────────────────────
 _HOOK_START_MS=0

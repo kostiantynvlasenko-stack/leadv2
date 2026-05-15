@@ -37,7 +37,7 @@ BASE_NAME="${MISSION_SLUG%-FIX}"
 cat > "$MISSION_PATH" <<HEADER
 # Mission ${MISSION_SLUG}: Address Codex ${BASE_NAME} review findings
 
-You are the \`developer\` agent. Codebase graph project: \`Users-kostiantyn.vlasenko-Projects-persona-engine\`.
+You are the \`developer\` agent. Codebase graph project: \`${LEADV2_CODEBASE_PROJECT}\`.
 
 ## Goal
 

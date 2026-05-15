@@ -1,0 +1,11 @@
+lang: python
+db: supabase
+hosting: hetzner-vps
+ci: github-actions
+deploy_method: systemd-bash
+
+# Example tested with:
+# - Python 3.12 + uv
+# - Supabase managed Postgres
+# - Hetzner CX21 VPS running systemd unit
+# - GitHub Actions for lint + test on PR

@@ -1,8 +1,9 @@
-# ~/.claude/agents-shared/ — Shared Cross-Cutting Agents
+# Shared Cross-Cutting Agents
 
-Built from persona-engine via install-leadv2.sh --init-agents on 2026-05-12.
+Project-specific schema (DB tables, columns, invariants) lives in
+`.claude/leadv2-overrides/extensions.md`.
 
-Shared agents: critic architect security-auditor
+The architect agent reads that file to understand DB structure and domain
+conventions. Keep it up to date whenever schema changes are made.
 
-See PE .claude/agents-shared/SCHEMA.md (if exists) for full portability filter results and
-rationale. Run --init-agents --force to refresh.
+Shared agents: critic, architect, security-auditor.

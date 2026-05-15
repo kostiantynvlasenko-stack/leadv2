@@ -172,7 +172,7 @@ Write to docs/handoff/<id>/architect.md (OVERWRITE with recovery output), format
 Max 400 words. Last line: DELIVERABLE_COMPLETE.
 
 Skills active: plan-review, devils-advocate, systematic-debugging, leadv2-subagent-protocol.
-Codebase graph project: Users-kostiantyn.vlasenko-Projects-persona-engine
+Codebase graph project: ${LEADV2_CODEBASE_PROJECT}
 "
 )
 ```

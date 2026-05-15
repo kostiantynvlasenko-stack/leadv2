@@ -4,8 +4,7 @@
 # writes a single Markdown block the developer agent reads instead of opening each file.
 # Goal: subagent reads 1 patterns file → writes code. No exploratory reads.
 #
-# Ported from m3-market/.claude/scripts/leadv2-extract-patterns.sh
-# Sanitized for persona-engine conventions.
+# Generic utility — no project-specific assumptions.
 set -euo pipefail
 
 [[ $# -lt 2 ]] && { echo "usage: $(basename "$0") <output.md> <file1> [file2 ...]" >&2; exit 64; }
