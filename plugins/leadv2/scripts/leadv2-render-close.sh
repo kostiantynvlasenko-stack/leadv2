@@ -20,12 +20,13 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 export LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT}}"
 cd "$PROJECT_ROOT"
 
 # shellcheck source=leadv2-helpers.sh
-source "${PROJECT_ROOT}/.claude/scripts/leadv2-helpers.sh"
+source "${SCRIPT_DIR}/leadv2-helpers.sh"
 _lv2_load_paths
 
 log()         { printf -- '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }

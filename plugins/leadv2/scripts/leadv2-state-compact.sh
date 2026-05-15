@@ -14,11 +14,15 @@
 
 set -euo pipefail
 
-root="${1:-$(pwd)}"
-state_md="$root/docs/LEAD_V2_STATE.md"
-active_yaml="$root/docs/leadv2/active.yaml"
-po_state="$root/docs/agents/product-owner/STATE.md"
-queue_claim_sh="$root/.claude/scripts/leadv2-queue-claim.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="${1:-${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+
+# Allow .claude/leadv2-overrides/state-paths.yaml to redirect.
+state_md="${LEADV2_LEAD_STATE_PATH:-$root/docs/LEAD_V2_STATE.md}"
+leadv2_dir="${LEADV2_LEADV2_DIR:-$root/docs/leadv2}"
+active_yaml="$leadv2_dir/active.yaml"
+po_state="${LEADV2_DIALOGUE_PATH:-$root/docs/agents/product-owner/STATE.md}"
+queue_claim_sh="$SCRIPT_DIR/leadv2-queue-claim.sh"
 
 echo "=== HEAD ==="
 git -C "$root" log -1 --oneline 2>/dev/null || echo "(not a git repo)"

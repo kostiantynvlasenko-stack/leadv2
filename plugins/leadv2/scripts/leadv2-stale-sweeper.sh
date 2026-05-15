@@ -14,7 +14,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}}"
+LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_ROOT:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}}"
 
 # Source registry for mark_stale op
 # shellcheck source=leadv2-active-registry.sh
@@ -28,9 +28,10 @@ if [[ "${1:-}" == "--non-interactive" ]] || [[ ! -t 0 ]]; then
   INTERACTIVE=false
 fi
 
-YAML_FILE="${LEADV2_PROJECT_ROOT}/docs/leadv2/active.yaml"
-SPAWNED_DIR="${LEADV2_PROJECT_ROOT}/docs/leadv2/spawned"
-BUDGET_YAML="${LEADV2_PROJECT_ROOT}/docs/leadv2/budget.yaml"
+_lv2_dir="${LEADV2_LEADV2_DIR:-${LEADV2_PROJECT_ROOT}/docs/leadv2}"
+YAML_FILE="${_lv2_dir}/active.yaml"
+SPAWNED_DIR="${_lv2_dir}/spawned"
+BUDGET_YAML="${_lv2_dir}/budget.yaml"
 QUOTA_SCRIPT="${SCRIPT_DIR}/leadv2-quota-status.sh"
 STALE_THRESHOLD_SEC=7200  # 2 hours
 

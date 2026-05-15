@@ -131,24 +131,23 @@ for ek, val in out.items():
 # ── Codex policy ──────────────────────────────────────────────────────────
 # Reads <repo>/.claude/leadv2-overrides/codex-policy.yaml:
 #   codex_enabled: true | false
-# Returns 0 if Codex is allowed in this repo, 1 if banned.
-# DEFAULT: true (Codex allowed) if file is missing — backwards compatible.
-# m3-market MUST set codex_enabled: false (corp policy).
+# Returns 0 if Codex is allowed in this repo, 1 if missing/disabled.
+# DEFAULT: false (disabled) if file is missing — opt-in only.
 _lv2_codex_enabled() {
   : "${LEADV2_PROJECT_ROOT:=$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
   local _policy="${LEADV2_PROJECT_ROOT}/.claude/leadv2-overrides/codex-policy.yaml"
   if [[ ! -f "$_policy" ]]; then
-    return 0  # default: enabled
+    return 1  # default: disabled
   fi
   local _val
   _val=$(python3 -c "
 import sys, yaml
 try:
     d = yaml.safe_load(open(sys.argv[1])) or {}
-    print('true' if d.get('codex_enabled', True) else 'false')
+    print('true' if d.get('codex_enabled', False) else 'false')
 except Exception:
-    print('true')
-" "$_policy" 2>/dev/null || echo "true")
+    print('false')
+" "$_policy" 2>/dev/null || echo "false")
   [[ "$_val" == "true" ]]
 }
 

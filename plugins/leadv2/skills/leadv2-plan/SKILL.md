@@ -16,11 +16,11 @@ allowed-tools:
 
 ## Protocol
 
-### 1a. Graph discovery — lead pre-populates (MANDATORY)
+### 1a. Graph discovery — lead pre-populates (recommended)
 
 **Only lead (main session) has MCP access.** Subagents in `claude -p` cannot call `search_graph` / `trace_path` / `get_code_snippet`. If they try, they fall back to Grep (slow, expensive, incomplete).
 
-Before writing mission file, lead runs from main session:
+If `codebase-memory-mcp` is registered, before writing mission file, lead runs from main session:
 
 ```
 mcp__codebase-memory-mcp__search_graph(
@@ -42,7 +42,9 @@ mcp__codebase-memory-mcp__get_architecture(
 )
 ```
 
-Pack results into `/tmp/mission-<id>.md` under `## Graph context` section. Give subagents **already-cooked** structural knowledge so they don't re-discover.
+Pack results into `/tmp/mission-<id>.md` under `## Graph context` section.
+
+**Fallback when MCP is not installed:** use `Grep`/`Glob` for the top mission keywords, build a manual symbol map (~5-10 functions/classes most relevant), and put that in `## Graph context` instead. Quality drops noticeably for cross-file architectural analysis; consider installing `codebase-memory-mcp` for Heavy tasks (see docs/INSTALLATION.md).
 
 ### 1a-2. Agent priors (read before writing mission)
 

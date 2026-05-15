@@ -155,16 +155,16 @@ For each phase: trigger the named skill, run the inline housekeeping, exit when 
 - Write per-task state: `docs/leadv2/tasks/<id>/STATE.md` — `status: active, phase: intake`. `docs/LEAD_V2_STATE.md` is auto-regenerated via `leadv2_active_render_index` (DO NOT EDIT directly).
 
 ## Phase 1: CLASSIFY
-- Run `lead-classify` skill — write to LEAD_V2_STATE classification
-- Trivial/Light → skip to Phase 4 Build directly. Standard+/Heavy → continue
-- Run `leadv2-rag-intake` skill (non-blocking) — embeds task vs history, writes `prior-art.yaml`
+- **Classify task inline** (no separate skill in v0.1): assign one of `Trivial` (≤1 line / typo / comment), `Light` (≤30 lines, single file, no migrations), `Standard` (multi-file or schema-adjacent), `Heavy` (architectural / cross-cutting / risky). Write `class:` to `docs/leadv2/tasks/<id>/STATE.md`.
+- Trivial/Light → skip to Phase 4 Build directly. Standard+/Heavy → continue.
+- (v0.2: RAG intake skill — currently inline. For now: skim `docs/leadv2/immune-memory/` for similar past failures and inject 1-3 relevant entries into `context.yaml.prior_art`.)
 - Run pre-cost estimate: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-cost-estimate.sh" --task-id <id> --main-model "$LEADV2_MAIN_MODEL"`. If `within_cap: false` → escalate Tier B before Plan.
 
 ## Phase 2: PLAN — parallel brain triad
 **Route first:** `eval "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase plan --step <step> --task-id <id> --class <class> --signals '{...}' 2>/dev/null)" || true` (exit 2 = fall through to class-based default).
 
 **Single message, parallel spawns:**
-1. `leadv2-codex-planner.sh --task-id <id> --mission-file /tmp/mission-<id>.md --effort <high|xhigh>` — background, **only if** `bash ~/.claude/scripts/codex-task.sh status >/dev/null 2>&1` exits 0. If unavailable → skip, Agent(critic) covers Stage 1.
+1. `${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-codex-planner.sh --task-id <id> --mission-file /tmp/mission-<id>.md --effort <high|xhigh>` — background, **only if** `command -v codex-task.sh >/dev/null 2>&1 && codex-task.sh status >/dev/null 2>&1` exits 0 (requires Codex CLI installed; see docs/INSTALLATION.md). If unavailable → skip, Agent(critic) covers Stage 1.
 2. `Agent(subagent_type=architect, model=opus, run_in_background=true)` — if Heavy or arch keyword (NOT claude-subsession)
 3. `Agent(subagent_type=critic, model=opus, run_in_background=true)` — if class ≥ Standard; use `model=sonnet` when Codex already fired and task is Standard (not Heavy)
 
@@ -172,7 +172,7 @@ For each phase: trigger the named skill, run the inline housekeeping, exit when 
 ```bash
 # CODEX_PLAN_ID = actual task-id printed by leadv2-codex-planner.sh
 Monitor(
-  command="for i in $(seq 1 20); do bash ~/.claude/scripts/codex-task.sh status \"$CODEX_PLAN_ID\" 2>/dev/null | grep -q 'Phase: done' && { echo \"CODEX_PLAN_DONE: $CODEX_PLAN_ID\"; exit 0; }; sleep 30; done; echo \"CODEX_MONITOR_TIMEOUT: $CODEX_PLAN_ID\"; exit 1",
+  command="for i in $(seq 1 20); do codex-task.sh status \"$CODEX_PLAN_ID\" 2>/dev/null | grep -q 'Phase: done' && { echo \"CODEX_PLAN_DONE: $CODEX_PLAN_ID\"; exit 0; }; sleep 30; done; echo \"CODEX_MONITOR_TIMEOUT: $CODEX_PLAN_ID\"; exit 1",
   description="Codex planner $CODEX_PLAN_ID completion",
   timeout_ms=600000,
   persistent=false
@@ -199,7 +199,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-compact-trigger.sh" --phase post-plan
 All plan artifacts are on disk (architect.md, context.yaml, codex-plan-result.md). Safe to compact — Phase 4 reads from files, not from context.
 
 ## Phase 3: GATE 1 — the only gate
-Run `lead-gate-check` (gate: 1). Blocking:[] required.
+**Verify plan completeness inline** (no separate skill in v0.1): `context.yaml` must have `decisions[]` non-empty, `off_limits[]` populated (even if empty list is intentional), `plan.steps[]` with ≥1 step, and a risk summary. Block Gate 1 if any are missing.
 
 **Gate 1 mechanism** (uses `leadv2-gate1-prompt.sh`):
 - Non-Heavy: auto-accept after LEADV2_GATE1_AUTO_ACCEPT_SEC (default 5s)
@@ -207,7 +207,7 @@ Run `lead-gate-check` (gate: 1). Blocking:[] required.
 - Standard interactive: one terse line + 60s timeout → auto-accept.
 - `LEADV2_DRY_RUN=1`: immediate auto-accept, print plan only.
 
-`bash .claude/scripts/leadv2-gate1-prompt.sh "$LEADV2_TASK_ID" "$CLASS" "$PLAN_SUMMARY"`
+`bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-gate1-prompt.sh" "$LEADV2_TASK_ID" "$CLASS" "$PLAN_SUMMARY"`
 Exit 0 = accepted, 1 = declined → iterate plan once or pivot, 2 = auto-accepted.
 
 Update `docs/leadv2/tasks/<id>/STATE.md` gate_1.status=confirmed. `leadv2_active_update_phase <id> build`.
@@ -222,15 +222,15 @@ Update `docs/leadv2/tasks/<id>/STATE.md` gate_1.status=confirmed. `leadv2_active
 Parallel Agent spawns per `context.yaml plan.parallel_groups:` — developer / postgres-pro / frontend-developer. **All spawns `run_in_background=true`.** Monitor via task-notification. **Verify diffs with `git diff` — don't trust DONE self-report.** Stuck Sonnet → escalate to claude-subsession or opus architect.
 
 **Post-build (BEFORE Phase 5):**
-- `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-deliverable-routing-check.sh" "docs/handoff/$LEADV2_TASK_ID"` — exit 2 → resolve "Group B should pick up" punts before review opens. Either route to a group OR file QUEUE follow-up id and add to groups-contract.md.deferred_or_followup.
+- (v0.2: deliverable-routing-check script — currently manual. Read `docs/handoff/<id>/build-*-output.md` files and check `external_callers_to_update` from groups-contract for any "punted to Group B" items. Resolve before opening review.)
 - `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-negative-memory-trigger-scan.sh" --task-id "$LEADV2_TASK_ID"` — exit 2 → diff matched a regex-tagged negative memory entry; surface NM-id + run leadv2-negative-memory unblock check before commit.
-- **After Build (class ≥ Standard, .py touched):** `leadv2-test-synthesis` skill. Coverage < 50% → circuit break.
+- **After Build (class ≥ Standard, source files touched):** run the project's test suite (`pytest` / `go test` / `pnpm test` per `stack.yaml`). Coverage < 50% on changed lines → circuit break and add tests before Phase 5. (v0.2: dedicated `leadv2-test-synthesis` skill.)
 
 ## Phase 5: REVIEW — adversarial loop
 **Route first:** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase review --step <step>`. `model=skip` → no review (CX-03 light_low_risk). `model=codex-adversarial` → Codex only. `model=codex+opus-critic+security-auditor` → full triad.
 
 Parallel in one message:
-- `~/.claude/scripts/codex-task.sh adversarial-review --wait --base main` — background, always when not skipped
+- `codex-task.sh adversarial-review --wait --base main` — background, always when not skipped (requires Codex CLI on PATH)
 - Agent(critic, opus) via claude-subsession — if safety/auth/RLS/publish touched
 - Agent(security-auditor, sonnet) via Agent tool — if secrets/webhook/auth touched
 
