@@ -99,7 +99,7 @@ Rules:
 | `/leadv2 questions` | List all pending async questions across all active tasks |
 | `/leadv2 sessions` | Show docs/leadv2/active.yaml sessions table |
 
-**Reply mode** (`/leadv2 reply <q-id> <option>`): Detect if args start with `reply`. Extract `<q-id>` and `<option>`. Resolve task-id via content-based grep: `grep -rl "qid:.*${qid}" docs/handoff/*/questions-async/*-pending.yaml | head -1`. If ambiguous (multiple matches) or not found, hard-fail with Russian error. Call `bash .claude/scripts/leadv2-reply.sh --task-id <task_id> <q-id> <option>`. Exit immediately — do NOT enter 9-phase loop.
+**Reply mode** (`/leadv2 reply <q-id> <option>`): Detect if args start with `reply`. Extract `<q-id>` and `<option>`. Resolve task-id via content-based grep: `grep -rl "qid:.*${qid}" docs/handoff/*/questions-async/*-pending.yaml | head -1`. If ambiguous (multiple matches) or not found, hard-fail with Russian error. Call `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-reply.sh" --task-id <task_id> <q-id> <option>`. Exit immediately — do NOT enter 9-phase loop.
 
 **Pulse-mode** (`LEADV2_PULSE_MODE=1`): **On by default** (project env sets `LEADV2_PULSE_MODE=1`). Disable with `LEADV2_PULSE_MODE=0`.
 
@@ -127,8 +127,8 @@ Each phase entry calls `leadv2_pulse_log "<phase>" "<one-line summary>"` — emi
 For each phase: trigger the named skill, run the inline housekeeping, exit when condition met. Detailed bash snippets, schemas, and recovery branches → `docs/leadv2-guide.md §9-phase flow`.
 
 ## Phase 0: INTAKE
-- **Pre-flight git-log check (BEFORE worktree create):** `bash .claude/scripts/leadv2-preflight-gitlog.sh "$LEADV2_TASK_ID"`. Exit 2 → surface oneline commits to founder via single AskUserQuestion (`already-shipped → admin-close` vs `continue anyway`). Saves the entire setup cycle on already-landed tasks.
-- **Parallel-session collision sniff:** `bash .claude/scripts/leadv2-collision-check.sh`. Exit 2 → log warning into pulse + plan rebase-flow vs ff-merge BEFORE EnterWorktree.
+- **Pre-flight git-log check (BEFORE worktree create):** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-preflight-gitlog.sh" "$LEADV2_TASK_ID"`. Exit 2 → surface oneline commits to founder via single AskUserQuestion (`already-shipped → admin-close` vs `continue anyway`). Saves the entire setup cycle on already-landed tasks.
+- **Parallel-session collision sniff:** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-collision-check.sh"`. Exit 2 → log warning into pulse + plan rebase-flow vs ff-merge BEFORE EnterWorktree.
 - **Immediately after user picks a task** (before any other work): write provisional entry to `docs/leadv2/active.yaml` so other sessions see it claimed:
   ```bash
   python3 -c "
@@ -141,12 +141,12 @@ For each phase: trigger the named skill, run the inline housekeeping, exit when 
     yaml.dump(d,open(f,'w'))
   " "$LEADV2_TASK_ID"
   ```
-- `LEADV2_MAIN_MODEL=$(bash .claude/scripts/leadv2-main-model-check.sh)` — pick orchestrator model
-- `source .claude/scripts/leadv2-helpers.sh && leadv2_lock_acquire || exit` — per-task lock (delegates to `leadv2_active_register` in active.yaml)
-- `bash .claude/scripts/leadv2-stale-sweeper.sh` — surface stale sessions at startup; ghost-spawn reconciliation
+- `LEADV2_MAIN_MODEL=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-main-model-check.sh")` — pick orchestrator model
+- `source "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-helpers.sh" && leadv2_lock_acquire || exit` — per-task lock (delegates to `leadv2_active_register` in active.yaml)
+- `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-stale-sweeper.sh"` — surface stale sessions at startup; ghost-spawn reconciliation
 - `leadv2_threshold_warn_if_inverted || true` — sanity check
 - `leadv2_live_update intake startup` — LIVE tracker
-- `export LEADV2_TASK_ID=<id> && .claude/scripts/leadv2-mcp-cache.sh warm <id>` — warm MCP cache, then dispatch standard queries (detect_changes, get_architecture) and write results via `leadv2-mcp-cache.sh set`
+- `export LEADV2_TASK_ID=<id> && "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-mcp-cache.sh" warm <id>` — warm MCP cache, then dispatch standard queries (detect_changes, get_architecture) and write results via `leadv2-mcp-cache.sh set`
 - Determine task source (user / task-queue / RECOVERY)
 - If queue cache stale → `leadv2-subsession` skill
 > **Optimization:** Run `lead-classify` skill FIRST (Phase 1), then execute EnterWorktree + MCP warm only if class ≥ Standard. This avoids ~2K tokens of worktree setup for Trivial/Light tasks. If classify returns Trivial/Light → jump directly to Phase 4 Build without worktree.
@@ -158,10 +158,10 @@ For each phase: trigger the named skill, run the inline housekeeping, exit when 
 - Run `lead-classify` skill — write to LEAD_V2_STATE classification
 - Trivial/Light → skip to Phase 4 Build directly. Standard+/Heavy → continue
 - Run `leadv2-rag-intake` skill (non-blocking) — embeds task vs history, writes `prior-art.yaml`
-- Run pre-cost estimate: `bash .claude/scripts/leadv2-cost-estimate.sh --task-id <id> --main-model "$LEADV2_MAIN_MODEL"`. If `within_cap: false` → escalate Tier B before Plan.
+- Run pre-cost estimate: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-cost-estimate.sh" --task-id <id> --main-model "$LEADV2_MAIN_MODEL"`. If `within_cap: false` → escalate Tier B before Plan.
 
 ## Phase 2: PLAN — parallel brain triad
-**Route first:** `eval "$(bash .claude/scripts/leadv2-router.sh --phase plan --step <step> --task-id <id> --class <class> --signals '{...}' 2>/dev/null)" || true` (exit 2 = fall through to class-based default).
+**Route first:** `eval "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase plan --step <step> --task-id <id> --class <class> --signals '{...}' 2>/dev/null)" || true` (exit 2 = fall through to class-based default).
 
 **Single message, parallel spawns:**
 1. `leadv2-codex-planner.sh --task-id <id> --mission-file /tmp/mission-<id>.md --effort <high|xhigh>` — background, **only if** `bash ~/.claude/scripts/codex-task.sh status >/dev/null 2>&1` exits 0. If unavailable → skip, Agent(critic) covers Stage 1.
@@ -181,20 +181,20 @@ Monitor(
 On `CODEX_PLAN_DONE`: read `cx-tail.sh` on the log file and proceed to Stage 2 critic **in the same turn**.
 On `CODEX_MONITOR_ERROR` or timeout: read the log file directly with `Read offset=-100` to extract whatever findings exist; proceed anyway — do not block.
 
-Wait via Monitor on output files. When complete: read deliverables via `bash .claude/scripts/critic-tail.sh <file>` (Verdict + summary_for_lead + severity counts only). Full read ONLY if verdict signals REVISE/no-ship. Synthesize into `docs/handoff/<id>/context.yaml`.
+Wait via Monitor on output files. When complete: read deliverables via `bash "${CLAUDE_PLUGIN_ROOT}/scripts/critic-tail.sh" <file>` (Verdict + summary_for_lead + severity counts only). Full read ONLY if verdict signals REVISE/no-ship. Synthesize into `docs/handoff/<id>/context.yaml`.
 
 **Disagreement / multi-decision flow:** when synthesizing requires founder input on ≥2 decisions, batch them into ONE `AskUserQuestion` call (up to 4 questions) — never serial questions in separate turns. Material disagreement → 2nd Codex round (default model, `--effort medium`).
 
 **Mission file builder rule (MANDATORY before each spawn):**
 - Each subagent gets a per-role mission file scoped to its slice — `decisions[]` relevant to role + `off_limits` for role + `plan.steps` owned by role. Do NOT inject the full context.yaml.
-- Hard cap ≤100 lines: `bash .claude/scripts/leadv2-mission-lint.sh <file>` exit 0 required.
-- Lead's spawn prompt ≤300 words: pipe the prompt body through `bash .claude/scripts/leadv2-prompt-lint.sh` before invoking Agent. Lead orients (worktree path, branch, project hint, deliverable path, word cap); the subagent reads context.yaml + mission itself.
+- Hard cap ≤100 lines: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-mission-lint.sh" <file>` exit 0 required.
+- Lead's spawn prompt ≤300 words: pipe the prompt body through `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-prompt-lint.sh"` before invoking Agent. Lead orients (worktree path, branch, project hint, deliverable path, word cap); the subagent reads context.yaml + mission itself.
 - Mission template: `.claude/templates/mission-template.md`. Always includes `No extended thinking unless context.yaml.explicit_reason_required=true` and `Output: minimal-diff sections only — never full-file rewrites`.
 
 **Auto-compact before Phase 4 (Heavy/Standard tasks):**
 After Gate 1 accepted and context.yaml written, trigger compaction if ctx > 120K:
 ```bash
-bash .claude/scripts/leadv2-compact-trigger.sh --phase post-plan --task-id "$LEADV2_TASK_ID" || true
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-compact-trigger.sh" --phase post-plan --task-id "$LEADV2_TASK_ID" || true
 ```
 All plan artifacts are on disk (architect.md, context.yaml, codex-plan-result.md). Safe to compact — Phase 4 reads from files, not from context.
 
@@ -213,7 +213,7 @@ Exit 0 = accepted, 1 = declined → iterate plan once or pivot, 2 = auto-accepte
 Update `docs/leadv2/tasks/<id>/STATE.md` gate_1.status=confirmed. `leadv2_active_update_phase <id> build`.
 
 ## Phase 4: BUILD
-**Route first:** `eval "$(bash .claude/scripts/leadv2-router.sh --phase build --step <step> --task-id <id> --class <class> --signals '{"total_lines":<N>,"change_kind":"<kind>"}' 2>/dev/null)" || true`. Honor `ceiling_status`: `warn_60pct` log warning, `hard_stop_95pct` exit 1.
+**Route first:** `eval "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase build --step <step> --task-id <id> --class <class> --signals '{"total_lines":<N>,"change_kind":"<kind>"}' 2>/dev/null)" || true`. Honor `ceiling_status`: `warn_60pct` log warning, `hard_stop_95pct` exit 1.
 
 **Pre-spawn for parallel groups (≥2 groups in plan.parallel_groups):**
 1. Lead writes `docs/handoff/<id>/groups-contract.md` per `.claude/templates/groups-contract.md`. Include producer/consumer signatures, output formats, and `external_callers_to_update` enumerated via ONE global grep before spawn. Catches the "Group A flags work for Group B" drift class.
@@ -222,19 +222,19 @@ Update `docs/leadv2/tasks/<id>/STATE.md` gate_1.status=confirmed. `leadv2_active
 Parallel Agent spawns per `context.yaml plan.parallel_groups:` — developer / postgres-pro / frontend-developer. **All spawns `run_in_background=true`.** Monitor via task-notification. **Verify diffs with `git diff` — don't trust DONE self-report.** Stuck Sonnet → escalate to claude-subsession or opus architect.
 
 **Post-build (BEFORE Phase 5):**
-- `bash .claude/scripts/leadv2-deliverable-routing-check.sh "docs/handoff/$LEADV2_TASK_ID"` — exit 2 → resolve "Group B should pick up" punts before review opens. Either route to a group OR file QUEUE follow-up id and add to groups-contract.md.deferred_or_followup.
-- `bash .claude/scripts/leadv2-negative-memory-trigger-scan.sh --task-id "$LEADV2_TASK_ID"` — exit 2 → diff matched a regex-tagged negative memory entry; surface NM-id + run leadv2-negative-memory unblock check before commit.
+- `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-deliverable-routing-check.sh" "docs/handoff/$LEADV2_TASK_ID"` — exit 2 → resolve "Group B should pick up" punts before review opens. Either route to a group OR file QUEUE follow-up id and add to groups-contract.md.deferred_or_followup.
+- `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-negative-memory-trigger-scan.sh" --task-id "$LEADV2_TASK_ID"` — exit 2 → diff matched a regex-tagged negative memory entry; surface NM-id + run leadv2-negative-memory unblock check before commit.
 - **After Build (class ≥ Standard, .py touched):** `leadv2-test-synthesis` skill. Coverage < 50% → circuit break.
 
 ## Phase 5: REVIEW — adversarial loop
-**Route first:** `leadv2-router.sh --phase review --step <step>`. `model=skip` → no review (CX-03 light_low_risk). `model=codex-adversarial` → Codex only. `model=codex+opus-critic+security-auditor` → full triad.
+**Route first:** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase review --step <step>`. `model=skip` → no review (CX-03 light_low_risk). `model=codex-adversarial` → Codex only. `model=codex+opus-critic+security-auditor` → full triad.
 
 Parallel in one message:
 - `~/.claude/scripts/codex-task.sh adversarial-review --wait --base main` — background, always when not skipped
 - Agent(critic, opus) via claude-subsession — if safety/auth/RLS/publish touched
 - Agent(security-auditor, sonnet) via Agent tool — if secrets/webhook/auth touched
 
-**Reading review deliverables:** `bash .claude/scripts/critic-tail.sh <file>` returns Verdict + summary_for_lead + Critical/High/Medium counts. Full body read ONLY when verdict signals REVISE/no-ship. Mirror cx-tail.sh discipline — never `Read` the whole review file by default.
+**Reading review deliverables:** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/critic-tail.sh" <file>` returns Verdict + summary_for_lead + Critical/High/Medium counts. Full body read ONLY when verdict signals REVISE/no-ship. Mirror cx-tail.sh discipline — never `Read` the whole review file by default.
 
 **Severity gating — read before iterating:**
 
@@ -255,9 +255,9 @@ Preconditions (ALL must pass, all run from inside worktree):
 - All Critical/High resolved or TODO-filed
 - Tests pass (Agent(developer, sonnet, "run tests, quote output"))
 - `git diff` non-empty matching expected files
-- `bash .claude/scripts/leadv2-offlimits-check.sh` — exit 0 OK; exit 2/3 → block deploy
+- `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-offlimits-check.sh"` — exit 0 OK; exit 2/3 → block deploy
 
-**Devops mission injection:** before spawning devops-engineer, run `bash .claude/scripts/leadv2-known-quirks-inject.sh` and append the matched `instruction:` lines into the devops mission `§discipline` block.
+**Devops mission injection:** before spawning devops-engineer, run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-known-quirks-inject.sh"` and append the matched `instruction:` lines into the devops mission `§discipline` block.
 
 If all pass — three steps:
 1. **Commit in worktree:** `Agent(devops-engineer, sonnet, "commit conventional msg in current worktree directory")`. Worktree branch = `task/<task-id>`.
@@ -272,7 +272,7 @@ If all pass — three steps:
    COMMIT=$(git rev-parse HEAD)
 
    # Apply + register any new migrations introduced by this commit.
-   bash .claude/scripts/leadv2-migration-apply.sh --commit "$COMMIT" || {
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-migration-apply.sh" --commit "$COMMIT" || {
      echo "BLOCK: migration apply/register failed — manual /migrate repair before deploy" >&2
      exit 1
    }
@@ -314,7 +314,7 @@ it exits 1 with the list, and any close-commit push will be blocked by the hook.
 - `leadv2_active_unregister "$LEADV2_TASK_ID"` — remove from `docs/leadv2/active.yaml`
 
 ### Gate (mandatory before any close-commit push)
-- **`bash .claude/scripts/leadv2-phase8-close.sh "$LEADV2_TASK_ID"`** — runs `leadv2-render-close.sh`, then calls `leadv2-phase8-assert.sh` (G2) which asserts all 4 hard-gate close-phase artifacts exist:
+- **`bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-phase8-close.sh" "$LEADV2_TASK_ID"`** — runs `leadv2-render-close.sh`, then calls `leadv2-phase8-assert.sh` (G2) which asserts all 4 hard-gate close-phase artifacts exist:
   1. `docs/leadv2/closed/<task_id>.yaml` exists (the source-of-truth close record) — A1
   2. `docs/leadv2/tasks.yaml` has `status: closed` (or task absent) — A2
   3. `docs/leadv2/active.yaml` does NOT contain task_id (unregistered) — A3
@@ -323,7 +323,7 @@ it exits 1 with the list, and any close-commit push will be blocked by the hook.
   Best-effort warnings (non-blocking): BOARD.md HEAD (if exists), DIALOGUE.md entry (if exists), per-task STATE.md status.
   Writes sentinel `docs/handoff/<task_id>/phase8-passed.flag` on PASS. Exits 1 with missing-item list on FAIL. Exit 2 = bad usage.
 - **Two scripts, two roles** — do not confuse:
-  - `.claude/scripts/leadv2-phase8-assert.sh` — G2 assertion runner (the gate logic, 4 hard checks)
+  - `"${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-phase8-assert.sh"` — G2 assertion runner (the gate logic, 4 hard checks)
   - `.claude/hooks/leadv2-phase8-gate.sh` — PreToolUse push-blocker hook (blocks `git push` when sentinel missing/stale)
 - The PreToolUse hook `leadv2-phase8-gate.sh` blocks `git push origin main` for any unpushed commit whose message contains both `leadv2` and `close` (or `Phase 8`) **unless** the sentinel for the matched `PO-XXX` exists and is < 1h old.
 - If the gate fails: read the missing list, fix the artifact, re-run the gate. Don't bypass.
@@ -337,7 +337,7 @@ it exits 1 with the list, and any close-commit push will be blocked by the hook.
     SPAWNS=$(cat docs/leadv2/spawns-today.txt 2>/dev/null || echo 0)
     MAX="${LEADV2_MAX_SELF_SPAWNS_PER_DAY:-4}"
     if [[ $SPAWNS -lt $MAX ]]; then
-      NEXT=$(bash .claude/scripts/leadv2-queue-claim.sh --by "$LEADV2_TASK_ID" 2>/dev/null) && _claim_rc=0 || _claim_rc=$?
+      NEXT=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-queue-claim.sh" --by "$LEADV2_TASK_ID" 2>/dev/null) && _claim_rc=0 || _claim_rc=$?
       if [[ "$_claim_rc" -eq 2 || -z "$NEXT" ]]; then
         # exit 2 = no work across all lanes — nothing to spawn
         true
@@ -347,7 +347,7 @@ it exits 1 with the list, and any close-commit push will be blocked by the hook.
       else
         # NEXT = "lane:id" — pass the id portion to spawner
         _next_id="${NEXT#*:}"
-        bash .claude/scripts/leadv2-session-spawner.sh "$_next_id" \
+        bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-session-spawner.sh" "$_next_id" \
           && echo $((SPAWNS+1)) > docs/leadv2/spawns-today.txt
       fi
     fi
@@ -360,8 +360,8 @@ it exits 1 with the list, and any close-commit push will be blocked by the hook.
   ```
   Skip cleanup if recovery/rollback happened — leave worktree + branch for inspection.
 - **Pattern promotion:** scan history. ≥`$PROMOTE_T` (default 3) → promote to `lead-patterns.md`. ≥`$SYNTH_T` (default 5) → `leadv2-skill-synthesize` (shadow → 5 silent uses → activate). Founder approves first-time activation.
-- **Heavy tasks:** `bash .claude/scripts/leadv2-outcome-watch.sh --task-id <id> --delay-hours 48 &`
-- `bash .claude/scripts/leadv2-signatures-aggregate.sh` — refresh promotion candidates
+- **Heavy tasks:** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-outcome-watch.sh" --task-id <id> --delay-hours 48 &`
+- `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-signatures-aggregate.sh"` — refresh promotion candidates
 - Cost-accuracy feedback: full Python snippet → `docs/leadv2-guide.md §Cost accuracy`. Run it.
 
 ## Phase 9: PROPOSE NEXT
