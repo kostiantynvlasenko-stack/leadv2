@@ -1,0 +1,154 @@
+# Reference trajectories for /leadv2 phase flow.
+#
+# Each event is (phase, role, artifact) — the artifact is a path pattern relative
+# to docs/handoff/<task-id>/.  Use "<id>" as the task-id placeholder; trajectory_check.py
+# resolves it against the actual handoff directory at runtime.
+#
+# optional: true  — artifact may be absent without blocking the trajectory check.
+#
+# artifact: may be a single string OR a list of strings.
+#   List form = OR alternatives: the event is satisfied if ANY of the listed filenames
+#   is present in the handoff dir.  Use this for legacy/variant artifact names.
+#
+# phase_ordinal: integer used for phase-sequencing checks (replaces mtime ordering).
+#   0=intake  1=classify  2=plan  3=build  4=review  5=deploy  6=verify  7=close
+#   Events sharing the same ordinal are treated as a set — no internal order required.
+#
+# Sources verified against real handoff dirs (2026-04-26):
+#   PO-001/          → context.yaml, architect.md, codex-plan.json, critic.md, devops.md
+#   PO-002/          → context.yaml, devops.md, devops-deploy.md
+#   PO-003/          → context.yaml, developer.md, devops-deploy.md
+#   PO-019/          → context.yaml, developer.md
+#   PO-019b/         → context.yaml, architect.md, architect-r3.md, codex-plan.json,
+#                      codex.md, codex-r2.txt, critic.md, critic-r1.md, developer.md (no .full),
+#                      hack-detection.summary.md, hack-findings.yaml
+#   nextlevel-R6-W1a/ → developer.md (no .full)
+#   nextlevel-R6-W2a/ → developer.md (no .full)
+#   improvements-2026-04-26/ → developer.md (no .full or build-summary.yaml)
+#
+# Artifact alternatives NOT added (no evidence in any real handoff dir):
+#   - diff.md         (mission listed it; not found in any scanned dir)
+#   - plan.md         (mission listed it; not found; dirs use architect.md + critic.md separately)
+#   - premortem-deploy.yaml (mission listed it; not found; only premortem.yaml referenced in schema)
+
+trajectories:
+
+  # Light tasks: intake → build only (no plan triad)
+  Light:
+    - phase: intake
+      phase_ordinal: 0
+      role: lead
+      artifact: context.yaml
+    - phase: build
+      phase_ordinal: 3
+      role: developer
+      # developer.full.md (new split form) OR developer.md (legacy single-file) OR
+      # build-summary.yaml (schema-defined but rare in practice).
+      # At least one must be present for required=true events.
+      artifact:
+        - developer.full.md
+        - developer.md
+        - build-summary.yaml
+      optional: false
+
+  # Standard tasks: intake → classify → plan (codex + optional architect) → critic → build
+  Standard:
+    - phase: intake
+      phase_ordinal: 0
+      role: lead
+      artifact: context.yaml
+    - phase: classify
+      phase_ordinal: 1
+      role: lead
+      artifact: classification.yaml
+      optional: true
+    - phase: plan
+      phase_ordinal: 2
+      role: codex
+      # codex-plan.json (primary) OR codex.md (older runs used plain markdown)
+      artifact:
+        - codex-plan.json
+        - codex.md
+      optional: true
+    - phase: plan
+      phase_ordinal: 2
+      role: architect
+      artifact: architect.md
+      optional: true
+    - phase: plan
+      phase_ordinal: 2
+      role: critic
+      artifact: critic.md
+      optional: true
+    - phase: build
+      phase_ordinal: 3
+      role: developer
+      artifact:
+        - developer.full.md
+        - developer.md
+        - build-summary.yaml
+      optional: false
+
+  # Heavy tasks: Standard + premortem, hack-detection, negative-memory checks
+  Heavy:
+    - phase: intake
+      phase_ordinal: 0
+      role: lead
+      artifact: context.yaml
+    - phase: classify
+      phase_ordinal: 1
+      role: lead
+      artifact: classification.yaml
+      optional: true
+    - phase: plan
+      phase_ordinal: 2
+      role: codex
+      artifact:
+        - codex-plan.json
+        - codex.md
+      optional: false
+    - phase: plan
+      phase_ordinal: 2
+      role: architect
+      artifact: architect.md
+      optional: false
+    - phase: plan
+      phase_ordinal: 2
+      role: critic
+      artifact: critic.md
+      optional: false
+    - phase: plan
+      phase_ordinal: 2
+      role: lead
+      artifact:
+        - premortem.yaml
+        - premortem-deploy.yaml
+      optional: false
+    - phase: plan
+      phase_ordinal: 2
+      role: lead
+      artifact: negative-memory-matches.yaml
+      optional: true
+    - phase: build
+      phase_ordinal: 3
+      role: developer
+      artifact:
+        - developer.full.md
+        - developer.md
+        - build-summary.yaml
+      optional: false
+    - phase: review
+      phase_ordinal: 4
+      role: developer
+      artifact:
+        - hack-detection.summary.md
+        - hack-findings.yaml
+      optional: true
+    - phase: deploy
+      phase_ordinal: 5
+      role: lead
+      artifact: llm-judge.yaml
+      optional: true   # written by deploy phase; Review-phase trajectory check runs before
+                       # Deploy, so the file cannot be required here — would deadlock Heavy.
+                       # TODO: add a separate Deploy/Close trajectory section and enforce
+                       # optional: false there once that phase-gating is implemented.

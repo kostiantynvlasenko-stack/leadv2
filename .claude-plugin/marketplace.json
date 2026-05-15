@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "leadv2",
+  "version": "0.1.0",
+  "description": "Autonomous engineering orchestrator for Claude Code — plan, build, review, deploy, verify, reflect.",
+  "owner": {
+    "name": "kostiantynvlasenko-stack",
+    "url": "https://github.com/kostiantynvlasenko-stack"
+  },
+  "plugins": [
+    {
+      "name": "leadv2",
+      "source": "./plugins/leadv2",
+      "category": "development",
+      "description": "Autonomous engineering orchestrator — Sonnet main, Opus on triggers, optional Codex 2nd brain. One plan-approval gate, then autopilot to live verification. Multi-stack via .claude/leadv2-overrides/."
+    }
+  ]
+}

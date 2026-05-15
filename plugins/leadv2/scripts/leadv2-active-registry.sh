@@ -1,0 +1,419 @@
+#!/usr/bin/env bash
+# leadv2-active-registry.sh — CRUD operations on docs/leadv2/active.yaml
+# Source this file; do not exec directly.
+#
+# Functions:
+#   leadv2_active_register <task_id> <class> <worktree> <branch> <daemon_mode>
+#   leadv2_active_unregister <task_id>
+#   leadv2_active_update_phase <task_id> <phase>
+#   leadv2_active_update_pulse <task_id>
+#   leadv2_active_render_index
+#   leadv2_active_list
+#   leadv2_active_check_limits <class>
+#
+# All YAML writes use Python flock + atomic temp-file (same pattern as
+# _leadv2_active_py_lock in leadv2-helpers.sh).
+#
+# Exit codes for leadv2_active_check_limits:
+#   0 — OK
+#   1 — hard_limit_reached
+#   2 — heavy_conflict
+#   3 — budget_refused
+
+set -euo pipefail
+
+# ── Paths ──────────────────────────────────────────────────────────────────
+LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT:-$(pwd)}}"
+
+_leadv2_yaml_file() {
+  printf -- '%s/docs/leadv2/active.yaml' "${LEADV2_PROJECT_ROOT}"
+}
+
+_leadv2_yaml_lockfile() {
+  printf -- '%s/docs/leadv2/active.yaml.lock' "${LEADV2_PROJECT_ROOT}"
+}
+
+_leadv2_state_md() {
+  printf -- '%s/docs/LEAD_V2_STATE.md' "${LEADV2_PROJECT_ROOT}"
+}
+
+# ── Core Python flock + atomic-write helper ───────────────────────────────
+# _leadv2_yaml_py_lock <lockfile> <yaml_file> <op> [args...]
+#
+# ops: register   <session_id> <task_id> <worktree> <branch> <started_at>
+#                 <phase> <class> <pid> <pid_birth> <parent_session_id>
+#                 <daemon_mode> <last_pulse_at> <pulse_log>
+#      unregister <task_id>
+#      update_phase <task_id> <phase>
+#      update_pulse <task_id> <ts>
+#      mark_stale  <task_id>
+#      read        → writes YAML to stdout (no mutation)
+#
+_leadv2_yaml_py_lock() {
+  python3 - "$@" <<'PYEOF'
+import sys, os, fcntl, tempfile
+try:
+    import yaml
+except ImportError:
+    print("[registry] PyYAML not found; install pyyaml", file=sys.stderr)
+    sys.exit(1)
+
+lockfile_path = sys.argv[1]
+yaml_path     = sys.argv[2]
+op            = sys.argv[3]
+args          = sys.argv[4:]
+
+INITIAL = {
+    "meta": {
+        "schema_version": 1,
+        "rendered_at": "",
+        "hard_limit": 2,
+        "heavy_strategic_solo": True,
+    },
+    "sessions": [],
+}
+
+def _pid_alive(pid_val) -> bool:
+    try:
+        pid = int(pid_val)
+        os.kill(pid, 0)
+        return True
+    except (TypeError, ValueError, ProcessLookupError, PermissionError):
+        return False
+
+os.makedirs(os.path.dirname(lockfile_path), exist_ok=True)
+lock_fd = open(lockfile_path, "a+")
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+    # Ensure yaml file exists
+    os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
+    if not os.path.exists(yaml_path):
+        with open(yaml_path, "w", encoding="utf-8") as fh:
+            yaml.dump(INITIAL, fh, default_flow_style=False, sort_keys=False)
+
+    with open(yaml_path, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+
+    if "meta" not in data:
+        data["meta"] = INITIAL["meta"].copy()
+    if "sessions" not in data or data["sessions"] is None:
+        data["sessions"] = []
+
+    sessions = data["sessions"]
+
+    if op == "read":
+        yaml.dump(data, sys.stdout, default_flow_style=False, sort_keys=False)
+        sys.exit(0)
+
+    elif op == "register":
+        (session_id, task_id, worktree, branch, started_at,
+         phase, cls, pid, pid_birth, parent_session_id,
+         daemon_mode, last_pulse_at, pulse_log) = args
+
+        pid_int = int(pid) if pid not in ("null", "", "None") else None
+        daemon_bool = daemon_mode.lower() in ("1", "true", "yes")
+
+        # Replace stale row for same task_id if PID is dead
+        existing = next((s for s in sessions if s.get("task_id") == task_id), None)
+        if existing:
+            if _pid_alive(existing.get("pid")):
+                # Active row already present — idempotent
+                sys.exit(0)
+            else:
+                sessions.remove(existing)
+
+        sessions.append({
+            "session_id": session_id,
+            "task_id": task_id,
+            "worktree": worktree,
+            "branch": branch,
+            "started_at": started_at,
+            "phase": phase,
+            "class": cls,
+            "pulse_log": pulse_log,
+            "pid": pid_int,
+            "pid_birth": pid_birth,
+            "parent_session_id": None if parent_session_id in ("null", "", "None") else parent_session_id,
+            "daemon_mode": daemon_bool,
+            "last_pulse_at": last_pulse_at,
+            "stale": False,
+            "note": "",
+        })
+        # Return session_id on stdout
+        print(session_id)
+
+    elif op == "unregister":
+        task_id = args[0]
+        data["sessions"] = [s for s in sessions if s.get("task_id") != task_id]
+
+    elif op == "update_phase":
+        task_id, new_phase = args
+        for s in sessions:
+            if s.get("task_id") == task_id:
+                s["phase"] = new_phase
+                break
+
+    elif op == "update_pulse":
+        task_id, ts = args
+        for s in sessions:
+            if s.get("task_id") == task_id:
+                s["last_pulse_at"] = ts
+                break
+
+    elif op == "mark_stale":
+        task_id = args[0]
+        for s in sessions:
+            if s.get("task_id") == task_id:
+                s["stale"] = True
+                break
+
+    else:
+        print(f"[registry] unknown op: {op}", file=sys.stderr)
+        sys.exit(1)
+
+    # Atomic write: temp + rename
+    dir_ = os.path.dirname(yaml_path)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as tf:
+            yaml.dump(data, tf, default_flow_style=False, sort_keys=False)
+        os.replace(tmp_path, yaml_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+finally:
+    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    lock_fd.close()
+PYEOF
+}
+
+# ── Public functions ───────────────────────────────────────────────────────
+
+# leadv2_active_register <task_id> <class> <worktree> <branch> <daemon_mode>
+# Writes a new session row to active.yaml.
+# Returns (stdout): session_id in format s-YYYYMMDDTHHMMSSZ-PID
+leadv2_active_register() {
+  local task_id="${1:?task_id required}"
+  local cls="${2:-Standard}"
+  local worktree="${3:-$(pwd)}"
+  local branch="${4:-}"
+  local daemon_mode="${5:-false}"
+
+  if [[ -z "$branch" ]]; then
+    branch="$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || printf -- 'unknown')"
+  fi
+
+  local session_id ts pid_birth pulse_log parent_sid
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  session_id="s-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  pid_birth="$(ps -o lstart= -p $$ 2>/dev/null | tr -s ' ' || printf -- 'unknown')"
+  pulse_log="docs/leadv2/tasks/${task_id}/pulse.md"
+  parent_sid="${LEADV2_PARENT_SESSION_ID:-null}"
+
+  local yaml_file lockfile
+  yaml_file="$(_leadv2_yaml_file)"
+  lockfile="$(_leadv2_yaml_lockfile)"
+
+  _leadv2_yaml_py_lock \
+    "$lockfile" "$yaml_file" register \
+    "$session_id" "$task_id" "$worktree" "$branch" "$ts" \
+    "intake" "$cls" "$$" "$pid_birth" "$parent_sid" \
+    "$daemon_mode" "$ts" "$pulse_log"
+}
+
+# leadv2_active_unregister <task_id>
+leadv2_active_unregister() {
+  local task_id="${1:?task_id required}"
+  local yaml_file lockfile
+  yaml_file="$(_leadv2_yaml_file)"
+  lockfile="$(_leadv2_yaml_lockfile)"
+  [[ -f "$yaml_file" ]] || return 0
+  _leadv2_yaml_py_lock "$lockfile" "$yaml_file" unregister "$task_id"
+}
+
+# leadv2_active_update_phase <task_id> <phase>
+leadv2_active_update_phase() {
+  local task_id="${1:?task_id required}"
+  local phase="${2:?phase required}"
+  local yaml_file lockfile
+  yaml_file="$(_leadv2_yaml_file)"
+  lockfile="$(_leadv2_yaml_lockfile)"
+  [[ -f "$yaml_file" ]] || return 0
+  _leadv2_yaml_py_lock "$lockfile" "$yaml_file" update_phase "$task_id" "$phase"
+}
+
+# leadv2_active_update_pulse <task_id>
+leadv2_active_update_pulse() {
+  local task_id="${1:?task_id required}"
+  local ts
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local yaml_file lockfile
+  yaml_file="$(_leadv2_yaml_file)"
+  lockfile="$(_leadv2_yaml_lockfile)"
+  [[ -f "$yaml_file" ]] || return 0
+  _leadv2_yaml_py_lock "$lockfile" "$yaml_file" update_pulse "$task_id" "$ts"
+}
+
+# leadv2_active_render_index
+# Regenerates docs/LEAD_V2_STATE.md as markdown index from active.yaml.
+leadv2_active_render_index() {
+  local yaml_file state_md ts
+  yaml_file="$(_leadv2_yaml_file)"
+  state_md="$(_leadv2_state_md)"
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+  mkdir -p "$(dirname "$state_md")"
+
+  python3 - "$yaml_file" "$state_md" "$ts" <<'PYEOF'
+import sys, os
+try:
+    import yaml
+except ImportError:
+    print("[registry] PyYAML not found", file=sys.stderr)
+    sys.exit(1)
+
+yaml_file, state_md, ts = sys.argv[1], sys.argv[2], sys.argv[3]
+
+if not os.path.exists(yaml_file):
+    sessions = []
+    hard_limit = 2
+else:
+    with open(yaml_file, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    sessions = data.get("sessions") or []
+    hard_limit = (data.get("meta") or {}).get("hard_limit", 2)
+
+# Preserve "## Recent history" block from prior render so it survives regeneration.
+# Block ends at next H2 heading or EOF. Lead/founder edits this section by hand.
+history_block = ""
+if os.path.exists(state_md):
+    with open(state_md, encoding="utf-8") as fh:
+        prior = fh.read()
+    marker = "## Recent history"
+    if marker in prior:
+        tail = prior[prior.index(marker):]
+        next_h2 = tail.find("\n## ", 1)
+        history_block = tail if next_h2 == -1 else tail[:next_h2]
+        history_block = history_block.rstrip() + "\n"
+
+lines = [
+    "<!-- DO NOT EDIT TABLE — regenerated from docs/leadv2/active.yaml by leadv2_active_render_index -->",
+    "<!-- Per-task state: docs/leadv2/tasks/<task_id>/STATE.md -->",
+    "<!-- '## Recent history' below is preserved across renders; edit by hand. -->",
+    "",
+    "# /leadv2 Active Sessions",
+    "",
+    f"Last updated: {ts}",
+    "",
+    "| task_id | phase | class | started_at | daemon |",
+    "|---|---|---|---|---|",
+]
+
+for s in sessions:
+    tid     = s.get("task_id", "?")
+    phase   = s.get("phase", "?")
+    cls     = s.get("class", "?")
+    started = (s.get("started_at") or "")[:16]
+    daemon  = "yes" if s.get("daemon_mode") else "no"
+    lines.append(f"| {tid} | {phase} | {cls} | {started} | {daemon} |")
+
+lines.append("")
+lines.append(f"Sessions: {len(sessions)} / {hard_limit} max")
+lines.append("")
+
+out = "\n".join(lines) + "\n"
+if history_block:
+    out += "\n" + history_block
+
+with open(state_md, "w", encoding="utf-8") as fh:
+    fh.write(out)
+print(f"[registry] rendered {state_md} ({len(sessions)} sessions, history_preserved={bool(history_block)})")
+PYEOF
+}
+
+# leadv2_active_list
+# Prints active.yaml sessions as a human-readable table to stdout.
+leadv2_active_list() {
+  local yaml_file
+  yaml_file="$(_leadv2_yaml_file)"
+
+  if [[ ! -f "$yaml_file" ]]; then
+    echo "[registry] no active.yaml found at $yaml_file"
+    return 0
+  fi
+
+  python3 - "$yaml_file" <<'PYEOF'
+import sys
+try:
+    import yaml
+except ImportError:
+    print("[registry] PyYAML not found", file=sys.stderr)
+    sys.exit(1)
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = yaml.safe_load(fh) or {}
+sessions = data.get("sessions") or []
+meta = data.get("meta") or {}
+print(f"Active sessions ({len(sessions)} / {meta.get('hard_limit', 2)} max):")
+print(f"{'session_id':<30} {'task_id':<20} {'phase':<12} {'class':<10} {'pid':<8} {'daemon':<7} {'stale'}")
+print("-" * 100)
+for s in sessions:
+    sid    = (s.get("session_id") or "?")[:28]
+    tid    = (s.get("task_id") or "?")[:18]
+    phase  = (s.get("phase") or "?")[:10]
+    cls    = (s.get("class") or "?")[:8]
+    pid    = str(s.get("pid") or "null")[:6]
+    daemon = "yes" if s.get("daemon_mode") else "no"
+    stale  = "STALE" if s.get("stale") else "-"
+    print(f"{sid:<30} {tid:<20} {phase:<12} {cls:<10} {pid:<8} {daemon:<7} {stale}")
+PYEOF
+}
+
+# leadv2_active_check_limits <class>
+# Exit codes: 0=OK, 1=hard_limit_reached, 2=heavy_conflict, 3=budget_refused
+leadv2_active_check_limits() {
+  local cls="${1:-Standard}"
+  local yaml_file
+  yaml_file="$(_leadv2_yaml_file)"
+
+  python3 - "$yaml_file" "$cls" <<'PYEOF'
+import sys, os
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)  # fail open if yaml missing
+
+yaml_file, cls = sys.argv[1], sys.argv[2]
+
+if not os.path.exists(yaml_file):
+    sys.exit(0)
+
+with open(yaml_file, encoding="utf-8") as fh:
+    data = yaml.safe_load(fh) or {}
+
+meta = data.get("meta") or {}
+sessions = [s for s in (data.get("sessions") or []) if not s.get("stale")]
+
+hard_limit = meta.get("hard_limit", 2)
+heavy_strategic_solo = meta.get("heavy_strategic_solo", True)
+
+# Check hard limit
+if len(sessions) >= hard_limit:
+    print(f"[registry] hard limit reached: {len(sessions)}/{hard_limit} active sessions", file=sys.stderr)
+    sys.exit(1)
+
+# Check heavy/strategic conflict
+if cls.lower() in ("heavy", "strategic") and heavy_strategic_solo:
+    conflicting = [s for s in sessions if s.get("class", "").lower() in ("heavy", "strategic")]
+    if conflicting:
+        print(f"[registry] heavy/strategic conflict: {conflicting[0].get('task_id')} already running", file=sys.stderr)
+        sys.exit(2)
+
+sys.exit(0)
+PYEOF
+}

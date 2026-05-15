@@ -1,0 +1,15 @@
+{
+  "name": "leadv2",
+  "version": "0.1.0",
+  "description": "Autonomous engineering orchestrator — Sonnet main, Opus on triggers, optional Codex 2nd brain. One plan-approval gate, then autopilot. Multi-stack via .claude/leadv2-overrides/.",
+  "author": {
+    "name": "kostiantynvlasenko-stack",
+    "url": "https://github.com/kostiantynvlasenko-stack"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/kostiantynvlasenko-stack/leadv2",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kostiantynvlasenko-stack/leadv2.git"
+  }
+}
