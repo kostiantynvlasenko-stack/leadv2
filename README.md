@@ -106,8 +106,6 @@ This is opinionated tooling. The opinions:
 - Python + Supabase + Hetzner VPS deploy
 - (More stacks coming — please open PRs with `examples/overrides/<your-stack>/`)
 
-This is the same orchestrator that runs a production multi-tenant SaaS — but the persona-engine specifics have been stripped out. The core orchestration loop is what's in this repo.
-
 ## Documentation
 
 - **[docs/INSTALLATION.md](docs/INSTALLATION.md)** — Install + first-run walkthrough
