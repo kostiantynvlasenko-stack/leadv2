@@ -8,8 +8,5 @@
   },
   "license": "MIT",
   "homepage": "https://github.com/kostiantynvlasenko-stack/leadv2",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/kostiantynvlasenko-stack/leadv2.git"
-  }
+  "repository": "https://github.com/kostiantynvlasenko-stack/leadv2.git"
 }
