@@ -179,18 +179,26 @@ Reviewers spawn via **Agent tool** (shared session) — their `.claude/agents/<r
 
 Hack-detection runs in parallel with Codex/critic in ALL cases (see `leadv2-hack-detection` skill).
 
+**Codex invocation discipline:** `codex-task.sh adversarial-review` MUST be passed
+`--wait` and run as a `run_in_background=true` Bash tool call. `--wait` makes
+codex-companion run synchronously; the Bash tool's background flag is the only async
+layer. Never use a bare `--background` codex flag without `--wait` — codex-companion
+then returns immediately, the job runs detached, and the captured output file gets
+only the start banner (findings stay stranded in the plugin job-log). With `--wait`
+the full review lands in the Bash output file and `cx-tail.sh` reads it directly.
+
 ```bash
 # Case A: Codex OK, non-safety → Codex + hack-detection, parallel
 if $CODEX_OK && ! safety_touched; then
   # ONE message, two calls:
-  Bash(.claude/scripts/codex-task.sh adversarial-review --base main --background, run_in_background=true)
+  Bash(codex-task.sh adversarial-review --wait --base main, run_in_background=true)
   Agent(subagent_type=developer, model=sonnet, prompt="run hack-detection per .claude/skills/leadv2-hack-detection/SKILL.md on diff /tmp/leadv2-review-<id>.diff; write findings YAML to docs/handoff/<id>/hack-findings.yaml and summary to docs/handoff/<id>/hack-detection.summary.md")
 fi
 
 # Case B: Codex OK, safety-touched → Codex + critic(opus) + security-auditor + hack-detection, parallel
 if $CODEX_OK && safety_touched; then
   # ONE message, four calls:
-  Bash(.claude/scripts/codex-task.sh adversarial-review --base main --background, run_in_background=true)
+  Bash(codex-task.sh adversarial-review --wait --base main, run_in_background=true)
   Agent(subagent_type=critic, model=opus, prompt="review diff /tmp/leadv2-review-<id>.diff per critic role frontmatter; brief /tmp/review-mission-<id>.md; write to docs/handoff/<id>/critic.summary.md + critic.full.md with DELIVERABLE_COMPLETE")
   Agent(subagent_type=security-auditor, model=sonnet, prompt="security review diff /tmp/leadv2-review-<id>.diff per role frontmatter; always-read-full for security-sensitive paths; write to docs/handoff/<id>/security-auditor.summary.md + security-auditor.full.md with DELIVERABLE_COMPLETE")
   Agent(subagent_type=developer, model=sonnet, prompt="run hack-detection per .claude/skills/leadv2-hack-detection/SKILL.md on diff /tmp/leadv2-review-<id>.diff; write findings YAML to docs/handoff/<id>/hack-findings.yaml and summary to docs/handoff/<id>/hack-detection.summary.md")
@@ -285,7 +293,7 @@ If `docs/leadv2-negative-memory.yaml` missing → skip, no error.
 Agent(developer, sonnet, prompt="Read docs/handoff/<id>/critic.md + codex findings. Fix Critical and High. Write revised diff to diff.md#step_N_rev2.")
 
 # Then (parallel, one message):
-~/.claude/scripts/codex-task.sh adversarial-review --effort medium --background
+Bash(codex-task.sh adversarial-review --wait --effort medium --base main, run_in_background=true)
 (critic re-spawn only if its Round 1 flagged Critical)
 ```
 
