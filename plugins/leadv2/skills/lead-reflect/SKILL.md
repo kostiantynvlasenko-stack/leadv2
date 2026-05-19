@@ -169,6 +169,26 @@ Exception: if the pattern was auto-promoted by leadv2-correction-detect (confide
 
 ---
 
+## §7.5. Weekly skill-usage tally (best-effort, runs ~1×/week)
+
+Once per ISO week, append a snapshot of skill wiring/usage to the log so dormant
+skills get surfaced. Cheap — runs ~7 grep passes, no network.
+
+```bash
+LOG=docs/leadv2/skill-usage.log
+TALLY="${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-skill-usage-tally.sh"
+week_now=$(date +%G-W%V)
+last_week=$(grep -E '^# week=' "$LOG" 2>/dev/null | tail -1 | sed 's/^# week=//')
+if [[ "$week_now" != "$last_week" ]] && [[ -x "$TALLY" ]]; then
+  echo "# week=$week_now ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG"
+  bash "$TALLY" >> "$LOG"
+fi
+```
+
+Non-blocking — log file may not exist on first run; script creates it.
+
+---
+
 ## §8. Graph footprint risk cross-validation
 
 If `$GRAPH_FOOTPRINT != null`:

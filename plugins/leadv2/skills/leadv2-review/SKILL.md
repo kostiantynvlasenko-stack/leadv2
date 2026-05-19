@@ -96,6 +96,17 @@ HARD GATE for critic(opus) — spawn ONLY if ALL of:
 
 HARD GATE for security-auditor(sonnet) — spawn ONLY if diff touches:
   [*crypto*, *auth*, *token*, *secret*, *webhook*, *billing*, RLS migrations]
+
+HARD GATE: cross-tenant / multi-persona triggers (auto-upgrade Round 1)
+  If ANY of the following hits, force critic=opus AND spawn security-auditor
+  regardless of (a)/(b)/(c) above:
+    - context.yaml lists >=2 persona ids in `applies_to`
+    - diff touches files matching `personas/_shared/**` OR `agent/**` AND brief
+      mentions any of: 'across personas', 'all personas', 'multi-tenant', 'RLS'
+    - new/changed grant statement in any *.sql migration (GRANT, REVOKE,
+      CREATE POLICY) with USING clause involving auth.uid() or persona_id
+  Reason: 2026-05-12 FEAT-OBS-BATCH-1 — architect proposed RLS-client grant
+  (cross-tenant hole), only opus critic + security-auditor parallel caught it.
 ```
 
 If neither extra reviewer fires → primary reviewer output (Codex or critic(sonnet)) IS the review; proceed to Phase 6 Deploy on `disposition == resolved`.

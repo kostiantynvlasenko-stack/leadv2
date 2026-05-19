@@ -1,6 +1,6 @@
 ---
 name: leadv2-build
-description: "Phase 4 — parallel Sonnet code writers per plan.parallel_groups; escalates to claude-subsession for long-context tasks. Triggers: Gate 1 approved, class >= Light."
+description: Phase 4 — parallel Sonnet code writers per plan.parallel_groups; escalates to claude-subsession for long-context tasks. Triggers: Gate 1 approved, class >= Light.
 allowed-tools:
   - Read
   - Write
@@ -19,6 +19,7 @@ Lead's mission file MUST contain:
 - `## Writes` — explicit list of files/paths the subagent will modify
 - `## Acceptance` — 1-3 bullet test/verification steps
 - `## Graph context` — pre-populated MCP results (search_graph/trace_path) so subagent doesn't re-discover
+- `## Output budget` — always: `Write full detail to docs/handoff/<id>/developer.md. Chat reply: ≤50 words + file pointer. Bash calls: ≤3 for discovery. File reads: ≤5.`
 
 Missing any section = mission incomplete = spawn FAILS prep. Founder rule: "incomplete specs → 47-turn discovery loops in subagent."
 
@@ -86,6 +87,33 @@ warm_chain "developer:sonnet"
 
 Skip if single-spawn phase (break-even only at N≥2 same-role spawns).
 
+### 1e. Graph pre-injection for Build (MANDATORY, same as Plan §1a)
+
+**Run BEFORE writing any developer mission file.** Subagents cannot call MCP — lead provides pre-cooked graph context so developer spends 0 tokens on re-discovery.
+
+For EACH plan step, run in the lead session (max 2 calls per step):
+
+```
+# 1. Structural lookup for the symbols the step will touch:
+mcp__codebase-memory-mcp__search_graph(
+  query="<step mission keywords>",
+  limit=8,
+  project="${LEADV2_CODEBASE_PROJECT}"
+)
+
+# 2. Call chain if step modifies a known function:
+mcp__codebase-memory-mcp__trace_path(
+  function_name="<primary symbol from step.writes>",
+  depth=2,
+  direction="both",
+  project="${LEADV2_CODEBASE_PROJECT}"
+)
+```
+
+Embed output into the mission file under `## Graph context (pre-loaded — do NOT re-discover)`.
+
+**Budget rule:** if `plan.steps[i].reads` already covers a symbol → skip trace_path for it. Max 4 MCP calls total across all steps in one parallel group.
+
 ### 2. For each parallel_group — spawn in ONE message
 
 **Model routing per step (cost discipline 2026-04-25):**
@@ -122,15 +150,20 @@ Agent(
   developer, sonnet,
   isolation: "worktree",   # ← parallel-safe checkout, see §2b
   prompt="Codebase graph project: ${LEADV2_CODEBASE_PROJECT}
-  
+
+  ## Graph context (pre-loaded — do NOT re-discover)
+  <embed search_graph + trace_path output from §1e here>
+
   Mission: <plan.steps[1].mission>
   Read docs/handoff/<id>/context.yaml FIRST. Respect decisions and off_limits.
   Reads: <plan.steps[1].reads>
-  **Reads budget:** plan.steps.reads MUST contain ≤ 5 entries. If the step requires more files, lead pre-summarizes them into a single context block before spawning the developer. Developer reads only what's in the list — no exploratory reads beyond it.
+  **Reads budget: ≤5 files. No exploratory reads beyond the list above.**
+  **Bash budget: ≤3 Bash calls for discovery. Use Graph context above instead of grep.**
   Writes: <plan.steps[1].writes>
   Skills: codebase-memory, <domain skills from /lead Skill injection table>
-  
-  Deliverable: <plan.steps[1].deliverable>"
+
+  Deliverable: <plan.steps[1].deliverable>
+  **Output:** write full detail to docs/handoff/<id>/developer.md. Chat reply: ≤50 words + file pointer."
 )
 
 Agent(
@@ -224,22 +257,6 @@ architect_plan=$(leadv2_read_handoff "docs/handoff/${TASK_ID}/architect.md")
 ```
 
 Files ≤8KB or YAML → no-op. Compressed twin is `<stem>.compressed.md` in the same dir.
-
-### §2.5 Violations injection (cross-group)
-
-After all workers in a group complete:
-1. Collect per-worker violation files: `docs/leadv2/handoff/violations/<task-id>.<worker_id>.jsonl`
-2. Merge into: `docs/leadv2/handoff/violations/<task-id>.merged.jsonl` (append-only, sorted by severity)
-3. Before spawning the NEXT group's workers, inject merged violations into each worker's mission file:
-   - Read violations with severity=critical or high
-   - Prepend to mission as `"## Injected violations from prior groups\n<violations>\n"`
-4. Clean up per-worker files after merge (keep merged)
-
-JSONL entry schema: `{worker_id, finding, severity: critical|high|medium|low, hint}`
-
-NOTE: Workers within the same group CANNOT receive violations from each other — they start
-simultaneously. Violations injection is ONLY possible at the serialization barrier between
-parallel_groups (cross-group). Any claim that intra-group injection works is incorrect.
 
 ### 3. Monitor completion
 

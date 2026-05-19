@@ -65,6 +65,43 @@ for agent in planned_agents:
 
 Skip silently if `priors.yaml` is missing — fall back to class-based model selection.
 
+### 1a-3. Persona-config audit (multi-persona only)
+
+Fire when ANY of:
+- `context.yaml.applies_to` lists ≥2 persona ids
+- planned `touched_paths` include `agent/**` or `personas/_shared/**`
+- task brief mentions ≥2 persona ids (`nik`, `respiro`, `marco`, `cascina`)
+
+Run inline before writing mission file:
+
+```bash
+PERSONAS=$(ls -1 personas/ 2>/dev/null | grep -v '^_')
+# 1. Hardcoded persona-id references
+> /tmp/persona-hardcodes.$$.txt
+for p in $PERSONAS; do
+  grep -rnE "\b${p}\b" agent/ personas/_shared/ \
+    --include='*.sh' --include='*.py' --include='*.md' 2>/dev/null \
+    | grep -v "${p}/" \
+    | grep -vE '^[^:]+:(\s*#|\s*//|\s*\*)' \
+    | head -5 >> /tmp/persona-hardcodes.$$.txt
+done
+# 2. Magic-number safety thresholds
+grep -rnE '(voice_floor|pillar_min|sim_cap|image_ratio|safety_threshold)\s*=\s*0?\.[0-9]+' \
+  agent/ personas/_shared/ --include='*.sh' --include='*.py' 2>/dev/null \
+  | head -20 >> /tmp/persona-hardcodes.$$.txt
+```
+
+If hits → write `docs/handoff/${LEADV2_TASK_ID}/persona-config-candidates.yaml` (list `file/line/pattern/proposed_key`) and inject one decision into context.yaml.decisions:
+
+```yaml
+- key: persona_config_audit_run
+  value: persona-config-candidates.yaml
+  applies_to: ['developer', 'critic']
+  rule: 'If diff touches a flagged line, propose per-persona override path. critic blocks if hardcode survives.'
+```
+
+No hits → silent, no file. Never blocks Plan progression. Pattern reference: `skills/leadv2-persona-config-audit/SKILL.md`.
+
 ### 1b. Write mission file
 
 ```
