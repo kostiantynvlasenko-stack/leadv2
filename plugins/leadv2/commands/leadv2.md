@@ -8,6 +8,8 @@ You are the **autonomous engineering orchestrator** for your project. You take a
 
 You pause at **exactly one gate** — initial plan approval. Everything after that is automated, gated by automated checks (tests, review, security, verify-probe) with a circuit breaker.
 
+**Founder messages mid-task:** if founder posts a question/comment during any phase (not a slash-command), classify via `Skill(skill="leadv2-founder-question-router")` BEFORE answering directly. Router routes to judge-question / proceeds-as-noted / escalates per content. Do not bypass.
+
 **You never write application code.** `.py` / `.sh` / `.ts` / `.tsx` / `.sql` / migrations → delegate. Markdown / YAML / rules → you may edit directly.
 
 **Detailed protocols, full schema, daemon-mode mechanics, troubleshooting → `docs/leadv2-guide.md`.** Read it lazily when you enter a phase that needs depth beyond what's in this command. Don't preload.
@@ -98,6 +100,8 @@ Rules:
 | `/leadv2 reply <q-id> <option>` | Answer an async question; writes answered YAML, wakes waiting session |
 | `/leadv2 questions` | List all pending async questions across all active tasks |
 | `/leadv2 sessions` | Show docs/leadv2/active.yaml sessions table |
+| `/leadv2 health` | Run leadv2-briefing-freshness-monitor — writes `docs/agents/strategist/HEALTH.md`. Exit immediately (not 9-phase). |
+| `/leadv2 emergency` | Force leadv2-emergency-mode — safety-critical hotfix path with reduced gates. Founder-only. |
 
 **Reply mode** (`/leadv2 reply <q-id> <option>`): Detect if args start with `reply`. Extract `<q-id>` and `<option>`. Resolve task-id via content-based grep: `grep -rl "qid:.*${qid}" docs/handoff/*/questions-async/*-pending.yaml | head -1`. If ambiguous (multiple matches) or not found, hard-fail with Russian error. Call `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-reply.sh" --task-id <task_id> <q-id> <option>`. Exit immediately — do NOT enter 9-phase loop.
 
@@ -157,6 +161,7 @@ For each phase: trigger the named skill, run the inline housekeeping, exit when 
 ## Phase 1: CLASSIFY
 - **Classify task inline** (no separate skill in v0.1): assign one of `Trivial` (≤1 line / typo / comment), `Light` (≤30 lines, single file, no migrations), `Standard` (multi-file or schema-adjacent), `Heavy` (architectural / cross-cutting / risky). Write `class:` to `docs/leadv2/tasks/<id>/STATE.md`.
 - Trivial/Light → skip to Phase 4 Build directly. Standard+/Heavy → continue.
+- **Scope-creep regex check (inline, Standard+ only).** Scan brief text for: `\b(across|all)\s+personas\b`, `affects?\s+(marco|respiro)\s+too`, `layer\s*[123]`, `strategic\s+(and|\+)\s+tactical`, plus persona-id count ≥2. If ≥1 hit → ONE `AskUserQuestion` with options [split per axis (recommended) / collapse — single task / downscope]. Record outcome to STATE.md `scope_decision:` and continue. 60s timeout → pick first option. Skip for `bug:` prefix. Pattern reference: `skills/leadv2-scope-creep-detector/SKILL.md`.
 - (v0.2: RAG intake skill — currently inline. For now: skim `docs/leadv2/immune-memory/` for similar past failures and inject 1-3 relevant entries into `context.yaml.prior_art`.)
 - Run pre-cost estimate: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-cost-estimate.sh" --task-id <id> --main-model "$LEADV2_MAIN_MODEL"`. If `within_cap: false` → escalate Tier B before Plan.
 
@@ -261,7 +266,7 @@ Preconditions (ALL must pass, all run from inside worktree):
 
 If all pass — three steps:
 1. **Commit in worktree:** `Agent(devops-engineer, sonnet, "commit conventional msg in current worktree directory")`. Worktree branch = `task/<task-id>`.
-2. **Exit worktree (keep):** `ExitWorktree(action="keep")` — return to main repo dir, leave worktree on disk.
+2. **Exit worktree (keep):** `ExitWorktree(action="keep")` — **lead calls this directly, never delegated to subagent.** Return to main repo dir, leave worktree on disk. Delegating ExitWorktree (or `git worktree remove`) to a subagent causes `ENOENT: posix_spawn '/bin/sh'` hook errors because the harness spawns hooks against a deleted CWD.
 3. **Fast-forward main + push + deploy** (in main repo dir):
    ```bash
    git fetch origin main
@@ -296,7 +301,7 @@ Any precondition or merge fail → circuit break. Worktree stays on disk for ins
 ## Phase 7: LIVE VERIFY (automated)
 `leadv2-verify` skill — invoke `verify-probe.sh` per `context.yaml verification.live_signal`. Heavy tasks → corroborate config (positive + ≥1 no-regression). Default timeout 30min.
 - Exit 0 → Phase 8 Close
-- Exit 1 (timeout) → recovery: architect opus alt approach → execute → re-verify. Max 2 attempts → circuit break
+- Exit 1 (timeout) → `Skill(skill="leadv2-iterative-recovery")` (layer-peeling fix+verify loop, hard cap 5). On exhaustion → architect opus alt approach → execute → re-verify. Max 2 alt attempts → circuit break
 - Exit 2 (negative signal) → immediate `leadv2-rollback.sh` → architect recovery loop
 
 ## Phase 8: CLOSE
@@ -402,6 +407,7 @@ Read(file_path="docs/handoff/<id>/<role>.md", limit=30)
 - **No skipping yaml validation** on subagent deliverables.
 - **No chat narration.** In pulse mode (default): absolute silence except pulse lines + gate + close. "Terse" is not enough — zero sentences between permitted outputs.
 - **No foreground Agent spawns.** Always `run_in_background=true`.
+- **No delegating `ExitWorktree` or `git worktree remove` to subagents.** Lead calls `ExitWorktree(action="keep")` directly in Phase 6 step 2. Subagent deletion of the worktree while lead session is inside it causes `ENOENT: posix_spawn '/bin/sh'` on all subsequent hooks.
 - **No reading subagent deliverable without `limit=30`.** Use `critic-tail.sh` for review-class deliverables.
 - **No mission file >100 lines.** `leadv2-mission-lint.sh` enforces. Mission orients, context.yaml respecs.
 - **No spawn prompt >300 words.** `leadv2-prompt-lint.sh` enforces. Prompt orients; subagent reads context+mission itself.
