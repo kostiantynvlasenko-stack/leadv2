@@ -24,13 +24,48 @@ Use the task description from one of:
 - The PO QUEUE item `body` or `title` field (for `/leadv2 next`)
 - `LEAD_V2_STATE.md note:` field as fallback
 
-### 2. Run the script
+### 2. Gemini summarize gate (large history)
+
+Before running the script, check if `LEAD_V2_STATE.md` (or the configured
+`history_path`) is large enough to warrant summarization:
+
+```bash
+HISTORY_PATH="${LEADV2_HISTORY_PATH:-docs/LEAD_V2_STATE.md}"
+HISTORY_CHARS=$(wc -c < "$HISTORY_PATH" 2>/dev/null || echo 0)
+
+if [[ "$HISTORY_CHARS" -gt 8000 ]]; then
+  # Check if Gemini is available (gate)
+  GEMINI_OK=0
+  if bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-gemini-check.sh" >/dev/null 2>&1; then
+    GEMINI_OK=1
+  fi
+
+  if [[ "$GEMINI_OK" == "1" ]]; then
+    SUMMARY_FILE="$(mktemp /tmp/leadv2-rag-history-summary.XXXXXX)"
+    bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-gemini-task.sh" summarize \
+      --input-file "$HISTORY_PATH" \
+      --prompt "Summarize the completed tasks in this leadv2 state history. For each task include: task_id, outcome, class, and key_lessons (max 2 per task). Output valid YAML list only." \
+      --out "$SUMMARY_FILE" || {
+        # Fallback: use original file if Gemini fails
+        SUMMARY_FILE="$HISTORY_PATH"
+      }
+    EFFECTIVE_HISTORY="$SUMMARY_FILE"
+  else
+    # Gemini unavailable — read directly (may be large)
+    EFFECTIVE_HISTORY="$HISTORY_PATH"
+  fi
+else
+  EFFECTIVE_HISTORY="$HISTORY_PATH"
+fi
+```
+
+### 3. Run the script
 
 ```bash
 bash .claude/scripts/leadv2-rag-intake.sh \
   --task-description "<task description>" \
   --top-k 3 \
-  --history-path docs/LEAD_V2_STATE.md
+  --history-path "$EFFECTIVE_HISTORY"
 ```
 
 Capture stdout as `prior_art_yaml`.
@@ -40,7 +75,7 @@ Failure modes (all non-fatal — do NOT block intake):
 - Empty output / `[]` → cold territory, continue
 - Embedding model not available → script auto-falls back to keyword similarity; still use result
 
-### 3. Write prior-art.yaml
+### 4. Write prior-art.yaml
 
 ```bash
 mkdir -p docs/handoff/<task-id>
@@ -54,7 +89,7 @@ If output is `[]` or empty, write:
 []
 ```
 
-### 4. Update LEAD_V2_STATE.md current_task block
+### 5. Update LEAD_V2_STATE.md current_task block
 
 Add a `prior_art:` field under the current task block.
 
@@ -68,7 +103,7 @@ If cold territory (no results or top similarity < 0.6):
 prior_art: "cold territory — no similar past tasks"
 ```
 
-### 5. Warn on rolled_back / paused_recovery outcomes
+### 6. Warn on rolled_back / paused_recovery outcomes
 
 If the top match has `outcome: rolled_back` OR `outcome: paused_recovery` AND similarity >= 0.6:
 
@@ -77,7 +112,7 @@ Append to LEAD_V2_STATE.md current_task note:
 WARN: Similar task <task_id> failed recently (outcome: <outcome>) — review key_lessons before Plan
 ```
 
-### 6. Output to lead (chat)
+### 7. Output to lead (chat)
 
 One line, ≤25 words, Russian preferred:
 
