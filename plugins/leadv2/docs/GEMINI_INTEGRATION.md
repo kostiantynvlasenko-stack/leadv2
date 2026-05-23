@@ -23,6 +23,7 @@ Gemini is **not** a Claude replacement. Opus still wins SWE-Bench Pro by 9pp. Us
 | Short knowledge Q&A (math, lookup, classification) | consult | `leadv2-gemini-task.sh consult` |
 | On-demand UI/UX inspection of a deployed URL (visual + copy + hierarchy) | agent | `leadv2-gemini-ui-check` skill |
 | Multi-step agentic file ops in a scratch workspace | agent | `leadv2-gemini-task.sh agent` |
+| Write exact-content files to a workspace from a mission file | developer | `leadv2-gemini-developer.sh` |
 
 ## When NOT to call Gemini
 
@@ -32,13 +33,18 @@ Gemini is **not** a Claude replacement. Opus still wins SWE-Bench Pro by 9pp. Us
 - **Persona voice/content generation** — invariant for persona-engine: voice DNA stays Claude+RAG.
 - **Anything secret/proprietary on m3-market** — see compliance note in `<repo>/.claude/leadv2-overrides/gemini-policy.yaml`.
 
-## Headless caveats (agy 1.0.1, verified 2026-05-22)
+## Headless caveats (agy 1.0.1, verified 2026-05-22 / 2026-05-23)
 
 Antigravity CLI is interactive-first. `--print` headless mode is buggy:
 
+- **`--print` flag takes the next arg as its VALUE (the prompt).** Flag order is critical: other flags (`--dangerously-skip-permissions`, `--add-dir`) must come BEFORE `--print "$PROMPT"`. Wrong order causes a flag string to be used as the prompt text.
+- **stdin hang from bash scripts** — when `agy` is launched from a bash script (not interactive shell), it hangs reading stdin. Always add `< /dev/null` to the agy invocation in scripts.
+- **`~/.gemini/antigravity-cli/skills` dir must exist** — if missing, agy's cascade step (CORTEX_STEP_TYPE_LIST_DIRECTORY) fails and print mode times out with no output. Run `mkdir -p ~/.gemini/antigravity-cli/skills` once on initial setup.
+- **`--dangerously-skip-permissions` without `--add-dir`** triggers meta-mode about the flag. Always pair with a workspace dir.
+- **`--dangerously-skip-permissions + --add-dir` from `$HOME` cwd** — hangs with "Error: timed out waiting for response". Must run from a git repo cwd (the --add-dir workspace is separate). Do NOT `cd "$HOME"` before calling agy in agentic mode.
+- **Empty workspace + generic prompt** — Gemini enters meta-mode (explains flags, asks what to do). Prompt must start with `"Use your built-in file-write tool to create..."` and specify exact absolute paths and content inline to prevent exploration.
+- **Agentic quota (free tier)** — separate from consult quota. Exhausts quickly (~5-10 agentic calls). Resets in ~7 days. Consult/summarize/research modes have lighter quota.
 - **`--print-timeout` flag** triggers tool-use exploration. Never pass it. Use shell `timeout` only.
-- **`--dangerously-skip-permissions` without `--add-dir`** triggers meta-mode about the flag. Always pair with a workspace dir (use the seeded `~/.gemini/antigravity-cli/scratch/leadv2`).
-- **`--print` + cwd in a real repo** — agy ignores prompt, explores the repo via codebase-memory-mcp. Always `cd` to a clean scratch dir or `$HOME` first.
 - **Browser tool in `--print`** — works ~25% of the time empirically. Falls back to Playwright (`leadv2-browser-check`) when it goes meta.
 - **`-m <model>` flag** — does not exist in 1.0.1. Switch Flash↔Pro via `/model` in Antigravity.app GUI; CLI inherits.
 - **`@file` syntax** — works in TUI, doesn't return content in `--print`. Inline content into prompt instead.
