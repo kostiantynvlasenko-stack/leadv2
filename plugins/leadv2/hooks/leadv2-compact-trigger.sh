@@ -46,7 +46,30 @@ fi
 [[ -z "$JSONL" ]] && exit 0
 [[ ! -f "$JSONL" ]] && exit 0
 
-BYTES=$(wc -c < "$JSONL" | tr -d ' ')
+# Count only bytes from last /compact event (not pre-compact history)
+LAST_COMPACT_LINE=$(python3 -c "
+import json, sys
+last = 0
+try:
+    with open('$JSONL') as fh:
+        for i, line in enumerate(fh):
+            try:
+                r = json.loads(line)
+                msg = r.get('message') or {}
+                c = msg.get('content', '')
+                if isinstance(c, str) and '<command-name>/compact</command-name>' in c:
+                    last = i
+            except: pass
+except: pass
+print(last)
+" 2>/dev/null || echo 0)
+BYTES=$(python3 -c "
+import os, sys
+with open('$JSONL') as fh:
+    lines = fh.readlines()
+start = int('$LAST_COMPACT_LINE') if '$LAST_COMPACT_LINE' else 0
+print(sum(len(l) for l in lines[start:]))
+" 2>/dev/null || wc -c < "$JSONL" | tr -d ' ')
 KB=$((BYTES / 1024))
 EST_TOKENS=$((BYTES / 4))
 EST_K=$((EST_TOKENS / 1000))
@@ -107,35 +130,24 @@ PREV_LEVEL="$(cat "$MARKER" 2>/dev/null || echo "")"
 [[ "$LEVEL" == "$PREV_LEVEL" ]] && exit 0
 echo "$LEVEL" > "$MARKER"
 
+# Write to pending-warn file so user-prompt-context.sh delivers it on next turn
+PENDING_WARN="$HOME/.claude/leadv2-pending-warn-${SESSION_ID}.txt"
+
 case "$LEVEL" in
   emergency)
-    cat >> "$HOME/.claude/leadv2-compact-trigger.log" <<MSG
-[leadv2-compact-trigger] EMERGENCY${TASK_NOTE}
-  Session: ${KB}KB ≈ ${EST_K}K tokens prefix per turn (founder typed ${FOUNDER_TURNS}x).
-  Each new turn now sends ${EST_K}K input. Daily Opus quota = ~50M.
-  ACTION: /compact NOW. Or close session, /clear, resume from STATE.md.
-MSG
+    MSG="[COMPACT_NOW] Контекст: ${KB}KB (~${EST_K}K токенов после последнего /compact${TASK_NOTE}). Каждый ход = ${EST_K}K input. Скажи фаундеру одной строкой: 'Нужен /compact — контекст ${EST_K}K токенов.' Потом жди."
     ;;
   hard)
-    cat >> "$HOME/.claude/leadv2-compact-trigger.log" <<MSG
-[leadv2-compact-trigger] HARD${TASK_NOTE}
-  Session: ${KB}KB ≈ ${EST_K}K tokens prefix per turn (founder typed ${FOUNDER_TURNS}x).
-  /compact at next phase boundary — past this point cost grows fast.
-MSG
+    MSG="[COMPACT_NEEDED] Контекст: ${KB}KB (~${EST_K}K токенов${TASK_NOTE}). На следующей фазовой границе скажи фаундеру: 'Нужен /compact перед следующей фазой.'"
     ;;
   warn)
-    cat >> "$HOME/.claude/leadv2-compact-trigger.log" <<MSG
-[leadv2-compact-trigger] WARN${TASK_NOTE}
-  Session: ${KB}KB (${EST_K}K tokens prefix). Plan a /compact at next phase boundary.
-  Most common cause: lead doing too many tool calls per founder turn (read-everything pattern).
-MSG
+    MSG="[COMPACT_WARN] Контекст: ${KB}KB (~${EST_K}K токенов${TASK_NOTE}). Упомяни /compact если фаундер спросит о сессии."
     ;;
   long_chat)
-    cat >> "$HOME/.claude/leadv2-compact-trigger.log" <<MSG
-[leadv2-compact-trigger] LONG${TASK_NOTE}
-  Founder typed ${FOUNDER_TURNS}x in this session — usually means task should have been split.
-  Consider closing this task (Phase 11) and starting fresh for next.
-MSG
+    MSG="[LONG_CHAT] Фаундер напечатал ${FOUNDER_TURNS}x в этой сессии."
     ;;
 esac
+
+# Append (don't overwrite — other hooks may also write)
+echo "$MSG" >> "$PENDING_WARN" 2>/dev/null || true
 exit 0

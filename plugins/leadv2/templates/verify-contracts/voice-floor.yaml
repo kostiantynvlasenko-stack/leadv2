@@ -1,0 +1,30 @@
+name: voice-floor-stability
+type: no-regression
+applies_to_when:
+  - context.yaml.touched_paths matches 'agent/safety-gate*'
+  - context.yaml.touched_paths matches 'personas/*/voice-dna.md'
+  - context.yaml.decisions[].key contains 'voice_floor'
+description: |
+  After deploy, no generation in the next 10 minutes scores below
+  `personas.{persona_id}.config.voice_floor` (or 0.30 default). Catches
+  hardcoded-threshold regressions and per-persona drift (e.g. Respiro
+  systematically below Nik-tuned default).
+query: |
+  -- Run via psql "$SUPABASE_DB_URL" -tAc
+  SELECT
+    COALESCE(MIN(voice_score), 1.0) AS min_score,
+    COUNT(*) AS gens_checked
+  FROM agent_outputs
+  WHERE persona_id = '${PERSONA_ID}'
+    AND created_at > now() - interval '10 minutes';
+exit_contract:
+  # min_score comparison performed by harness; this script returns numeric
+  # min_score on stdout. Harness compares to `persona.config.voice_floor`:
+  0: min_score >= voice_floor (ok)
+  1: min_score >= voice_floor * 0.9 (warn, soft)
+  2: min_score < voice_floor * 0.9 (block — Phase 7 recovery)
+timeout_sec: 30
+source_tasks:
+  - AUDIT-COMMENT-VARIANT-EVAL-01    # 2026-05-13
+  - FIX-VOICE-FLOOR-ENFORCE-01       # 2026-05-14
+  - BUG-NIK-VOICE-SCORE-LOW-01       # 2026-05-15

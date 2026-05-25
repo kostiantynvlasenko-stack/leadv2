@@ -12,27 +12,61 @@ CWD="$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
 [[ -z "$CWD" ]] && CWD="$PWD"
 SESSION_ID="$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
 
-# Find session JSONL to estimate size
-JSONL=""
-if [[ -n "$SESSION_ID" ]]; then
-  JSONL="$(find "$HOME/.claude/projects/" -maxdepth 2 -name "${SESSION_ID}.jsonl" -type f 2>/dev/null | head -1)"
-fi
-
 CTX_PARTS=()
 
-# === 1. Bloat warning ===
-if [[ -n "$JSONL" && -f "$JSONL" ]]; then
-  BYTES=$(wc -c < "$JSONL" | tr -d ' ')
-  KB=$((BYTES / 1024))
-  TOK_K=$((BYTES / 4 / 1000))
-  if [[ "$BYTES" -ge 1572864 ]]; then
-    CTX_PARTS+=("[SESSION_BLOAT_HARD] ${KB}KB / ~${TOK_K}K tokens prefix. Internal signal — do NOT interrupt the founder mid-phase to mention this. Continue current phase; founder will /compact when ready.")
-  elif [[ "$BYTES" -ge 524288 ]]; then
-    CTX_PARTS+=("[SESSION_BLOAT_WARN] ${KB}KB / ~${TOK_K}K tokens prefix. Internal signal only — do NOT mention to founder mid-phase.")
+# === 0. /compact intercept: write pre-compact-resume.md BEFORE compact executes ===
+PROMPT_TEXT="$(echo "$INPUT" | jq -r '.prompt // .message // empty' 2>/dev/null || echo "")"
+if echo "$PROMPT_TEXT" | grep -q '<command-name>/compact</command-name>'; then
+  # Find active task
+  ACTIVE_FILE=""
+  for f in "$CWD/.claude/leadv2-tasks/active.yaml" "$CWD/docs/leadv2/active.yaml"; do
+    [[ -f "$f" ]] && ACTIVE_FILE="$f" && break
+  done
+  if [[ -n "$ACTIVE_FILE" ]]; then
+    TID_FOR_RESUME="$(python3 -c "
+import yaml
+try:
+    d = yaml.safe_load(open('$ACTIVE_FILE')) or {}
+    s = (d.get('sessions') or [])
+    print(s[0].get('task_id','') if s else '')
+except: print('')
+" 2>/dev/null || echo "")"
+    if [[ -n "$TID_FOR_RESUME" ]]; then
+      RESUME_DIR="$CWD/docs/leadv2/tasks/$TID_FOR_RESUME"
+      mkdir -p "$RESUME_DIR" 2>/dev/null || true
+      RESUME_FILE="$RESUME_DIR/pre-compact-resume.md"
+      # Read current phase from active.yaml
+      PHASE_NOW="$(python3 -c "
+import yaml
+try:
+    d = yaml.safe_load(open('$ACTIVE_FILE')) or {}
+    s = (d.get('sessions') or [])
+    print(s[0].get('phase','?') if s else '?')
+except: print('?')
+" 2>/dev/null || echo "?")"
+      # Read latest handoff artifact to infer context
+      HANDOFF_DIR="$CWD/docs/handoff/$TID_FOR_RESUME"
+      LATEST_ARTIFACT=""
+      if [[ -d "$HANDOFF_DIR" ]]; then
+        LATEST_ARTIFACT="$(ls -t "$HANDOFF_DIR"/*.md "$HANDOFF_DIR"/*.yaml 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "")"
+      fi
+      cat > "$RESUME_FILE" <<RESUME
+# pre-compact-resume: $TID_FOR_RESUME
+written: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+task_id: $TID_FOR_RESUME
+phase: $PHASE_NOW
+latest_handoff: ${LATEST_ARTIFACT:-unknown}
+---
+You are the LEADV2 ORCHESTRATOR. Task: $TID_FOR_RESUME, phase: $PHASE_NOW.
+After /compact: read docs/leadv2/tasks/$TID_FOR_RESUME/STATE.md limit=20 and docs/handoff/$TID_FOR_RESUME/context.yaml limit=30.
+NEVER write .py/.sh/.ts/.tsx/.sql directly. Delegate ALL code changes to developer subagents.
+RESUME
+    fi
   fi
 fi
 
 # === 2. Active leadv2 task summary ===
+TID_ACTIVE=""
 ACTIVE=""
 for f in "$CWD/.claude/leadv2-tasks/active.yaml" "$CWD/docs/leadv2/active.yaml"; do
   [[ -f "$f" ]] && ACTIVE="$f" && break

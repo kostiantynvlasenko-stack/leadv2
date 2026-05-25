@@ -1,0 +1,36 @@
+name: content-analysis-freshness
+type: no-regression
+applies_to_when:
+  - context.yaml.touched_paths matches 'agent/strategist*'
+  - context.yaml.touched_paths matches 'scripts/backfill-content-analysis*'
+  - context.yaml.touched_paths matches 'agent/strategist-weekly*'
+description: |
+  After deploy, `content_analysis` table coverage for the touched persona
+  stays within 20% of `posts` over a 14-day window. Catches off-by-one date
+  bugs in strategist-weekly.sh and silent backfill failures.
+query: |
+  SELECT
+    p.handle,
+    COUNT(DISTINCT po.id) AS posts_14d,
+    COUNT(DISTINCT ca.post_id) AS analyzed_14d,
+    CASE WHEN COUNT(DISTINCT po.id) = 0 THEN 0.0
+         ELSE ROUND(
+           (COUNT(DISTINCT po.id) - COUNT(DISTINCT ca.post_id))::numeric
+           / COUNT(DISTINCT po.id), 3)
+    END AS divergence
+  FROM personas p
+  LEFT JOIN posts po
+    ON po.persona_id = p.id
+    AND po.created_at > now() - interval '14 days'
+  LEFT JOIN content_analysis ca
+    ON ca.post_id = po.id
+  WHERE p.handle = '${PERSONA_HANDLE}'
+  GROUP BY p.handle;
+exit_contract:
+  0: divergence <= 0.20 (ok)
+  1: divergence <= 0.40 (warn — briefing partially stale)
+  2: divergence > 0.40 (block — strategist briefing will be wrong)
+timeout_sec: 30
+source_tasks:
+  - STRAT-RESPIRO-OVERHAUL-01        # 2026-05-13
+  - BUG-CRITIC-DEFER-RATE-INVESTIGATE-01  # 2026-05-14

@@ -14,7 +14,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_ROOT:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}}"
+# Resolution order: explicit override → CLAUDE_PROJECT_DIR (v2.1.144+) → PROJECT_ROOT → git toplevel → cwd
+LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}}"
 
 # Source registry for mark_stale op
 # shellcheck source=leadv2-active-registry.sh
@@ -38,7 +39,13 @@ STALE_THRESHOLD_SEC=7200  # 2 hours
 # ── 1 + 2: Load active.yaml, detect stale sessions ────────────────────────
 stale_task_ids=()
 
-python3 - "$YAML_FILE" "$STALE_THRESHOLD_SEC" <<'PYEOF' > /tmp/leadv2-sweep-result.$$.json
+# Fetch claude agents --json once per sweep (cached 30s in helper).
+# Falls back gracefully on old CLI or missing binary (empty string).
+# shellcheck source=leadv2-helpers.sh
+source "$SCRIPT_DIR/leadv2-helpers.sh"
+_CLAUDE_AGENTS_JSON="$(_leadv2_claude_agents_json 2>/dev/null || true)"
+
+python3 - "$YAML_FILE" "$STALE_THRESHOLD_SEC" "$_CLAUDE_AGENTS_JSON" <<'PYEOF' > /tmp/leadv2-sweep-result.$$.json
 import sys, os, json, time
 from datetime import datetime, timezone
 
@@ -49,8 +56,28 @@ except ImportError:
     sys.exit(0)
 
 yaml_file, threshold_str = sys.argv[1], sys.argv[2]
+# sys.argv[3]: JSON string from `claude agents --json` (may be empty/absent)
+agents_json_str = sys.argv[3] if len(sys.argv) > 3 else ""
 threshold_sec = int(threshold_str)
 now_ts = time.time()
+
+# Parse live session IDs from `claude agents --json` output.
+# Each entry is expected to have an "id" or "session_id" field.
+# If parsing fails or output is empty, live_session_ids stays None (= unavailable).
+live_session_ids = None  # None means: CLI unavailable, fall back to PID-only
+if agents_json_str.strip():
+    try:
+        agents_data = json.loads(agents_json_str)
+        if isinstance(agents_data, list):
+            live_session_ids = set()
+            for entry in agents_data:
+                for key in ("id", "session_id", "sessionId"):
+                    val = entry.get(key)
+                    if val:
+                        live_session_ids.add(str(val))
+                        break
+    except (json.JSONDecodeError, AttributeError):
+        live_session_ids = None  # unavailable, fall back to PID-only
 
 if not os.path.exists(yaml_file):
     print("[]")
@@ -65,13 +92,14 @@ stale_results = []
 for s in sessions:
     task_id = s.get("task_id", "?")
     pid = s.get("pid")
+    session_id = s.get("session_id", "")
     last_pulse = s.get("last_pulse_at") or s.get("started_at") or ""
     already_stale = s.get("stale", False)
 
     if already_stale:
         continue
 
-    # Check pid liveness
+    # Check pid liveness (primary signal — always evaluated)
     pid_dead = True
     if pid is not None:
         try:
@@ -94,12 +122,29 @@ for s in sessions:
         except (ValueError, TypeError):
             pulse_old = True
 
-    if pid_dead and pulse_old:
-        stale_results.append({
-            "task_id": task_id,
-            "pid": pid,
-            "last_pulse_at": last_pulse,
-        })
+    # Supplementary: check if session_id appears in `claude agents --json` output.
+    # Only used as ADDITIONAL evidence — both conditions (pid_dead AND not_in_agents)
+    # must hold for this path to mark stale.  If claude agents JSON is unavailable,
+    # fall back to legacy PID-only logic unchanged.
+    if live_session_ids is not None:
+        # High-confidence orphan: PID dead AND not in live agents list
+        not_in_agents = (session_id not in live_session_ids)
+        if pid_dead and not_in_agents and pulse_old:
+            stale_results.append({
+                "task_id": task_id,
+                "pid": pid,
+                "last_pulse_at": last_pulse,
+                "orphan_reason": "pid_dead+not_in_agents",
+            })
+    else:
+        # Fallback: legacy PID-only logic (claude agents unavailable)
+        if pid_dead and pulse_old:
+            stale_results.append({
+                "task_id": task_id,
+                "pid": pid,
+                "last_pulse_at": last_pulse,
+                "orphan_reason": "pid_dead_only",
+            })
 
 print(json.dumps(stale_results))
 PYEOF
@@ -218,6 +263,73 @@ if [[ "$stale_count" -gt 0 && "$INTERACTIVE" == "true" ]]; then
       log "skipped — stale rows remain marked"
       ;;
   esac
+fi
+
+# ── 5b: Orphan worktree detection ─────────────────────────────────────────
+# A worktree exists on disk but its task_id is NOT in active.yaml. Two sub-cases:
+#   (i)  branch is fully merged into main  → cleanup handled by GC at end of file
+#   (ii) branch carries unmerged commits   → ambiguous state, surface to founder
+# Catches the 2026-05-12..05-19 pattern where Phase 8 close ran but Phase 6 ff-merge
+# never landed, so feature commits live only in the worktree branch.
+orphan_count=0
+orphan_unmerged=()
+WORKTREES_DIR_S5b="${LEADV2_PROJECT_ROOT}/.claude/worktrees"
+if [[ -d "$WORKTREES_DIR_S5b" ]]; then
+  while IFS= read -r wt_line; do
+    wt_path="${wt_line#worktree }"
+    [[ "$wt_path" == "$LEADV2_PROJECT_ROOT" ]] && continue
+    wt_name=$(basename "$wt_path")
+    [[ "$wt_name" == .* ]] && continue
+    # Is this task in active.yaml?
+    in_active=$(python3 -c "
+import sys, os
+try:
+    import yaml
+except ImportError:
+    print('yes'); sys.exit(0)
+f = sys.argv[1]; name = sys.argv[2]
+if not os.path.exists(f): print('no'); sys.exit(0)
+with open(f) as fh: d = yaml.safe_load(fh) or {}
+sessions = d.get('sessions') or []
+print('yes' if any(s.get('task_id') == name for s in sessions) else 'no')
+" "$YAML_FILE" "$wt_name" 2>/dev/null) || in_active=yes
+    [[ "$in_active" == "yes" ]] && continue
+    # Skip if branch already merged (handled by GC step at end)
+    branch="worktree-${wt_name}"
+    if git -C "$LEADV2_PROJECT_ROOT" branch --merged main 2>/dev/null \
+        | grep -qE "^\*?[[:space:]]+${branch}$"; then
+      continue
+    fi
+    # Unmerged commits exist
+    orphan_count=$(( orphan_count + 1 ))
+    last_oneline=$(git -C "$wt_path" log -1 --pretty='%h %s' 2>/dev/null || echo "?")
+    orphan_unmerged+=("$wt_name :: $last_oneline")
+  done < <(git -C "$LEADV2_PROJECT_ROOT" worktree list --porcelain 2>/dev/null | grep '^worktree ')
+fi
+
+if [[ "$orphan_count" -gt 0 ]]; then
+  log "$orphan_count orphan worktree(s) with UNMERGED commits (not in active.yaml):"
+  for entry in "${orphan_unmerged[@]+"${orphan_unmerged[@]}"}"; do
+    log "  - $entry"
+  done
+  if [[ "$INTERACTIVE" == "true" ]]; then
+    printf -- '[sweeper] action for each? [k=keep all / d=discard all / s=skip]: '
+    read -r ow_answer
+    case "${ow_answer:-s}" in
+      d|discard)
+        for entry in "${orphan_unmerged[@]+"${orphan_unmerged[@]}"}"; do
+          wt_name="${entry%% ::*}"
+          bash "${SCRIPT_DIR}/leadv2-worktree-cleanup.sh" --name "$wt_name" --force 2>/dev/null \
+            && log "discarded orphan: $wt_name" \
+            || log "discard failed: $wt_name (run manually)"
+        done
+        ;;
+      k|keep) log "keeping orphan worktrees — manual review required" ;;
+      *) log "skipped — orphans remain (will re-surface next startup)" ;;
+    esac
+  else
+    log "non-interactive — orphans logged only; run /leadv2 with TTY to resolve"
+  fi
 fi
 
 # ── 6: Reset budget if date mismatch ──────────────────────────────────────

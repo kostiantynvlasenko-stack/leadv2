@@ -35,7 +35,8 @@ if [[ -z "${LEADV2_PROJECT_ROOT:-}" && -z "${PROJECT_ROOT:-}" ]]; then
     LEADV2_PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
   fi
 else
-  LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+  # Resolution order: explicit override → CLAUDE_PROJECT_DIR (v2.1.144+) → PROJECT_ROOT → git toplevel → cwd
+  LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}}"
 fi
 unset _git_toplevel _git_dir
 
@@ -1824,6 +1825,56 @@ YAML
   done
 }
 
+# ── _leadv2_claude_agents_json ────────────────────────────────────────────────
+# Call `claude agents --json` with a 5-second timeout.
+# Returns JSON on stdout; empty string on any failure (binary missing, timeout,
+# non-zero exit, unsupported CLI version).
+#
+# Caches result in /tmp/leadv2-claude-agents-cache-$$.json for 30 seconds keyed
+# by the current process-group PID ($$) so a single sweep never spams the CLI.
+# Callers that need one-per-sweep caching should invoke this once and pass the
+# result around — do NOT call from inside a per-session loop.
+#
+# Usage:
+#   agents_json=$(_leadv2_claude_agents_json)
+#   if [[ -n "$agents_json" ]]; then
+#     # use the JSON
+#   fi
+_leadv2_claude_agents_json() {
+  local cache_file="/tmp/leadv2-claude-agents-cache-$$.json"
+  local cache_ttl=30
+
+  # Return cached result if fresh enough
+  if [[ -f "$cache_file" ]]; then
+    local cache_age
+    cache_age=$(( $(date -u +%s) - $(python3 -c "import os,sys; print(int(os.path.getmtime(sys.argv[1])))" "$cache_file" 2>/dev/null || echo 0) ))
+    if [[ "$cache_age" -le "$cache_ttl" ]]; then
+      cat "$cache_file"
+      return 0
+    fi
+  fi
+
+  # Check binary availability
+  if ! command -v claude >/dev/null 2>&1; then
+    printf -- '' > "$cache_file" 2>/dev/null || true
+    printf -- ''
+    return 0
+  fi
+
+  # Run with 5-second timeout; suppress stderr entirely so old CLIs don't log noise
+  local raw
+  raw=$(timeout 5 claude agents --json 2>/dev/null) || true
+
+  # Validate output is JSON (non-empty); fall back to empty on bad output
+  if [[ -n "$raw" ]] && python3 -c "import sys,json; json.loads(sys.argv[1])" "$raw" 2>/dev/null; then
+    printf -- '%s' "$raw" > "$cache_file" 2>/dev/null || true
+    printf -- '%s' "$raw"
+  else
+    printf -- '' > "$cache_file" 2>/dev/null || true
+    printf -- ''
+  fi
+}
+
 # Export fun names so subshells see them.
 # `export -f` is bash-only — in zsh it is interpreted as `typeset -f` and
 # prints the entire function body to stdout (200+ lines per source). Only run
@@ -1877,4 +1928,5 @@ if [[ -n "${BASH_VERSION:-}" ]]; then
   export -f leadv2_pulse_log
   export -f leadv2_ask_async
   export -f leadv2_wait_answer
+  export -f _leadv2_claude_agents_json
 fi

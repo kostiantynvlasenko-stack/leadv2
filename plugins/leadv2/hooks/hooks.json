@@ -236,6 +236,12 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-compact-trigger.sh\"",
+            "continueOnBlock": true,
+            "timeout": 8
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-auto-clear-after-close.sh\"",
             "timeout": 5
           },

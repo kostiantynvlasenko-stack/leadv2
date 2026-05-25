@@ -5,6 +5,19 @@
 # tool-output compression for /leadv2 subsessions.
 #
 # Usage: identical to claude-subsession.sh — all arguments are forwarded.
+#   --role <role>           Role name (required, consumed by inner script)
+#   --model <model>         Model alias e.g. sonnet, opus, haiku (required)
+#   --task-id <id>          Task id (required)
+#   --mission-file <path>   Mission markdown file (required)
+#   --session-id <id>       Optional session id
+#   --effort <level>        Optional effort: max|high (forwarded to inner script)
+#   --wait                  Wait for completion before returning
+#
+# NOTE on LEADV2_SPAWN_* env vars: those vars control leadv2-session-spawner.sh
+# (the daemon spawn path). This wrapper uses claude-subsession.sh which has its
+# own --model/--effort CLI flags. Pass model/effort as CLI args here, not via
+# LEADV2_SPAWN_* env vars. LEADV2_SPAWN_MCP_CONFIG, LEADV2_SPAWN_SETTINGS, and
+# LEADV2_SPAWN_PERMISSION_MODE are not applicable to the subsession path.
 #
 # What this wrapper adds:
 #   1. Sets LEADV2_COMPRESS_TOOL_OUTPUT=1 so the hook script is not a no-op.
@@ -30,7 +43,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# Resolution order: explicit override → CLAUDE_PROJECT_DIR (v2.1.144+) → script-relative fallback
+PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd)}}"
 export LEADV2_PROJECT_ROOT="${PROJECT_ROOT}"
 
 REAL_SUBSESSION="${HOME}/.claude/scripts/claude-subsession.sh"

@@ -1,0 +1,41 @@
+name: engagement-baseline
+type: no-regression
+applies_to_when:
+  - context.yaml.touched_paths matches 'agent/bandit*'
+  - context.yaml.touched_paths matches 'agent/scoring*'
+  - context.yaml.touched_paths matches 'agent/strategy*'
+description: |
+  Rolling p50 of engagement_24h for the touched persona doesn't fall more than
+  40% over the 48h window post-deploy vs the prior 48h baseline. Strategy /
+  bandit / scoring changes that look fine in unit tests can silently tank
+  engagement; this catches it.
+query: |
+  WITH baseline AS (
+    SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY engagement_24h) AS p50
+    FROM posts
+    WHERE persona_id = '${PERSONA_ID}'
+      AND created_at BETWEEN now() - interval '4 days' AND now() - interval '2 days'
+      AND engagement_24h IS NOT NULL
+  ),
+  post_deploy AS (
+    SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY engagement_24h) AS p50
+    FROM posts
+    WHERE persona_id = '${PERSONA_ID}'
+      AND created_at > now() - interval '48 hours'
+      AND engagement_24h IS NOT NULL
+  )
+  SELECT
+    baseline.p50 AS baseline_p50,
+    post_deploy.p50 AS current_p50,
+    CASE WHEN baseline.p50 = 0 OR baseline.p50 IS NULL THEN 0.0
+         ELSE (baseline.p50 - post_deploy.p50) / baseline.p50
+    END AS drop_ratio
+  FROM baseline, post_deploy;
+exit_contract:
+  0: drop_ratio <= 0.20 (ok)
+  1: drop_ratio between 0.20 and 0.40 (warn — investigate at next /leadv2)
+  2: drop_ratio > 0.40 (block — auto-rollback path)
+timeout_sec: 45
+source_tasks:
+  - FOLLOWUP-RPU-05-ENGAGEMENT-BASELINE  # 2026-05-15
+  - OPT-COMMENT-PRESCREENING-01           # 2026-05-13

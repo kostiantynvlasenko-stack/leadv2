@@ -23,7 +23,8 @@
 set -euo pipefail
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT:-$(pwd)}}"
+# Resolution order: explicit override → CLAUDE_PROJECT_DIR (v2.1.144+) → PROJECT_ROOT → cwd
+LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(pwd)}}}"
 
 _leadv2_yaml_file() {
   printf -- '%s/docs/leadv2/active.yaml' "${LEADV2_PROJECT_ROOT}"
@@ -65,10 +66,12 @@ args          = sys.argv[4:]
 
 INITIAL = {
     "meta": {
-        "schema_version": 1,
+        "schema_version": 2,
         "rendered_at": "",
-        "hard_limit": 2,
+        "hard_limit": 3,
         "heavy_strategic_solo": True,
+        "light_max": 3,
+        "standard_max": 2,
     },
     "sessions": [],
 }
@@ -378,17 +381,18 @@ PYEOF
 # Exit codes: 0=OK, 1=hard_limit_reached, 2=heavy_conflict, 3=budget_refused
 leadv2_active_check_limits() {
   local cls="${1:-Standard}"
-  local yaml_file
+  local yaml_file overrides_file
   yaml_file="$(_leadv2_yaml_file)"
+  overrides_file="${LEADV2_PROJECT_ROOT}/.claude/leadv2-overrides/active-limits.yaml"
 
-  python3 - "$yaml_file" "$cls" <<'PYEOF'
+  python3 - "$yaml_file" "$cls" "$overrides_file" <<'PYEOF'
 import sys, os
 try:
     import yaml
 except ImportError:
     sys.exit(0)  # fail open if yaml missing
 
-yaml_file, cls = sys.argv[1], sys.argv[2]
+yaml_file, cls, overrides_file = sys.argv[1], sys.argv[2], sys.argv[3]
 
 if not os.path.exists(yaml_file):
     sys.exit(0)
@@ -399,20 +403,55 @@ with open(yaml_file, encoding="utf-8") as fh:
 meta = data.get("meta") or {}
 sessions = [s for s in (data.get("sessions") or []) if not s.get("stale")]
 
-hard_limit = meta.get("hard_limit", 2)
-heavy_strategic_solo = meta.get("heavy_strategic_solo", True)
+# Repo-local override (per leadv2-overrides/active-limits.yaml) wins over active.yaml meta
+overrides = {}
+if os.path.exists(overrides_file):
+    try:
+        with open(overrides_file, encoding="utf-8") as fh:
+            overrides = yaml.safe_load(fh) or {}
+    except Exception as e:
+        print(f"[registry] WARN: failed to read overrides {overrides_file}: {e}", file=sys.stderr)
 
-# Check hard limit
+def _resolve(key, default):
+    if key in overrides:
+        return overrides[key]
+    if key in meta:
+        return meta[key]
+    return default
+
+hard_limit           = _resolve("hard_limit", 3)
+heavy_strategic_solo = _resolve("heavy_strategic_solo", True)
+light_max            = _resolve("light_max", 3)
+standard_max         = _resolve("standard_max", 2)
+
+cls_l = cls.lower()
+
+# Check hard limit (total active sessions, all classes)
 if len(sessions) >= hard_limit:
     print(f"[registry] hard limit reached: {len(sessions)}/{hard_limit} active sessions", file=sys.stderr)
     sys.exit(1)
 
-# Check heavy/strategic conflict
-if cls.lower() in ("heavy", "strategic") and heavy_strategic_solo:
+# Check heavy/strategic conflict (solo rule)
+if cls_l in ("heavy", "strategic") and heavy_strategic_solo:
     conflicting = [s for s in sessions if s.get("class", "").lower() in ("heavy", "strategic")]
     if conflicting:
         print(f"[registry] heavy/strategic conflict: {conflicting[0].get('task_id')} already running", file=sys.stderr)
         sys.exit(2)
+
+# Per-class caps
+def _count(label):
+    return sum(1 for s in sessions if s.get("class", "").lower() == label)
+
+if cls_l == "light" and _count("light") >= light_max:
+    print(f"[registry] light cap reached: {_count('light')}/{light_max}", file=sys.stderr)
+    sys.exit(1)
+
+# Standard cap counts Standard + Standard-light (treated equally)
+if cls_l in ("standard", "standard-light"):
+    std_count = sum(1 for s in sessions if s.get("class", "").lower() in ("standard", "standard-light"))
+    if std_count >= standard_max:
+        print(f"[registry] standard cap reached: {std_count}/{standard_max}", file=sys.stderr)
+        sys.exit(1)
 
 sys.exit(0)
 PYEOF

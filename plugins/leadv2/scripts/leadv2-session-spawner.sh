@@ -2,24 +2,40 @@
 # leadv2-session-spawner.sh — Spawn a new /leadv2 daemon session for a given task.
 #
 # Usage: leadv2-session-spawner.sh <task_id_to_spawn>
+#        leadv2-session-spawner.sh --dry-run <task_id_to_spawn>   (print command, no spawn)
 #
 # Environment:
 #   LEADV2_DAEMON                   — set to 1 in child (passed via env)
 #   LEADV2_GATE1_AUTO_ACCEPT_SEC    — auto-accept timeout for child gate1 (default 5)
 #   LEADV2_MAX_SELF_SPAWNS_PER_DAY  — daily spawn cap (default 4)
 #   LEADV2_PROJECT_ROOT             — project root (default pwd)
+#
+# Optional spawn-flag env vars (all forwarded to `claude -p` only when set):
+#   LEADV2_SPAWN_MODEL              — e.g. "sonnet", "opus"
+#   LEADV2_SPAWN_EFFORT             — e.g. "low", "medium", "high", "max"
+#   LEADV2_SPAWN_MCP_CONFIG         — path to an MCP config JSON file
+#   LEADV2_SPAWN_SETTINGS           — path to a settings.json file
+#   LEADV2_SPAWN_PERMISSION_MODE    — e.g. "auto", "acceptEdits"
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}}"
+# Resolution order: explicit override → CLAUDE_PROJECT_DIR (v2.1.144+) → PROJECT_ROOT → script-relative fallback
+LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}}}"
 
 # shellcheck source=leadv2-active-registry.sh
 source "$SCRIPT_DIR/leadv2-active-registry.sh"
 
 log() { printf -- '[spawner] %s\n' "$*" >&2; }
 
-task_id="${1:?Usage: leadv2-session-spawner.sh <task_id_to_spawn>}"
+# ── Dry-run flag ──────────────────────────────────────────────────────────────
+DRY_RUN=false
+if [[ "${1:-}" == "--dry-run" ]]; then
+  DRY_RUN=true
+  shift
+fi
+
+task_id="${1:?Usage: leadv2-session-spawner.sh [--dry-run] <task_id_to_spawn>}"
 
 SPAWNED_DIR="${LEADV2_PROJECT_ROOT}/docs/leadv2/spawned"
 SPAWN_LOG_DIR="${LEADV2_PROJECT_ROOT}/docs/leadv2/spawned"
@@ -93,11 +109,31 @@ export LEADV2_GATE1_AUTO_ACCEPT_SEC="${LEADV2_GATE1_AUTO_ACCEPT_SEC:-5}"
 export LEADV2_PROJECT_ROOT
 export LEADV2_PARENT_SESSION_ID="$CHILD_SID"
 
-setsid nohup claude -p "/leadv2 next" \
-  --output-format text \
-  --max-turns 50 \
-  --permission-mode acceptEdits \
-  --max-budget-usd 5 \
+# ── Build spawn command array (safe quoting via printf %q) ────────────────────
+# Base flags — always present
+_spawn_cmd=(
+  claude -p "/leadv2 next"
+  --output-format text
+  --max-turns 50
+  --max-budget-usd 5
+)
+
+# Permission mode: use env override if set, else fall back to acceptEdits
+_perm_mode="${LEADV2_SPAWN_PERMISSION_MODE:-acceptEdits}"
+_spawn_cmd+=(--permission-mode "$_perm_mode")
+
+# Optional flags — appended only when the corresponding env var is non-empty
+[[ -n "${LEADV2_SPAWN_MODEL:-}" ]]       && _spawn_cmd+=(--model       "$LEADV2_SPAWN_MODEL")
+[[ -n "${LEADV2_SPAWN_EFFORT:-}" ]]      && _spawn_cmd+=(--effort      "$LEADV2_SPAWN_EFFORT")
+[[ -n "${LEADV2_SPAWN_MCP_CONFIG:-}" ]]  && _spawn_cmd+=(--mcp-config  "$LEADV2_SPAWN_MCP_CONFIG")
+[[ -n "${LEADV2_SPAWN_SETTINGS:-}" ]]    && _spawn_cmd+=(--settings    "$LEADV2_SPAWN_SETTINGS")
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  log "DRY_RUN: would execute: ${_spawn_cmd[*]}"
+  exit 0
+fi
+
+setsid nohup "${_spawn_cmd[@]}" \
   </dev/null \
   >>"$SPAWN_LOG" 2>&1 &
 
