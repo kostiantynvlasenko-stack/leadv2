@@ -1,0 +1,115 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "leadv2-rule",
+  "title": "leadv2 Quality Rule",
+  "description": "JSON Schema for .rule.md YAML frontmatter",
+  "type": "object",
+  "required": ["id", "description", "severity", "scan", "match", "aggregate", "check", "action", "created"],
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^R-[0-9]{3,}$",
+      "description": "Rule identifier, e.g. R-001"
+    },
+    "ported_from": {
+      "type": "string",
+      "description": "Original immune-patterns.yaml id this was ported from"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 10,
+      "description": "Human-readable description of what this rule detects"
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"],
+      "description": "Severity level of rule violation"
+    },
+    "scan": {
+      "type": "object",
+      "required": ["target"],
+      "properties": {
+        "target": {
+          "type": "string",
+          "enum": ["task", "phase", "diff", "tool_calls"],
+          "description": "What the rule scans against"
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["all", "changed_files", "new_files"],
+          "default": "all"
+        },
+        "file_pattern": {
+          "type": "string",
+          "description": "Optional glob to restrict file matching, e.g. '*.sh'"
+        }
+      },
+      "additionalProperties": false
+    },
+    "match": {
+      "type": "object",
+      "required": ["type", "expr"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["shellcheck", "regex", "jq", "grep"],
+          "description": "Match engine to use"
+        },
+        "expr": {
+          "type": "string",
+          "description": "Expression for the match engine (shellcheck: comma-separated SC codes; regex/grep: pattern; jq: jq expression)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "aggregate": {
+      "type": "object",
+      "required": ["op", "field"],
+      "properties": {
+        "op": {
+          "type": "string",
+          "enum": ["count", "sum", "any", "all"],
+          "description": "Aggregation operation over matches"
+        },
+        "field": {
+          "type": "string",
+          "description": "Field to aggregate (typically 'matches')"
+        }
+      },
+      "additionalProperties": false
+    },
+    "check": {
+      "type": "object",
+      "required": ["threshold", "comparator"],
+      "properties": {
+        "threshold": {
+          "type": "number",
+          "description": "Numeric threshold to compare aggregate result against"
+        },
+        "comparator": {
+          "type": "string",
+          "enum": ["gt", "gte", "lt", "lte", "eq", "ne"],
+          "description": "Comparison operator: gt = greater than, gte = >=, etc."
+        }
+      },
+      "additionalProperties": false
+    },
+    "action": {
+      "type": "string",
+      "enum": ["warn", "require_founder_approval", "block_deploy"],
+      "description": "Action to take when rule triggers"
+    },
+    "created": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+      "description": "Date rule was created, ISO format YYYY-MM-DD"
+    },
+    "seen_count": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "How many times this pattern was seen in practice"
+    }
+  }
+}

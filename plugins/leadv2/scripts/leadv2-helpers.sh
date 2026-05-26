@@ -152,6 +152,151 @@ except Exception:
   [[ "$_val" == "true" ]]
 }
 
+# ── Quality engine config loader ─────────────────────────────────────────────
+# _lv2_load_quality_engine_config <feature_key>
+#
+# Reads <repo>/.claude/leadv2-overrides/quality-engine.yaml.
+# Checks master `enabled: true` AND per-feature block `<feature_key>.enabled: true`.
+# On success: exports LV2_QE_* env vars for the calling script.
+# On missing file or disabled: returns exit 4 (silent no-op).
+#
+# Feature key: l_a | l_b | l_c | l_d | l_e
+#
+# Exported variables (examples for l_a):
+#   LV2_QE_L_A_RULES_DIR, LV2_QE_L_A_RULE_GLOB,
+#   LV2_QE_L_A_SEVERITY_FLOOR, LV2_QE_L_A_DEFAULT_ACTION
+# For l_b: LV2_QE_L_B_STATE_PATH_TMPL, LV2_QE_L_B_CLOSED_YAML_TMPL,
+#           LV2_QE_L_B_SCORE_OUTPUT_TMPL, LV2_QE_L_B_HISTORY_WINDOW,
+#           LV2_QE_L_B_MIN_TASKS_FOR_TREND
+# For l_c: LV2_QE_L_C_BURN_DB_PATH, LV2_QE_L_C_PROJECT_NAME_FILTER,
+#           LV2_QE_L_C_WARNING_CACHE_HIT_LOW_THRESHOLD,
+#           LV2_QE_L_C_WARNING_HEAVY_PROMPT_THRESHOLD_TOKENS
+# For l_d: LV2_QE_L_D_MISSION_GLOB, LV2_QE_L_D_WARNING_THRESHOLD
+# For l_e: LV2_QE_L_E_WARNING_CLUSTER_COUNT, LV2_QE_L_E_CLUSTER_MAP_JSON
+#
+# Exit codes:
+#   0 — config loaded, feature enabled, vars exported
+#   4 — config missing, master disabled, or feature disabled (caller should exit 4)
+_lv2_load_quality_engine_config() {
+  local _feature_key="${1:-}"
+  if [[ -z "$_feature_key" ]]; then
+    printf -- '[helpers] _lv2_load_quality_engine_config: feature_key required\n' >&2
+    return 4
+  fi
+
+  : "${LEADV2_PROJECT_ROOT:=$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  local _cfg="${LEADV2_PROJECT_ROOT}/.claude/leadv2-overrides/quality-engine.yaml"
+
+  if [[ ! -f "$_cfg" ]]; then
+    return 4  # no config → no-op (not an error)
+  fi
+
+  # Use yq if available, else fall back to python3+yaml
+  local _py_script
+  _py_script='
+import sys, json, os
+
+yaml_path    = sys.argv[1]
+feature_key  = sys.argv[2]  # e.g. "l_a"
+project_root = sys.argv[3]
+
+try:
+    import yaml
+except ImportError:
+    # Without yaml we cannot parse — treat as not-configured
+    sys.exit(4)
+
+try:
+    with open(yaml_path) as fh:
+        cfg = yaml.safe_load(fh) or {}
+except Exception:
+    sys.exit(4)
+
+# Master switch
+if not cfg.get("enabled", True):
+    sys.exit(4)
+
+# Per-feature block
+block = cfg.get(feature_key, {})
+if not isinstance(block, dict):
+    sys.exit(4)
+if not block.get("enabled", True):
+    sys.exit(4)
+
+KEY = feature_key.upper().replace("-", "_")  # e.g. L_A
+
+def rel_to_abs(val):
+    """Convert relative path to absolute using project_root."""
+    if val and not str(val).startswith("/"):
+        return project_root.rstrip("/") + "/" + str(val)
+    return val
+
+exports = {}
+
+if feature_key == "l_a":
+    exports[f"LV2_QE_{KEY}_RULES_DIR"]       = rel_to_abs(block.get("rules_dir", ".claude/leadv2-overrides/rules"))
+    exports[f"LV2_QE_{KEY}_RULE_GLOB"]        = block.get("rule_glob", "*.rule.md")
+    exports[f"LV2_QE_{KEY}_SEVERITY_FLOOR"]   = block.get("severity_floor", "medium")
+    exports[f"LV2_QE_{KEY}_DEFAULT_ACTION"]   = block.get("default_action", "warn")
+
+elif feature_key == "l_b":
+    exports[f"LV2_QE_{KEY}_STATE_PATH_TMPL"]    = block.get("state_path_tmpl", "docs/leadv2/tasks/{task_id}/STATE.md")
+    exports[f"LV2_QE_{KEY}_CLOSED_YAML_TMPL"]   = block.get("closed_yaml_tmpl", "docs/leadv2/closed/{task_id}.yaml")
+    exports[f"LV2_QE_{KEY}_SCORE_OUTPUT_TMPL"]  = block.get("score_output_tmpl", "docs/leadv2/tasks/{task_id}/score.json")
+    exports[f"LV2_QE_{KEY}_HISTORY_WINDOW"]     = str(block.get("history_window", 10))
+    exports[f"LV2_QE_{KEY}_MIN_TASKS_FOR_TREND"] = str(block.get("min_tasks_for_trend", 20))
+
+elif feature_key == "l_c":
+    burn_db = block.get("burn_db_path", "~/.claude/burn/history.db")
+    # Expand ~ relative to HOME
+    if burn_db and burn_db.startswith("~"):
+        burn_db = os.path.expanduser(burn_db)
+    exports[f"LV2_QE_{KEY}_BURN_DB_PATH"]       = burn_db
+    exports[f"LV2_QE_{KEY}_PROJECT_NAME_FILTER"] = block.get("project_name_filter", "")
+    warn = block.get("warning", {}) or {}
+    exports[f"LV2_QE_{KEY}_WARNING_CACHE_HIT_LOW_THRESHOLD"]       = str(warn.get("cache_hit_low_threshold", 0.20))
+    exports[f"LV2_QE_{KEY}_WARNING_HEAVY_PROMPT_THRESHOLD_TOKENS"] = str(warn.get("heavy_prompt_threshold_tokens", 50000))
+
+elif feature_key == "l_d":
+    exports[f"LV2_QE_{KEY}_MISSION_GLOB"]        = block.get("mission_glob", "docs/handoff/{task_id}/*mission*.md")
+    exports[f"LV2_QE_{KEY}_WARNING_THRESHOLD"]   = str(block.get("warning_threshold", 0.50))
+
+elif feature_key == "l_e":
+    exports[f"LV2_QE_{KEY}_WARNING_CLUSTER_COUNT"] = str(block.get("warning_cluster_count", 4))
+    cluster_map = block.get("cluster_map", {})
+    exports[f"LV2_QE_{KEY}_CLUSTER_MAP_JSON"] = json.dumps(cluster_map) if isinstance(cluster_map, dict) else "{}"
+
+else:
+    # Unknown feature key — pass through any flat string values
+    for k, v in block.items():
+        env_name = f"LV2_QE_{KEY}_{k.upper()}"
+        exports[env_name] = str(v) if v is not None else ""
+
+for k, v in exports.items():
+    print(f"{k}={v}")
+sys.exit(0)
+'
+
+  local _parsed=""
+  _parsed=$(python3 -c "$_py_script" "$_cfg" "$_feature_key" "$LEADV2_PROJECT_ROOT" 2>/dev/null)
+  local _rc=$?
+
+  if [[ $_rc -ne 0 ]]; then
+    return 4
+  fi
+
+  # Export each KEY=value pair
+  while IFS='=' read -r _k _v; do
+    [[ -z "$_k" ]] && continue
+    # Only export if not already set by caller
+    if [[ -z "${!_k+x}" ]]; then
+      export "${_k}=${_v}"
+    fi
+  done <<< "$_parsed"
+
+  return 0
+}
+
 # ── YAML validation ───────────────────────────────────────────────────────
 leadv2_validate_yaml() {
   local file="$1"
@@ -1929,4 +2074,5 @@ if [[ -n "${BASH_VERSION:-}" ]]; then
   export -f leadv2_ask_async
   export -f leadv2_wait_answer
   export -f _leadv2_claude_agents_json
+  export -f _lv2_load_quality_engine_config
 fi

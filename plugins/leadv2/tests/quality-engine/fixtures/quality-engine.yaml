@@ -1,0 +1,43 @@
+enabled: true
+
+l_a:
+  enabled: true
+  rules_dir: .claude/leadv2-overrides/rules
+  rule_glob: "*.rule.md"
+  severity_floor: medium
+  default_action: warn
+
+l_b:
+  enabled: true
+  state_path_tmpl: docs/leadv2/tasks/{task_id}/STATE.md
+  closed_yaml_tmpl: docs/leadv2/closed/{task_id}.yaml
+  score_output_tmpl: docs/leadv2/tasks/{task_id}/score.json
+  history_window: 10
+  min_tasks_for_trend: 3
+
+l_c:
+  enabled: true
+  burn_db_path: ~/.claude/burn/history.db
+  project_name_filter: test-project
+  warning:
+    cache_hit_low_threshold: 0.20
+    heavy_prompt_threshold_tokens: 50000
+
+l_d:
+  enabled: true
+  mission_glob: docs/handoff/{task_id}/*mission*.md
+  warning_threshold: 0.50
+
+l_e:
+  enabled: true
+  cluster_map:
+    web: web/
+    agent: agent/
+    platform: platform/
+    migrations: supabase/migrations/
+    docs: docs/
+    tests: tests/
+    scripts: scripts/
+    claude-config: .claude/
+    personas: personas/
+  warning_cluster_count: 4
