@@ -13,9 +13,9 @@ allowed-tools:
 
 **Threshold:** `LEADV2_SKILL_SYNTH_THRESHOLD` env (default `5`).
 For bootstrap (sparse history): set to `3` until at least 10 patterns have promoted.
-Trigger condition: same `pattern_for_immune` text appears in ≥ threshold reflections.
+Trigger condition: a THEME of related `pattern_for_immune` entries reaches ≥ threshold members (semantic clustering — see §1, not exact-text repeats).
 
-## When: Close phase, after lead-reflect, if same pattern_for_immune text ≥ threshold in history.
+## When: Close phase, after lead-reflect, if a pattern_for_immune THEME reaches ≥ threshold members in history.
 ## When NOT: < threshold confirmations, or pattern already promoted to lead-patterns.md (CR-XX).
 
 ## Protocol
