@@ -118,6 +118,14 @@ Append to `docs/LEAD_V2_STATE.md` under `history:` section.
 
 If `history:` has >20 entries: rotate oldest entries to `docs/ops/LEAD_HISTORY.md` (append), keep only last 20 in STATE.md.
 
+After the history entry is written, mark reflect as done so the Stop-hook force-reflect guard (`leadv2-force-reflect.sh`) does not re-fire:
+
+```bash
+for d in "docs/handoff/${LEADV2_TASK_ID}" "docs/leadv2/tasks/${LEADV2_TASK_ID}"; do
+  [[ -d "$d" ]] && touch "$d/reflect-done.flag"
+done
+```
+
 ---
 
 ## §6. Append to per-task STATE.md
