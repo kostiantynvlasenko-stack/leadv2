@@ -236,6 +236,11 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-force-reflect.sh\"",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-compact-trigger.sh\"",
             "continueOnBlock": true,
             "timeout": 8

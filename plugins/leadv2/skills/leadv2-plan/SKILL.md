@@ -102,6 +102,26 @@ If hits → write `docs/handoff/${LEADV2_TASK_ID}/persona-config-candidates.yaml
 
 No hits → silent, no file. Never blocks Plan progression. Pattern reference: `skills/leadv2-persona-config-audit/SKILL.md`.
 
+### 1c. Divergence intake (if Phase 1.5 ran)
+
+If `docs/handoff/<id>/context.yaml` has a `divergence:` block (Phase 1.5 DIVERGE
+ran), the planning triad does NOT start from a blank slate — it converges on the
+divergence output:
+- Inject `shortlist[]` (each entry = `{id, text, score:{novelty,viability,fit}}`)
+  into the **architect** mission as the candidate solution space ("evaluate these
+  N candidates; you may synthesize/hybridize, but justify departing from all of
+  them"). Pass the `score` map so the architect sees why each ranked.
+- `non_obvious_pick` is the **id** of one shortlist entry (resolve it to that
+  entry's text before injecting). It is **must-evaluate** — the architect
+  explicitly argues for or against it; it cannot be silently dropped (it's the
+  highest-novelty viable bet, exactly the option a single-pass plan would skip).
+- Seed `context.yaml.off_limits` from `divergence.traps[]` (each trap's reason
+  becomes an off-limit with provenance `from: divergence`).
+- The architect reads the full `divergence.md` (path in the block) on demand;
+  the mission carries only the compact block.
+
+If no `divergence:` block exists, proceed normally — divergence is optional.
+
 ### 1b. Write mission file
 
 ```

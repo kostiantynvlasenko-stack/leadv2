@@ -13,41 +13,40 @@ allowed-tools:
 
 **Threshold:** `LEADV2_SKILL_SYNTH_THRESHOLD` env (default `5`).
 For bootstrap (sparse history): set to `3` until at least 10 patterns have promoted.
-Trigger condition: same `pattern_for_immune` text appears in ≥ threshold reflections.
+Trigger condition: a THEME of related `pattern_for_immune` entries reaches ≥ threshold members (semantic clustering — see §1, not exact-text repeats).
 
-## When: Close phase, after lead-reflect, if same pattern_for_immune text ≥ threshold in history.
+## When: Close phase, after lead-reflect, if a pattern_for_immune THEME reaches ≥ threshold members in history.
 ## When NOT: < threshold confirmations, or pattern already promoted to lead-patterns.md (CR-XX).
 
 ## Protocol
 
-### 1. Cluster detection with normalization
+### 1. Thematic cluster detection (semantic, NOT exact-text)
 
-After `lead-reflect` writes history entry, scan `LEAD_V2_STATE.md history:` for clusters. Normalize text before counting to catch near-duplicates:
+`pattern_for_immune` is authored as a unique full-sentence rule per incident, so exact/normalized text matching never clusters two entries — that approach produced **0 syntheses all-time** (2026-05-29 diagnosis). Cluster by THEME instead, using a cheap model.
+
+First extract every pattern (history + rotated log) to a temp file:
 
 ```bash
-# Extract, normalize (lowercase, collapse whitespace, strip punctuation),
-# then count clusters.
-python3 - <<'PY' docs/LEAD_V2_STATE.md
-import sys, re, os, yaml
-from collections import Counter
-
-THRESHOLD = int(os.environ.get("LEADV2_SKILL_SYNTH_THRESHOLD", "5"))
-
-with open(sys.argv[1]) as f:
-    d = yaml.safe_load(f) or {}
-texts = []
-for h in (d.get('history') or []):
-    p = (h.get('reflect') or {}).get('pattern_for_immune')
-    if p:
-        norm = re.sub(r'[^\w\s]', '', p.lower())
-        norm = re.sub(r'\s+', ' ', norm).strip()
-        texts.append(norm)
-
-for text, count in Counter(texts).most_common(10):
-    if count >= THRESHOLD:
-        print(f"{count}\t{text}")
+python3 - docs/LEAD_V2_STATE.md docs/ops/LEAD_HISTORY.md > /tmp/immune-patterns.txt <<'PY'
+import sys, yaml
+for path in sys.argv[1:]:
+    try:
+        d = yaml.safe_load(open(path)) or {}
+    except FileNotFoundError:
+        continue
+    for h in (d.get('history') or []):
+        p = (h.get('reflect') or {}).get('pattern_for_immune')
+        if p and p.strip().lower() != 'none':
+            print(f"- [{h.get('task','?')}] {p}")
 PY
+wc -l /tmp/immune-patterns.txt
 ```
+
+Then spawn `Agent(subagent_type=Explore, model=haiku)` to cluster them thematically:
+
+> Mission: read `/tmp/immune-patterns.txt` (one `pattern_for_immune` per line, each prefixed with its source task-id). Group lines that express the **same underlying lesson** even when worded differently — e.g. "verify CLI flag exists before building", "verify DB column exists before insert", "verify schema enum matches" all belong to one theme ("verify a claimed-X actually exists before building on the assumption"). Return JSON only: `[{ "theme": "<short name>", "generalized_rule": "<one falsifiable sentence covering the cluster>", "members": ["<task-id>", ...], "count": <int> }]`. Do not invent themes for singletons — a cluster needs ≥2 genuinely-related members to be listed. Max 8 clusters.
+
+A theme whose `count` ≥ `LEADV2_SKILL_SYNTH_THRESHOLD` is a synthesis candidate; use its `generalized_rule` as the skill's basis and its `members` as the source task-ids (§2). If the largest cluster is below threshold, stop — no synthesis this cycle.
 
 Threshold (configurable via env):
 - **3-4 confirmations** → promote to `.claude/ref/lead-patterns.md` (CR-XX / MD-XX) via `lead-reflect`. No skill synthesis yet (unless `LEADV2_SKILL_SYNTH_THRESHOLD` ≤ 4).
@@ -174,16 +173,17 @@ After 5 shadow observations, evaluate:
 On promotion trigger:
 1. Move `.claude/skills/_shadow/leadv2-<slug>/SKILL.md` → `.claude/skills/leadv2-<slug>/SKILL.md`
 2. In the frontmatter, remove `shadow: true` and `shadow_since:`; add `promoted_from_shadow: <iso-date>`
-3. Append to `.claude/ref/lead-patterns.md#promotion-log`:
+3. Invoke `/reload-skills` so the promoted skill is discoverable in the **current** session (Claude Code ≥ 2.1.152). Without this, the freshly-promoted skill only loads at the next SessionStart — meaning the self-learning loop's payoff is delayed a full session.
+4. Append to `.claude/ref/lead-patterns.md#promotion-log`:
    ```
    | <date> | <slug> | <source task-ids> | shadow-promoted (5 observations) |
    ```
-4. Append to `.claude/ref/lead-patterns.md#synthesis-log`:
+5. Append to `.claude/ref/lead-patterns.md#synthesis-log`:
    ```
    | <date> | <slug> | shadow-promoted | <N-th auto-skill> |
    ```
-5. Notify founder via `PushNotification`: "Скилл leadv2-<slug> прошёл shadow проверку и добавлен в .claude/skills/. Можешь ревьюнуть."
-6. Founder can still revert via `/leadv2 skill-revert <slug>` (see §9).
+6. Notify founder via `PushNotification`: "Скилл leadv2-<slug> прошёл shadow проверку и добавлен в .claude/skills/. Можешь ревьюнуть."
+7. Founder can still revert via `/leadv2 skill-revert <slug>` (see §9).
 
 ### 8. Auto-reject — shadow regression
 
