@@ -7,6 +7,10 @@
 
 set -euo pipefail
 
+# shellcheck source=leadv2-helpers.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/leadv2-helpers.sh"
+
 MAX_LINES="${LEADV2_MISSION_MAX_LINES:-100}"
 file="${1:?usage: $0 <mission-file>}"
 [[ -f "$file" ]] || { echo "[mission-lint] missing: $file" >&2; exit 1; }
@@ -44,12 +48,16 @@ fi
 # PostgREST PATCH on JSONB guard (NM-05): missions instructing PATCH on personas.config
 # silently replace the entire JSONB column — partial-update intent causes full data-loss.
 # Use jsonb_set() via psql or Supabase RPC instead.
-patch_signal=$( { grep -qiE '\bPATCH\b' "$file" 2>/dev/null && echo 1; } || echo 0 )
-personas_signal=$( { grep -qiE '\bpersona(s(\.config)?)?\b' "$file" 2>/dev/null && echo 1; } || echo 0 )
-if [[ "$patch_signal" -eq 1 && "$personas_signal" -eq 1 ]]; then
-  echo "MISSION_JSONB_PATCH_RISK file=$file"
-  echo "→ PostgREST PATCH replaces the entire JSONB column (NM-05). Use jsonb_set() via psql or Supabase RPC for partial updates to personas.config."
-  exit 5
+# Only active when stack.yaml db == supabase (PE uses supabase; non-supabase repos skip).
+_lv2_db=$(_lv2_stack_scalar db "")
+if [[ "$_lv2_db" == "supabase" ]]; then
+  patch_signal=$( { grep -qiE '\bPATCH\b' "$file" 2>/dev/null && echo 1; } || echo 0 )
+  personas_signal=$( { grep -qiE '\bpersona(s(\.config)?)?\b' "$file" 2>/dev/null && echo 1; } || echo 0 )
+  if [[ "$patch_signal" -eq 1 && "$personas_signal" -eq 1 ]]; then
+    echo "MISSION_JSONB_PATCH_RISK file=$file"
+    echo "→ PostgREST PATCH replaces the entire JSONB column (NM-05). Use jsonb_set() via psql or Supabase RPC for partial updates to personas.config."
+    exit 5
+  fi
 fi
 
 exit 0

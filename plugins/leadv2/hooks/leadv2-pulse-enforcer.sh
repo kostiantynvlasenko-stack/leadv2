@@ -26,11 +26,16 @@ _hook_profile_end() {
 trap '_hook_profile_end; exit 0' EXIT
 
 [[ "${LEADV2_LEAD_GUARD:-0}" == "1" ]] || exit 0
+# Resolve leadv2_dir from state-paths.yaml (fallback: docs/leadv2)
+_lv2_sp_root="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+_lv2_sp_yaml="${_lv2_sp_root}/.claude/leadv2-overrides/state-paths.yaml"
+_lv2_leadv2_dir=$(grep -E "^[[:space:]]*leadv2_dir[[:space:]]*:" "$_lv2_sp_yaml" 2>/dev/null | head -1 | sed -E "s/^[[:space:]]*leadv2_dir[[:space:]]*:[[:space:]]*//" | sed -E "s/^['\"]//; s/['\"][[:space:]]*$//" | tr -d '\r' || true)
+[[ -z "$_lv2_leadv2_dir" || "$_lv2_leadv2_dir" == "null" || "$_lv2_leadv2_dir" == "~" ]] && _lv2_leadv2_dir="docs/leadv2"
 # LEADV2_TASK_ID is not exported to hook env — derive from active.yaml
 if [[ -z "${LEADV2_TASK_ID:-}" ]]; then
   CWD_ACTIVE=""
-  for candidate in "$PWD/docs/leadv2/active.yaml" \
-                   "${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/docs/leadv2/active.yaml"; do
+  for candidate in "$PWD/${_lv2_leadv2_dir}/active.yaml" \
+                   "${_lv2_sp_root}/${_lv2_leadv2_dir}/active.yaml"; do
     [[ -f "$candidate" ]] && CWD_ACTIVE="$candidate" && break
   done
   [[ -z "$CWD_ACTIVE" ]] && exit 0

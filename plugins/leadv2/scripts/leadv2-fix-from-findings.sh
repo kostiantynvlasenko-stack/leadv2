@@ -9,6 +9,10 @@
 
 set -euo pipefail
 
+# shellcheck source=leadv2-helpers.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/leadv2-helpers.sh"
+
 if [[ $# -ne 2 ]]; then
     echo "Usage: $0 <findings-path> <mission-slug>" >&2
     exit 2
@@ -72,7 +76,7 @@ For every finding, add at least one regression test asserting the fix path. The 
 
 ## Verify
 
-\`pytest tests/leadv2/ -q --tb=line\` must stay green. \`bash .claude/scripts/leadv2-preflight.sh\` must remain 169/0.
+\`$(_lv2_stack_scalar test_cmd "pytest tests/leadv2/ -q")\` must stay green.
 
 ## Off-limits
 

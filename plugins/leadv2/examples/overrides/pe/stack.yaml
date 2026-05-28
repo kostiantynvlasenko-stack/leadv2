@@ -1,0 +1,30 @@
+# .claude/leadv2-overrides/stack.yaml — persona-engine (PE) reference values
+#
+# These are the DEFAULTS built into the plugin.
+# Copy this file to your repo's .claude/leadv2-overrides/stack.yaml and
+# uncomment/edit only the keys you need to change.
+# Missing keys fall back to exactly these values — no need to repeat them.
+
+# Primary language. Affects coverage-gate skip logic.
+# lang: python
+
+# Directories scanned for source files.
+# Used by: coverage-gate (grep pattern), schema-audit-pre-gate (python walk).
+# Fallback: platform agent
+# src_roots:
+#   - platform
+#   - agent
+
+# Paths watched for parallel-session collisions.
+# Used by: collision-check (awk prefix match).
+# Trailing slash required for directory prefix matching.
+# Fallback: agent/state/  personas/  agent/safety/
+# hot_paths:
+#   - agent/state/
+#   - personas/
+#   - agent/safety/
+
+# Glob pattern for migration files (relative to repo root, bash glob syntax).
+# Used by: schema-audit-pre-gate (case match on staged file paths).
+# Fallback: supabase/migrations/*.sql
+# migration_glob: "supabase/migrations/*.sql"

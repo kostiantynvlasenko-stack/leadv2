@@ -297,6 +297,124 @@ sys.exit(0)
   return 0
 }
 
+# ── stack.yaml reader (grep/sed/awk only — no python3 dependency) ─────────
+#
+# _lv2_stack_scalar <key> <default>
+#   Reads a top-level scalar from .claude/leadv2-overrides/stack.yaml.
+#   Prints the value (or <default> if file/key absent). Never crashes.
+#   Handles: key: value  AND  key: "value"  AND  key: 'value'.
+#
+# _lv2_stack_list <key> <default_space_separated>
+#   Reads a top-level YAML sequence from stack.yaml (compact inline OR
+#   block form).  Prints items space-separated on one line, or <default>.
+#
+#   Inline:  key: [a, b, c]           → "a b c"
+#   Block:
+#     key:
+#       - a
+#       - b                            → "a b"
+#
+#   Limitations: values must not contain commas (inline) or leading
+#   spaces+dash sequences beyond column-2 (block). Sufficient for path
+#   strings and glob patterns.
+
+_lv2_stack_scalar() {
+  local _key="${1:-}" _default="${2:-}"
+  : "${LEADV2_PROJECT_ROOT:=$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  local _yaml="${LEADV2_PROJECT_ROOT}/.claude/leadv2-overrides/stack.yaml"
+  if [[ ! -f "$_yaml" ]]; then
+    printf -- '%s' "$_default"
+    return 0
+  fi
+  local _val
+  # Match "key: value" or "key: 'value'" or 'key: "value"'; strip quotes.
+  _val=$(grep -E "^[[:space:]]*${_key}[[:space:]]*:" "$_yaml" 2>/dev/null \
+    | head -1 \
+    | sed -E "s/^[[:space:]]*${_key}[[:space:]]*:[[:space:]]*//" \
+    | sed -E "s/^['\"]//; s/['\"][[:space:]]*$//" \
+    | tr -d '\r' \
+    || true)
+  if [[ -z "$_val" || "$_val" == "null" || "$_val" == "~" ]]; then
+    printf -- '%s' "$_default"
+  else
+    printf -- '%s' "$_val"
+  fi
+}
+
+_lv2_stack_list() {
+  local _key="${1:-}" _default="${2:-}"
+  : "${LEADV2_PROJECT_ROOT:=$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  local _yaml="${LEADV2_PROJECT_ROOT}/.claude/leadv2-overrides/stack.yaml"
+  if [[ ! -f "$_yaml" ]]; then
+    printf -- '%s' "$_default"
+    return 0
+  fi
+  # Try inline form: key: [a, b, c]
+  local _inline
+  _inline=$(grep -E "^[[:space:]]*${_key}[[:space:]]*:[[:space:]]*\[" "$_yaml" 2>/dev/null \
+    | head -1 \
+    | sed -E "s/^[[:space:]]*${_key}[[:space:]]*:[[:space:]]*//" \
+    | sed -E 's/^\[//; s/\][[:space:]]*$//' \
+    | tr ',' ' ' \
+    | sed -E "s/['\"]//g" \
+    | tr -s ' ' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+    || true)
+  if [[ -n "$_inline" ]]; then
+    printf -- '%s' "$_inline"
+    return 0
+  fi
+  # Try block form: lines after "key:" that start with "  - "
+  local _block
+  _block=$(awk -v key="${_key}" '
+    found && /^[[:space:]]*-[[:space:]]/ {
+      gsub(/^[[:space:]]*-[[:space:]]/, ""); gsub(/^'"'"'|'"'"'$|^"|"$/, ""); printf "%s ", $0
+    }
+    /^[[:space:]]*'"${_key}"'[[:space:]]*:/ { found=1; next }
+    found && !/^[[:space:]]*-/ { exit }
+  ' "$_yaml" 2>/dev/null | sed -E 's/[[:space:]]+$//' || true)
+  if [[ -n "$_block" ]]; then
+    printf -- '%s' "$_block"
+    return 0
+  fi
+  printf -- '%s' "$_default"
+}
+
+# ── state-paths.yaml reader (grep/sed only — no python3 dependency) ───────
+#
+# _lv2_statepath <key> <default>
+#   Reads a top-level scalar from .claude/leadv2-overrides/state-paths.yaml.
+#   Prints the value (or <default> if file/key absent). Never crashes.
+#   Handles: key: value  AND  key: "value"  AND  key: 'value'.
+#   Returns <default> on missing file, missing key, null, or ~.
+#
+# Keys defined in state-paths.yaml (with PE fallback defaults):
+#   leadv2_dir  → docs/leadv2
+#   handoff_dir → docs/handoff
+#   board_path  → docs/BOARD.md
+_lv2_statepath() {
+  local _key="${1:-}" _default="${2:-}"
+  : "${LEADV2_PROJECT_ROOT:=$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  local _yaml="${LEADV2_PROJECT_ROOT}/.claude/leadv2-overrides/state-paths.yaml"
+  if [[ ! -f "$_yaml" ]]; then
+    printf -- '%s' "$_default"
+    return 0
+  fi
+  local _val
+  # Match "key: value" or "key: 'value'" or 'key: "value"'; strip quotes.
+  _val=$(grep -E "^[[:space:]]*${_key}[[:space:]]*:" "$_yaml" 2>/dev/null \
+    | head -1 \
+    | sed -E "s/^[[:space:]]*${_key}[[:space:]]*:[[:space:]]*//" \
+    | sed -E "s/^['\"]//; s/['\"][[:space:]]*$//" \
+    | tr -d '\r' \
+    || true)
+  if [[ -z "$_val" || "$_val" == "null" || "$_val" == "~" ]]; then
+    printf -- '%s' "$_default"
+  else
+    printf -- '%s' "$_val"
+  fi
+}
+
 # ── YAML validation ───────────────────────────────────────────────────────
 leadv2_validate_yaml() {
   local file="$1"

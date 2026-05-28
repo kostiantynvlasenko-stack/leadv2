@@ -529,8 +529,10 @@ import sys, os, yaml, datetime
 handoff = sys.argv[1]
 parts = []
 
-for target in ("nik", "respiro"):
-    report_file = os.path.join(handoff, f"vps-smoke-{target}.yaml")
+import glob as _glob
+smoke_files = sorted(_glob.glob(os.path.join(handoff, "vps-smoke-*.yaml")))
+for report_file in smoke_files:
+    target = os.path.basename(report_file)[len("vps-smoke-"):-len(".yaml")]
     if not os.path.isfile(report_file):
         continue
     try:

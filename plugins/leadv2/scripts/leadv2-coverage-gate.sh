@@ -12,6 +12,13 @@ readonly SCRIPT_DIR
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 readonly REPO_ROOT
 
+# Source helpers for stack.yaml reader (no python3 required)
+# shellcheck source=leadv2-helpers.sh
+LEADV2_PROJECT_ROOT="$REPO_ROOT"
+export LEADV2_PROJECT_ROOT
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/leadv2-helpers.sh" 2>/dev/null || true
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -83,13 +90,46 @@ cleanup() {
 trap 'cleanup' EXIT
 
 # ---------------------------------------------------------------------------
-# Step 1: Changed Python files (platform/ and agent/ only)
+# Step 1: Changed Python files (src_roots from stack.yaml, fallback: platform agent)
 # ---------------------------------------------------------------------------
-log_info "Computing changed Python files since ${START_SHA}"
-CHANGED_PY_FILES="$(git diff --name-only "${START_SHA}..HEAD" | grep -E '^(platform|agent)/.*\.py$' || true)"
+
+# Read stack.yaml overrides (helpers sourced above; fallback safe if source failed)
+_LV2_SRC_ROOTS=""
+if command -v _lv2_stack_list &>/dev/null; then
+  _LV2_SRC_ROOTS="$(_lv2_stack_list 'src_roots' 'platform agent')"
+else
+  _LV2_SRC_ROOTS="platform agent"
+fi
+_LV2_LANG=""
+if command -v _lv2_stack_scalar &>/dev/null; then
+  _LV2_LANG="$(_lv2_stack_scalar 'lang' 'python')"
+else
+  _LV2_LANG="python"
+fi
+
+# Non-python repos without explicit src_roots get a visible skip (not silent pass)
+if [[ "$_LV2_LANG" != "python" && "$_LV2_SRC_ROOTS" == "platform agent" ]]; then
+  printf -- 'coverage gate: no src_roots configured for stack=%s, skipping\n' "$_LV2_LANG" >&2
+  exit 0
+fi
+
+# Build grep alternation from src_roots (space-separated list)
+_LV2_SRC_GREP_ALT=""
+for _root in $_LV2_SRC_ROOTS; do
+  if [[ -n "$_LV2_SRC_GREP_ALT" ]]; then
+    _LV2_SRC_GREP_ALT="${_LV2_SRC_GREP_ALT}|${_root}"
+  else
+    _LV2_SRC_GREP_ALT="${_root}"
+  fi
+done
+# Pattern: ^(platform|agent)/.*\.py$  (or whatever src_roots are configured)
+_LV2_SRC_PATTERN="^(${_LV2_SRC_GREP_ALT})/.*\\.py\$"
+
+log_info "Computing changed Python files since ${START_SHA} (src_roots: ${_LV2_SRC_ROOTS})"
+CHANGED_PY_FILES="$(git diff --name-only "${START_SHA}..HEAD" | grep -E "${_LV2_SRC_PATTERN}" || true)"
 
 if [[ -z "$CHANGED_PY_FILES" ]]; then
-  log_info "No platform/ or agent/ Python files changed — gate skipped"
+  log_info "No Python files changed in src_roots (${_LV2_SRC_ROOTS}) — gate skipped"
   cat > "$COVERAGE_YAML" <<YAML
 new_code_lines: 0
 covered_lines: 0
