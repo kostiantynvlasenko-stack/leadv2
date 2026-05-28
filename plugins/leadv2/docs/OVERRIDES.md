@@ -178,6 +178,41 @@ When `codex_enabled: false`, the lead falls back to `Agent(critic, opus)` cleanl
 
 ---
 
+## docs/leadv2-frames.yaml (optional — divergence frame-pack)
+
+Per-repo frames for **Phase 1.5 DIVERGE**. The plugin ships 15 default cognitive
+frames at `${CLAUDE_PLUGIN_ROOT}/data/leadv2-frames.yaml`. Drop a
+`docs/leadv2-frames.yaml` with the same shape to add domain frames or replace
+defaults — the lead merges repo frames over defaults by `id` (repo wins on
+collision, new ids append). Use it for domain frame-packs (security, ML,
+frontend, distsys).
+
+```yaml
+frames:
+  - id: threat-model            # new frame — appends to defaults
+    label: STRIDE threat model
+    prompt: >-
+      Walk this as a STRIDE pass — spoofing, tampering, repudiation, info
+      disclosure, DoS, elevation. What design ideas each category forces.
+    tags: [code, design]
+  - id: ten-year-old            # same id as a default — overrides it
+    label: New hire, day one
+    prompt: You just joined. What looks insane that everyone stopped questioning?
+    tags: [general, wild]
+```
+
+You can also override `scoring:` weights and `selection:` policy
+(`frames_per_run`, `ideas_per_frame`, `top_k`) the same way. Missing file →
+defaults only (no-op).
+
+**Spawn ceiling is hard-clamped.** A repo `selection:` override CANNOT blow the
+per-turn Agent-spawn budget: the lead clamps `frames_per_run ≤ 8`,
+`ideas_per_frame ≤ 12`, `top_k ≤ 5`, and total spawns (`frames_per_run + 1 focus
++ top_k`) `≤ 14`, regardless of what the file requests. Over-the-ceiling values
+are clamped down and logged to STATE.md (`diverge: selection clamped`).
+
+---
+
 ## extensions.md
 
 Free-form markdown the lead reads at the start of every task. Use it for project-specific rules that don't fit elsewhere.
