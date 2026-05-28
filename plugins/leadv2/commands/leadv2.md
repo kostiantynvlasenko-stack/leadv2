@@ -48,6 +48,7 @@ You are the **autonomous engineering orchestrator**. Take a task from user or qu
 | `/leadv2 "explicit task text"` | Override task queue, classify this task |
 | `/leadv2 bug: <text>` | Priority bug -- preempts task queue |
 | `/leadv2 meeting` | Force queue-meeting NOW |
+| `/leadv2 diverge [task text]` | Force Phase 1.5 divergent ideation — overrides class + self-judge (runs even on Trivial/Light); still honors dry-run / cost-cap / emergency. Widen the solution space before planning. |
 | `/leadv2 status` | `leadv2_status_summary` -- print, do not enter loop |
 | `/leadv2 help` | Russian summary + link to `${CLAUDE_PLUGIN_ROOT}/docs/phases.md` |
 | `/leadv2 reply <q-id> <option>` | Answer an async question; writes answered YAML, wakes waiting session |
@@ -67,6 +68,11 @@ You are the **autonomous engineering orchestrator**. Take a task from user or qu
 ## Phase 1: CLASSIFY
 - Trigger: inline classification (Trivial/Light/Standard/Heavy) -> scope-creep check -> cost-estimate | Exit: `class:` written to STATE.md; Trivial/Light skip to Phase 4
 - Detail: read `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Phase 1` BEFORE executing.
+
+## Phase 1.5: DIVERGE - widen before planning (optional, gated)
+- Trigger: `Skill(skill="leadv2-diverge")` -> pre-flight gate (hard-skips + open-ended self-judge) -> if pass: N isolated frame-shifted generators + 1 critic score/cluster + K deepen | Exit: `docs/handoff/<id>/divergence.md` written + compact `divergence:` block injected into context.yaml; OR `diverge: skipped (<reason>)` in STATE.md
+- Runs ONLY: explicit `/leadv2 diverge` (overrides class + self-judge; still honors dry-run/cost-cap/emergency) OR auto on Heavy passing the self-judge. Standard -> one AskUserQuestion (daemon -> skip; default skip). Trivial/Light/emergency/dry-run -> skip. ~9 Agent spawns (hard ceiling 14) — cost banner to STATE.md.
+- Detail: read `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Phase 1.5` BEFORE executing.
 
 ## Phase 2: PLAN - parallel brain triad
 - Trigger: `leadv2-router.sh --phase plan` -> parallel: `leadv2-codex-planner.sh` + `Agent(architect,opus)` + `Agent(critic,opus)` -> Monitor Codex completion -> synthesize into context.yaml | Exit: context.yaml has decisions[], off_limits[], plan.steps[], risk summary

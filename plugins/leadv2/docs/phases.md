@@ -99,6 +99,31 @@ Each phase entry calls `leadv2_pulse_log "<phase>" "<one-line summary>"` — emi
 
 ---
 
+## §Phase 1.5: DIVERGE (optional, gated — runs before Plan)
+
+Divergent ideation: widen the solution space with isolated frame-shifted
+generators BEFORE the convergent Plan triad commits. Ported from ADHD
+(UditAkhourii/adhd, MIT). Full operating contract: `Skill(skill="leadv2-diverge")`.
+
+**Gate (evaluate in THIS order — explicit overrides class+judge but NOT Step 0):**
+- **Step 0 — environment guards (block EVERYTHING, incl. explicit):** `LEADV2_DRY_RUN=1`; cost-estimate `within_cap: false`; `emergency_mode=true` / "no approvals". → no spawns; write+say `diverge: skipped (<reason>)` loudly.
+- **Step 1 — explicit** `/leadv2 diverge` → run regardless of class (even Trivial/Light) and skip the self-judge.
+- **Step 2 — class hard-skip (auto path):** `Trivial`/`Light`, or `bug:` WITH a known root cause → skip to Phase 2 (fuzzy bug w/o root cause is a valid use case — keep).
+- **Step 3 — self-judge (auto path):** run only if ALL hold — (a) open-ended answer space, (b) high-stakes (architecture / public API / schema / migration / product naming / fuzzy bug w/o root cause / positioning), (c) open phrasing (no "quick/standard/canonical/just/one-line").
+- **Step 4 — auto-fire (auto path, Step 3 passed):** `Heavy` (or `Strategic` if the repo classifier emits it) → run. `Standard` → if `LEADV2_DAEMON=1`/`LEADV2_BOT_MODE` skip without prompting, else ONE `AskUserQuestion` (default = skip, 60s). NOTE: naming/positioning/pricing often classify `Standard` and won't auto-fire — use explicit `/leadv2 diverge`. On any skip: write `diverge: skipped (<reason>)` to STATE.md, proceed to Phase 2.
+
+**Execution (mechanical generator/critic split — isolation is load-bearing):**
+1. Load frames: `${CLAUDE_PLUGIN_ROOT}/data/leadv2-frames.yaml` (+ optional repo `docs/leadv2-frames.yaml`, merged by id). Lead picks `frames_per_run` (default 5): 4 code/design + ≥1 wild for code-shaped problems; vary vs recent runs.
+2. **Diverge** — ONE message, N parallel `Agent(subagent_type=general-purpose, model=sonnet, run_in_background=true)`, one per frame. Each gets ONLY: a ≤200-word problem statement + that one frame's vantage + the DIVERGENT-mode instruction (forbid evaluation, JSON array of `ideas_per_frame` ideas, first-3-obvious banned). **FORBIDDEN in a branch:** other branches' output, full/partial `context.yaml`, `prior_art`/immune/negative-memory, architect `decisions[]`, the graph-context block, BOARD/RECOVERY. Isolation is the mechanism, not a slogan. Deliverable: `docs/handoff/<id>/diverge-<frame.id>.json`.
+3. **Focus** — one `Agent(subagent_type=critic, model=<opus if Heavy/Strategic else sonnet>)`: score novelty/viability/fit (weights from frames.yaml `scoring:` — 0.35/0.40/0.25), flag traps with mechanistic reasons, cluster by underlying angle. Deliverable: `diverge-focus.json`.
+4. **Deepen** — top_k (default 3) parallel `Agent(general-purpose, sonnet)` on ranked non-trap leaders: sketch + load-bearing risk + first step + 3–5 child ideas. Provocation = highest-novelty leaf (no spawn).
+5. **Cost banner + hard ceiling** to STATE.md before spawning: `diverge: running — ~<N+1+K> Agent spawns`. Clamp AFTER any repo override: `frames_per_run ≤ 8`, `ideas_per_frame ≤ 12`, `top_k ≤ 5`, total `frames+1+top_k ≤ 14`. If near budget, drop to 3×4 (~7 spawns) and note reduced breadth.
+
+**Exit:** `docs/handoff/<id>/divergence.md` (wide-set clustered + ★shortlist + traps + deepened + provocation) AND a compact `divergence:` block in `context.yaml` (`shortlist[]`, `non_obvious_pick`, `traps[]`, `artifact:` path, ≤40 lines). Phase 2 architect consumes it (see leadv2-plan §1c).
+
+
+---
+
 ## §Phase 2: PLAN
 
 **Route first:** `eval "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase plan --step <step> --task-id <id> --class <class> --signals '{...}' 2>/dev/null)" || true` (exit 2 = fall through to class-based default).
