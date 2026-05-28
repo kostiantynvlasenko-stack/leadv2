@@ -24,8 +24,8 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-migration-apply.sh" --commit "$COMMIT
 # Deploy via project override (required — configure in .claude/leadv2-overrides/deploy.sh)
 OVERRIDE="${CLAUDE_PROJECT_ROOT:-$PWD}/.claude/leadv2-overrides/deploy.sh"
 if [[ -f "$OVERRIDE" ]]; then
-  LEAD_V2_TASK_ID="$LEADV2_TASK_ID" LEAD_V2_COMMIT="$COMMIT" bash "$OVERRIDE"
-  deploy_rc=$?
+  deploy_rc=0
+  LEAD_V2_TASK_ID="$LEADV2_TASK_ID" LEAD_V2_COMMIT="$COMMIT" bash "$OVERRIDE" || deploy_rc=$?
 else
   echo "BLOCK: .claude/leadv2-overrides/deploy.sh not found — run leadv2-init or create it" >&2
   exit 1
