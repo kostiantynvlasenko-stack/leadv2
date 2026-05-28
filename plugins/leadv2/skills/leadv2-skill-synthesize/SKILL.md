@@ -174,16 +174,17 @@ After 5 shadow observations, evaluate:
 On promotion trigger:
 1. Move `.claude/skills/_shadow/leadv2-<slug>/SKILL.md` → `.claude/skills/leadv2-<slug>/SKILL.md`
 2. In the frontmatter, remove `shadow: true` and `shadow_since:`; add `promoted_from_shadow: <iso-date>`
-3. Append to `.claude/ref/lead-patterns.md#promotion-log`:
+3. Invoke `/reload-skills` so the promoted skill is discoverable in the **current** session (Claude Code ≥ 2.1.152). Without this, the freshly-promoted skill only loads at the next SessionStart — meaning the self-learning loop's payoff is delayed a full session.
+4. Append to `.claude/ref/lead-patterns.md#promotion-log`:
    ```
    | <date> | <slug> | <source task-ids> | shadow-promoted (5 observations) |
    ```
-4. Append to `.claude/ref/lead-patterns.md#synthesis-log`:
+5. Append to `.claude/ref/lead-patterns.md#synthesis-log`:
    ```
    | <date> | <slug> | shadow-promoted | <N-th auto-skill> |
    ```
-5. Notify founder via `PushNotification`: "Скилл leadv2-<slug> прошёл shadow проверку и добавлен в .claude/skills/. Можешь ревьюнуть."
-6. Founder can still revert via `/leadv2 skill-revert <slug>` (see §9).
+6. Notify founder via `PushNotification`: "Скилл leadv2-<slug> прошёл shadow проверку и добавлен в .claude/skills/. Можешь ревьюнуть."
+7. Founder can still revert via `/leadv2 skill-revert <slug>` (see §9).
 
 ### 8. Auto-reject — shadow regression
 
