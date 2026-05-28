@@ -8,10 +8,6 @@ trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
-# Extract run_in_background flag and session/cwd
-BG="$(echo "$INPUT" | jq -r '.tool_input.run_in_background // false' 2>/dev/null || echo false)"
-[[ "$BG" == "true" ]] && exit 0
-
 CWD="$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
 [[ -z "$CWD" ]] && CWD="$PWD"
 
@@ -27,7 +23,10 @@ for f in "${ACTIVE_FILES[@]}"; do
 done
 [[ -z "$ACTIVE" ]] && exit 0
 
-# Any non-trivial active task? If yes, block.
+# NOTE: Claude Code does NOT pass run_in_background to PreToolUse hooks.
+# Cannot distinguish fg from bg agents here.
+# Strategy: only block during idle phases (async_wait) — active phases need agents.
+# bg-agent discipline enforced via orchestrator protocol, not this hook.
 SHOULD_BLOCK="$(python3 - "$ACTIVE" 2>/dev/null <<'PY' || echo "false"
 import sys, yaml, pathlib
 try:
@@ -36,10 +35,15 @@ except Exception:
     print("false"); sys.exit(0)
 sessions = d.get('sessions') or []
 hub = pathlib.Path(sys.argv[1]).parent.parent
+
+# Only block when a non-trivial task is in async_wait with no active work expected
+IDLE_PHASES = {'async_wait'}
+
 for s in sessions:
     tid = s.get('task_id')
     phase = s.get('phase','')
-    if not tid or phase in ('close','async_wait'): continue
+    if not tid or phase not in IDLE_PHASES:
+        continue
     state = hub / 'leadv2-tasks' / tid / 'STATE.md'
     if not state.exists(): state = hub.parent / 'docs/leadv2/tasks' / tid / 'STATE.md'
     klass = 'Standard'
@@ -57,15 +61,9 @@ PY
 
 cat >&2 <<'MSG'
 [leadv2-block-fg-agent] BLOCKED
-Foreground Agent spawn detected during active non-Trivial leadv2 task.
-Why: foreground spawns drop the full subagent transcript into lead chat → 30-100KB
-     accumulates per spawn forever. This is the #1 token-burn cause.
-
-Fix: add `run_in_background: true` to the Agent call. Lead receives task-notification,
-then reads deliverable with `Read limit=30` (header + summary_for_lead only).
-
-Override (rare, when subagent output is genuinely tiny):
-  set env LEADV2_ALLOW_FG=1 just for this turn.
+Agent spawn during async_wait phase — task is idle, no agents expected.
+If resuming work: run /leadv2 resume <task-id> first to re-activate the task.
+Override: set LEADV2_ALLOW_FG=1 if you intentionally need an agent here.
 MSG
 
 [[ "${LEADV2_ALLOW_FG:-0}" == "1" ]] && exit 0
