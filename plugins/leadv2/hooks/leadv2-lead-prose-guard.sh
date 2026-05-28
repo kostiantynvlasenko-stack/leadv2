@@ -10,10 +10,15 @@ trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 # Only when /leadv2 active (skip routine chat)
 [[ "${LEADV2_LEAD_GUARD:-0}" == "1" ]] || exit 0
 
+# Resolve leadv2_dir from state-paths.yaml (fallback: docs/leadv2)
+_lv2_sp_root="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+_lv2_sp_yaml="${_lv2_sp_root}/.claude/leadv2-overrides/state-paths.yaml"
+_lv2_leadv2_dir=$(grep -E "^[[:space:]]*leadv2_dir[[:space:]]*:" "$_lv2_sp_yaml" 2>/dev/null | head -1 | sed -E "s/^[[:space:]]*leadv2_dir[[:space:]]*:[[:space:]]*//" | sed -E "s/^['\"]//; s/['\"][[:space:]]*$//" | tr -d '\r' || true)
+[[ -z "$_lv2_leadv2_dir" || "$_lv2_leadv2_dir" == "null" || "$_lv2_leadv2_dir" == "~" ]] && _lv2_leadv2_dir="docs/leadv2"
 # Liveness gate: only fire when active.yaml has a session with a live pid
 ACTIVE_YAML=""
-for candidate in "$PWD/docs/leadv2/active.yaml" \
-                 "${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/docs/leadv2/active.yaml"; do
+for candidate in "$PWD/${_lv2_leadv2_dir}/active.yaml" \
+                 "${_lv2_sp_root}/${_lv2_leadv2_dir}/active.yaml"; do
   [[ -f "$candidate" ]] && ACTIVE_YAML="$candidate" && break
 done
 if [[ -n "$ACTIVE_YAML" ]]; then

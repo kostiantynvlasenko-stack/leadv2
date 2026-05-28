@@ -7,6 +7,13 @@
 
 set -euo pipefail
 
+# Source helpers for _lv2_stack_list (grep/awk only, no python3)
+_COLLISION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+export LEADV2_PROJECT_ROOT
+# shellcheck disable=SC1091
+source "${_COLLISION_SCRIPT_DIR}/leadv2-helpers.sh" 2>/dev/null || true
+
 active_yaml="docs/leadv2/active.yaml"
 risky=()
 
@@ -28,12 +35,27 @@ fi
 stash_count=$(git stash list 2>/dev/null | wc -l | tr -d ' ')
 [[ "$stash_count" -gt 0 ]] && risky+=("stash_entries=$stash_count")
 
-# 3. Modified files in shared paths
-hot_paths_modified=$(git status --porcelain 2>/dev/null | awk '
-  $2 ~ /^agent\/state\// || $2 ~ /^personas\// || $2 ~ /^agent\/safety\// || $2 ~ /^docs\/agents\/product-owner\// {
-    print $2
-  }
-' | head -5)
+# 3. Modified files in shared paths (hot_paths from stack.yaml; fallback: PE defaults)
+_LV2_HOT_PATHS=""
+if command -v _lv2_stack_list &>/dev/null; then
+  _LV2_HOT_PATHS="$(_lv2_stack_list 'hot_paths' 'agent/state/ personas/ agent/safety/')"
+else
+  _LV2_HOT_PATHS="agent/state/ personas/ agent/safety/"
+fi
+
+# Build awk condition dynamically from space-separated hot_paths list
+_LV2_AWK_COND=""
+for _hp in $_LV2_HOT_PATHS; do
+  if [[ -n "$_LV2_AWK_COND" ]]; then
+    _LV2_AWK_COND="${_LV2_AWK_COND} || \$2 ~ /^${_hp//\//\\/}/"
+  else
+    _LV2_AWK_COND="\$2 ~ /^${_hp//\//\\/}/"
+  fi
+done
+
+hot_paths_modified=$(git status --porcelain 2>/dev/null | awk "
+  ${_LV2_AWK_COND} { print \$2 }
+" | head -5)
 
 if [[ -n "$hot_paths_modified" ]]; then
   risky+=("hot_paths=$(echo "$hot_paths_modified" | wc -l | tr -d ' ')")

@@ -17,6 +17,27 @@ trap 'exit 0' ERR
 HOOK_NAME="leadv2-schema-audit-pre-gate"
 REPO="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
+# Source helpers for stack.yaml reader (grep/awk only — no python3 dep)
+_SCHEMA_HOOK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-$REPO}"
+export LEADV2_PROJECT_ROOT
+# shellcheck disable=SC1091
+source "${_SCHEMA_HOOK_SCRIPT_DIR}/../scripts/leadv2-helpers.sh" 2>/dev/null || true
+
+# Read stack.yaml overrides (fallback: PE defaults)
+_LV2_SRC_ROOTS_SCHEMA=""
+if command -v _lv2_stack_list &>/dev/null; then
+  _LV2_SRC_ROOTS_SCHEMA="$(_lv2_stack_list 'src_roots' 'platform agent')"
+else
+  _LV2_SRC_ROOTS_SCHEMA="platform agent"
+fi
+_LV2_MIGRATION_GLOB=""
+if command -v _lv2_stack_scalar &>/dev/null; then
+  _LV2_MIGRATION_GLOB="$(_lv2_stack_scalar 'migration_glob' 'supabase/migrations/*.sql')"
+else
+  _LV2_MIGRATION_GLOB="supabase/migrations/*.sql"
+fi
+
 # ── PO-064: profiling ───────────────────────────────────────────────────────
 _HOOK_START_MS=0
 if [[ "${LEADV2_HOOK_PROFILE:-0}" == "1" ]]; then
@@ -70,8 +91,10 @@ fi
 MIGRATION_FILES=()
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
+  # Match against migration_glob from stack.yaml (fallback: supabase/migrations/*.sql)
+  # Use bash glob pattern matching: strip leading non-glob prefix, use case
   case "$f" in
-    supabase/migrations/*.sql) MIGRATION_FILES+=("$REPO/$f") ;;
+    ${_LV2_MIGRATION_GLOB}) MIGRATION_FILES+=("$REPO/$f") ;;
   esac
 done < <(git -C "$REPO" diff --name-only --cached 2>/dev/null || true)
 
@@ -92,6 +115,8 @@ import sys
 import os
 
 REPO = "$REPO"
+# src_roots from stack.yaml (injected from bash; fallback: "platform agent")
+SRC_ROOTS = "$_LV2_SRC_ROOTS_SCHEMA".split()
 migration_files = """${MIGRATION_FILES[*]}""".split()
 
 findings = []
@@ -118,28 +143,29 @@ for mfile in migration_files:
         partial_idx_tables.append(m.group(1).lower())
 
     if partial_idx_tables:
-        # Scan platform/ and agent/ python files for naive upsert on these tables
+        # Scan src_roots python files for naive upsert on these tables
         naive_upsert_refs = []
-        for root, dirs, files in os.walk(os.path.join(REPO, 'platform')):
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
-            for fn in files:
-                if not fn.endswith('.py'):
-                    continue
-                fpath = os.path.join(root, fn)
-                try:
-                    code = open(fpath, encoding='utf-8').read()
-                except OSError:
-                    continue
-                for tbl in partial_idx_tables:
-                    if re.search(
-                        rf'["\']({re.escape(tbl)})["\'].*\.upsert\(',
-                        code, re.IGNORECASE
-                    ) and 'on_conflict' not in code[
-                        max(0, code.lower().find(f'"{tbl}"') - 20):
-                        code.lower().find(f'"{tbl}"') + 200
-                    ]:
-                        rel = os.path.relpath(fpath, REPO)
-                        naive_upsert_refs.append(f"{rel} (table: {tbl})")
+        for src_root in SRC_ROOTS:
+            for root, dirs, files in os.walk(os.path.join(REPO, src_root)):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                for fn in files:
+                    if not fn.endswith('.py'):
+                        continue
+                    fpath = os.path.join(root, fn)
+                    try:
+                        code = open(fpath, encoding='utf-8').read()
+                    except OSError:
+                        continue
+                    for tbl in partial_idx_tables:
+                        if re.search(
+                            rf'["\']({re.escape(tbl)})["\'].*\.upsert\(',
+                            code, re.IGNORECASE
+                        ) and 'on_conflict' not in code[
+                            max(0, code.lower().find(f'"{tbl}"') - 20):
+                            code.lower().find(f'"{tbl}"') + 200
+                        ]:
+                            rel = os.path.relpath(fpath, REPO)
+                            naive_upsert_refs.append(f"{rel} (table: {tbl})")
         for ref in naive_upsert_refs:
             findings.append(
                 f"HIGH [{fname}] Partial unique index on table in migration; "
@@ -162,20 +188,23 @@ for mfile in migration_files:
         cols = m.group(1)
         if re.search(r'\bdate\b|\bcreated_at\b|\bupdated_at\b', cols, re.IGNORECASE):
             if 'timestamptz' not in cols.lower() and 'at time zone' not in cols.lower():
-                # Check if code references created_at::date or current_date
+                # Check if code references created_at::date or current_date (walks src_roots)
                 code_risk = False
-                for root, dirs, files in os.walk(os.path.join(REPO, 'platform')):
-                    dirs[:] = [d for d in dirs if not d.startswith('.')]
-                    for fn in files:
-                        if not fn.endswith('.py'):
-                            continue
-                        fpath = os.path.join(root, fn)
-                        try:
-                            code = open(fpath, encoding='utf-8').read()
-                        except OSError:
-                            continue
-                        if re.search(r'created_at::date|current_date|DATE\(', code, re.IGNORECASE):
-                            code_risk = True
+                for src_root in SRC_ROOTS:
+                    for root, dirs, files in os.walk(os.path.join(REPO, src_root)):
+                        dirs[:] = [d for d in dirs if not d.startswith('.')]
+                        for fn in files:
+                            if not fn.endswith('.py'):
+                                continue
+                            fpath = os.path.join(root, fn)
+                            try:
+                                code = open(fpath, encoding='utf-8').read()
+                            except OSError:
+                                continue
+                            if re.search(r'created_at::date|current_date|DATE\(', code, re.IGNORECASE):
+                                code_risk = True
+                                break
+                        if code_risk:
                             break
                     if code_risk:
                         break

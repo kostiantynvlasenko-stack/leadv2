@@ -1,6 +1,6 @@
 ---
 name: leadv2-briefing-freshness-monitor
-description: "Health check for strategist briefing inputs (content_analysis vs posts). Invoke via /leadv2 health subcommand (see commands/leadv2.md Invocation modes); not auto-fired in /leadv2 cycles."
+description: "[PE-domain only] Health check for strategist briefing inputs (content_analysis vs posts). Applies ONLY when: personas/ directory exists at project root AND stack.yaml db == supabase. Skip (no-op) in all other projects. Invoke via /leadv2 health subcommand; not auto-fired in /leadv2 cycles."
 allowed-tools:
   - Read
   - Write
@@ -8,6 +8,19 @@ allowed-tools:
 ---
 
 # Lead v2 Briefing Freshness Monitor
+
+> **Precondition — skip unless BOTH are true:**
+> 1. A `personas/` directory exists at the project root.
+> 2. `.claude/leadv2-overrides/stack.yaml` has `db: supabase`.
+>
+> If either condition is absent: **exit 0 / no-op silently** — do not proceed.
+>
+> ```bash
+> # Guard (run first, before any other step):
+> [[ -d "personas" ]] || exit 0
+> source "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-helpers.sh"
+> [[ "$(_lv2_stack_scalar db '')" == "supabase" ]] || exit 0
+> ```
 
 ## When
 - Invoked explicitly: `/leadv2 health`

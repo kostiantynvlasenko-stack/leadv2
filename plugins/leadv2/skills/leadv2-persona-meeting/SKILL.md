@@ -1,6 +1,6 @@
 ---
 name: leadv2-persona-meeting
-description: [internal] Spawns claude-subsession to refresh persona STATE/DIALOGUE/QUEUE.
+description: "[PE-domain only] Spawns claude-subsession to refresh persona STATE/DIALOGUE/QUEUE. Applies ONLY when: personas/ directory exists at project root AND stack.yaml db == supabase. Skip (no-op) in all other projects."
 allowed-tools:
   - Read
   - Write
@@ -9,6 +9,19 @@ allowed-tools:
 ---
 
 # Lead v2 Persona Meeting
+
+> **Precondition — skip unless BOTH are true:**
+> 1. A `personas/` directory exists at the project root.
+> 2. `.claude/leadv2-overrides/stack.yaml` has `db: supabase`.
+>
+> If either condition is absent: **exit 0 / no-op silently** — do not proceed.
+>
+> ```bash
+> # Guard (run first, before any other step):
+> [[ -d "personas" ]] || exit 0
+> source "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-helpers.sh"
+> [[ "$(_lv2_stack_scalar db '')" == "supabase" ]] || exit 0
+> ```
 
 ## When: on staleness trigger during Intake, or `/leadv2 meeting <persona>`.
 ## When NOT: routine task flow — read STATE.md instead.

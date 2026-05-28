@@ -1,11 +1,48 @@
 #!/usr/bin/env bash
 # PreToolUse hook for Read: block reads of files >100 lines when no limit/offset given.
 # Forces lead to either delegate to Explore-haiku OR pass `limit=30`.
+#
+# SCOPE: only enforces during an active leadv2 task.
+# Detection: LEADV2_TASK_ID env set, OR active.yaml present with non-empty sessions[].
+# Mirrors the detection used by leadv2-tool-counter.sh (canonical active-session signal).
+# If no active task -> exit 0 immediately; generic repos are never blocked.
+#
+# LEADV2_READ_LIMIT env var overrides the 100-line threshold (e.g. export LEADV2_READ_LIMIT=200).
 set -euo pipefail
 trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
+
+# ── Active-task guard ────────────────────────────────────────────────────────
+# If LEADV2_TASK_ID is set, a task is active. Otherwise probe active.yaml.
+_is_leadv2_active() {
+  [[ -n "${LEADV2_TASK_ID:-}" ]] && return 0
+  local cwd
+  cwd="$(printf -- '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)"
+  [[ -z "$cwd" ]] && cwd="$PWD"
+  local f
+  for f in "$cwd/docs/leadv2/active.yaml" "$cwd/.claude/leadv2-tasks/active.yaml"; do
+    if [[ -f "$f" ]]; then
+      # Check that sessions list is non-empty (same logic as tool-counter)
+      python3 - "$f" <<'PYEOF' 2>/dev/null && return 0
+import sys, yaml
+try:
+    d = yaml.safe_load(open(sys.argv[1])) or {}
+    sessions = d.get('sessions') or []
+    sys.exit(0 if sessions else 1)
+except Exception:
+    sys.exit(1)
+PYEOF
+    fi
+  done
+  return 1
+}
+
+if ! _is_leadv2_active; then
+  exit 0
+fi
+# ─────────────────────────────────────────────────────────────────────────────
 
 FPATH="$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null || echo "")"
 LIMIT="$(echo "$INPUT" | jq -r '.tool_input.limit // empty' 2>/dev/null || echo "")"
@@ -24,7 +61,10 @@ esac
 
 LINES="$(wc -l < "$FPATH" 2>/dev/null | tr -d ' ')"
 [[ -z "$LINES" ]] && exit 0
-[[ "$LINES" -le 100 ]] && exit 0
+
+# Honor LEADV2_READ_LIMIT env override; default 100
+THRESHOLD="${LEADV2_READ_LIMIT:-100}"
+[[ "$LINES" -le "$THRESHOLD" ]] && exit 0
 
 # Whitelist: tiny config / state files we always read fully (under 200 lines exempt for these)
 case "$(basename "$FPATH")" in

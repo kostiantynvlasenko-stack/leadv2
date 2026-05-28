@@ -14,12 +14,19 @@ SESSION_ID="$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "
 
 CTX_PARTS=()
 
+# Resolve configured base dirs from state-paths.yaml (fallback: PE defaults)
+_lv2_sp_yaml="${CWD}/.claude/leadv2-overrides/state-paths.yaml"
+_lv2_leadv2_dir=$(grep -E "^[[:space:]]*leadv2_dir[[:space:]]*:" "$_lv2_sp_yaml" 2>/dev/null | head -1 | sed -E "s/^[[:space:]]*leadv2_dir[[:space:]]*:[[:space:]]*//" | sed -E "s/^['\"]//; s/['\"][[:space:]]*$//" | tr -d '\r' || true)
+[[ -z "$_lv2_leadv2_dir" || "$_lv2_leadv2_dir" == "null" || "$_lv2_leadv2_dir" == "~" ]] && _lv2_leadv2_dir="docs/leadv2"
+_lv2_handoff_dir=$(grep -E "^[[:space:]]*handoff_dir[[:space:]]*:" "$_lv2_sp_yaml" 2>/dev/null | head -1 | sed -E "s/^[[:space:]]*handoff_dir[[:space:]]*:[[:space:]]*//" | sed -E "s/^['\"]//; s/['\"][[:space:]]*$//" | tr -d '\r' || true)
+[[ -z "$_lv2_handoff_dir" || "$_lv2_handoff_dir" == "null" || "$_lv2_handoff_dir" == "~" ]] && _lv2_handoff_dir="docs/handoff"
+
 # === 0. /compact intercept: write pre-compact-resume.md BEFORE compact executes ===
 PROMPT_TEXT="$(echo "$INPUT" | jq -r '.prompt // .message // empty' 2>/dev/null || echo "")"
 if echo "$PROMPT_TEXT" | grep -q '<command-name>/compact</command-name>'; then
   # Find active task
   ACTIVE_FILE=""
-  for f in "$CWD/.claude/leadv2-tasks/active.yaml" "$CWD/docs/leadv2/active.yaml"; do
+  for f in "$CWD/.claude/leadv2-tasks/active.yaml" "$CWD/${_lv2_leadv2_dir}/active.yaml"; do
     [[ -f "$f" ]] && ACTIVE_FILE="$f" && break
   done
   if [[ -n "$ACTIVE_FILE" ]]; then
@@ -32,7 +39,7 @@ try:
 except: print('')
 " 2>/dev/null || echo "")"
     if [[ -n "$TID_FOR_RESUME" ]]; then
-      RESUME_DIR="$CWD/docs/leadv2/tasks/$TID_FOR_RESUME"
+      RESUME_DIR="$CWD/${_lv2_leadv2_dir}/tasks/$TID_FOR_RESUME"
       mkdir -p "$RESUME_DIR" 2>/dev/null || true
       RESUME_FILE="$RESUME_DIR/pre-compact-resume.md"
       # Read current phase from active.yaml
@@ -45,7 +52,7 @@ try:
 except: print('?')
 " 2>/dev/null || echo "?")"
       # Read latest handoff artifact to infer context
-      HANDOFF_DIR="$CWD/docs/handoff/$TID_FOR_RESUME"
+      HANDOFF_DIR="$CWD/${_lv2_handoff_dir}/$TID_FOR_RESUME"
       LATEST_ARTIFACT=""
       if [[ -d "$HANDOFF_DIR" ]]; then
         LATEST_ARTIFACT="$(ls -t "$HANDOFF_DIR"/*.md "$HANDOFF_DIR"/*.yaml 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "")"
@@ -58,7 +65,7 @@ phase: $PHASE_NOW
 latest_handoff: ${LATEST_ARTIFACT:-unknown}
 ---
 You are the LEADV2 ORCHESTRATOR. Task: $TID_FOR_RESUME, phase: $PHASE_NOW.
-After /compact: read docs/leadv2/tasks/$TID_FOR_RESUME/STATE.md limit=20 and docs/handoff/$TID_FOR_RESUME/context.yaml limit=30.
+After /compact: read ${_lv2_leadv2_dir}/tasks/$TID_FOR_RESUME/STATE.md limit=20 and ${_lv2_handoff_dir}/$TID_FOR_RESUME/context.yaml limit=30.
 NEVER write .py/.sh/.ts/.tsx/.sql directly. Delegate ALL code changes to developer subagents.
 RESUME
     fi
@@ -68,7 +75,7 @@ fi
 # === 2. Active leadv2 task summary ===
 TID_ACTIVE=""
 ACTIVE=""
-for f in "$CWD/.claude/leadv2-tasks/active.yaml" "$CWD/docs/leadv2/active.yaml"; do
+for f in "$CWD/.claude/leadv2-tasks/active.yaml" "$CWD/${_lv2_leadv2_dir}/active.yaml"; do
   [[ -f "$f" ]] && ACTIVE="$f" && break
 done
 if [[ -n "$ACTIVE" ]]; then
@@ -105,7 +112,7 @@ try:
 except: print('')
 " 2>/dev/null || echo "")"
   if [[ -n "$TID_ACTIVE" ]]; then
-    HANDOFF_DIR="$CWD/docs/handoff/$TID_ACTIVE"
+    HANDOFF_DIR="$CWD/${_lv2_handoff_dir}/$TID_ACTIVE"
     if [[ -d "$HANDOFF_DIR" ]]; then
       DETECT="$(python3 -c "
 import os, glob
@@ -148,7 +155,7 @@ fi
 # Fires on every user turn so /compact doesn't erase the orchestrator frame.
 if [[ -n "$TID_ACTIVE" ]]; then
   # Check for pre-compact-resume context (written by lead before /compact)
-  RESUME_FILE="$CWD/docs/leadv2/tasks/$TID_ACTIVE/pre-compact-resume.md"
+  RESUME_FILE="$CWD/${_lv2_leadv2_dir}/tasks/$TID_ACTIVE/pre-compact-resume.md"
   RESUME_SNIPPET=""
   if [[ -f "$RESUME_FILE" ]]; then
     # Read last 20 lines — it's a short status dump
@@ -163,7 +170,7 @@ Rules that persist across /compact:
 - NEVER write .py/.sh/.ts/.tsx/.sql directly — delegate ALL code to developer/devops subagents.
 - SILENCE PROTOCOL: zero free-form text between phases. Only pulse lines, gate prompts, async questions.
 - Every text-only turn costs 150K+ tokens. No narration. No 'I am now doing X' updates.
-- If you just resumed from /compact: read docs/leadv2/tasks/$TID_ACTIVE/STATE.md limit=20 and docs/handoff/$TID_ACTIVE/context.yaml limit=30 to restore plan context.")
+- If you just resumed from /compact: read ${_lv2_leadv2_dir}/tasks/$TID_ACTIVE/STATE.md limit=20 and ${_lv2_handoff_dir}/$TID_ACTIVE/context.yaml limit=30 to restore plan context.")
 fi
 
 # === 2.5. Pending Stop-hook warnings (lead-prose-guard, etc.) ===
