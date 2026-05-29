@@ -254,5 +254,39 @@ else
   log_info "[skip] leadv2-outcome-watch.sh not found — outcome-watch not scheduled"
 fi
 
+# ── Causal analysis: RECOVERY-* tasks only ───────────────────────────────────
+# Runs automatically when task id starts with RECOVERY-. Non-blocking: causal
+# lookup failure never gates close. Output (causal.yaml) written to handoff dir.
+if [[ "$TASK_ID" == RECOVERY-* ]]; then
+  CAUSAL_SCRIPT="${SCRIPTS_DIR}/leadv2-causal-analyze.sh"
+  if [[ -x "$CAUSAL_SCRIPT" ]]; then
+    log_info "RECOVERY task detected — running causal analysis for ${TASK_ID}"
+    CAUSAL_OUT="${HANDOFF_DIR}/causal.yaml"
+    causal_block=""
+    # Run with a 90s wall-clock guard so a slow repo never stalls close
+    if causal_block=$(timeout 90 bash "$CAUSAL_SCRIPT" --regression-task "$TASK_ID" 2>/dev/null); then
+      log_info "Causal analysis complete (exit 0 — cause found)"
+    else
+      rc=$?
+      if [[ $rc -eq 1 ]]; then
+        log_info "Causal analysis complete (exit 1 — cause_unknown; log entry written)"
+      else
+        log_warn "Causal analysis returned exit ${rc} — writing partial output if available"
+      fi
+    fi
+    # Write caused_by block to handoff dir regardless of exit code
+    if [[ -n "$causal_block" ]]; then
+      printf -- '%s\n' "$causal_block" > "$CAUSAL_OUT"
+      log_info "Causal output written to ${CAUSAL_OUT}"
+    else
+      log_info "[skip] causal analysis produced no stdout block (check leadv2-causal-log.yaml)"
+    fi
+  else
+    log_info "[skip] leadv2-causal-analyze.sh not found or not executable — skipping causal analysis"
+  fi
+else
+  log_info "[skip] causal analysis not applicable (task_id=${TASK_ID} does not start with RECOVERY-)"
+fi
+
 log_info "Phase 8 close complete for ${TASK_ID} (YAML: ${YAML_PATH})"
 exit 0

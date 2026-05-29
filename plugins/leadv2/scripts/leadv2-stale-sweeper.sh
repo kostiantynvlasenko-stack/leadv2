@@ -387,6 +387,72 @@ if [[ -d "$WORKTREES_DIR" ]]; then
   done < <(git -C "$LEADV2_PROJECT_ROOT" worktree list --porcelain 2>/dev/null | grep '^worktree ')
 fi
 
+# ── Graveyard scan (weekly — detects DORMANT skills with 0 signal-emission) ───
+# Runs at most once per 7 days, tracked by a timestamp marker file.
+# On run: re-tallies skill wiring status, writes skill-usage.log, and surfaces
+# any skill that has status DORMANT (refs=0 dispatch=0 not in AUTO list).
+# Non-blocking: any failure here is logged and skipped.
+GRAVEYARD_MARKER="${_lv2_dir}/.graveyard-last-run"
+TALLY_SCRIPT="${SCRIPT_DIR}/leadv2-skill-usage-tally.sh"
+SKILL_USAGE_LOG="${_lv2_dir}/skill-usage.log"
+GRAVEYARD_INTERVAL_DAYS=7
+
+_graveyard_should_run() {
+  # Returns 0 (true) if the scan hasn't run in the last GRAVEYARD_INTERVAL_DAYS
+  if [[ ! -f "$GRAVEYARD_MARKER" ]]; then
+    return 0  # never run — run now
+  fi
+  local last_run_epoch
+  last_run_epoch=$(python3 -c "
+import os, sys
+try:
+    print(int(os.path.getmtime(sys.argv[1])))
+except Exception:
+    print(0)
+" "$GRAVEYARD_MARKER" 2>/dev/null || echo "0")
+  local now_epoch
+  now_epoch=$(date +%s)
+  local elapsed_days=$(( (now_epoch - last_run_epoch) / 86400 ))
+  [[ "$elapsed_days" -ge "$GRAVEYARD_INTERVAL_DAYS" ]]
+}
+
+if _graveyard_should_run; then
+  if [[ -x "$TALLY_SCRIPT" ]]; then
+    log "running graveyard scan (weekly)..."
+    week_header="# week=$(date -u +%Y-W%V) ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    tally_output=""
+    if tally_output=$(
+      CLAUDE_PLUGIN_ROOT="${SCRIPT_DIR}/.." bash "$TALLY_SCRIPT" 2>/dev/null
+    ); then
+      # Prepend week header and write to skill-usage.log
+      printf -- '%s\n%s\n' "$week_header" "$tally_output" > "$SKILL_USAGE_LOG"
+      # Extract DORMANT skills and surface them
+      dormant_skills=$(printf -- '%s\n' "$tally_output" | \
+        awk '$2 == "DORMANT" { print $1 }' || true)
+      if [[ -n "$dormant_skills" ]]; then
+        dormant_count=$(printf -- '%s\n' "$dormant_skills" | wc -l | tr -d ' ')
+        log "graveyard scan: ${dormant_count} DORMANT skill(s) with 0 signal-emission:"
+        while IFS= read -r skill_name; do
+          [[ -z "$skill_name" ]] && continue
+          log "  DORMANT: ${skill_name}"
+        done <<< "$dormant_skills"
+        log "graveyard: review DORMANT skills — wire, inline, or delete per retro"
+      else
+        log "graveyard scan: no DORMANT skills found — all skills wired or active"
+      fi
+      # Update marker timestamp regardless of findings
+      touch "$GRAVEYARD_MARKER"
+      log "graveyard scan complete (next run in ${GRAVEYARD_INTERVAL_DAYS}d)"
+    else
+      log "graveyard scan: tally script failed — skipping (non-blocking)"
+    fi
+  else
+    log "[skip] graveyard scan: leadv2-skill-usage-tally.sh not found or not executable"
+  fi
+else
+  log "[skip] graveyard scan: last run < ${GRAVEYARD_INTERVAL_DAYS}d ago (marker: ${GRAVEYARD_MARKER})"
+fi
+
 # ── Outcome-watch sweep (due watches from past Heavy/Standard closes) ──────────
 OUTCOME_WATCH_SCRIPT="${SCRIPT_DIR}/leadv2-outcome-watch.sh"
 if [[ -x "$OUTCOME_WATCH_SCRIPT" ]]; then
