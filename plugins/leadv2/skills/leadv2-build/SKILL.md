@@ -335,6 +335,47 @@ If tsc or mypy finds errors → do NOT proceed to Codex review. Fix inline (lead
 
 Skip entirely if no .ts/.tsx/.py files changed.
 
+### 3e. Test-synthesis coverage gate (MANDATORY — runs after 3d, before Review)
+
+**Gate condition:** only run when the build diff touches Python files under `platform/` or `agent/`. Skip silently for docs, UI-only, bash-only, and schema-only tasks.
+
+```bash
+# Gate: check for Python changes in platform/ or agent/
+_PY_CHANGED=$(git diff --name-only "${TASK_START_SHA}..HEAD" \
+  | grep -E '^(platform|agent)/.*\.py$' || true)
+
+if [[ -n "$_PY_CHANGED" ]]; then
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-coverage-gate.sh" \
+    --start-sha "${TASK_START_SHA}" \
+    --task-id "${TASK_ID}" \
+    --threshold 50
+  _COV_RC=$?
+  # coverage.yaml is now at docs/handoff/<task-id>/coverage.yaml
+  # Exit 0 = passed, 1 = failed (below threshold), 2 = error
+
+  if [[ $_COV_RC -eq 1 ]]; then
+    # Coverage below threshold — surface uncovered functions into review context
+    # but do NOT block: reviewer will flag them as findings
+    echo "[build] coverage-gate FAILED — uncovered functions will be surfaced in review" >&2
+  elif [[ $_COV_RC -eq 2 ]]; then
+    echo "[build] coverage-gate ERROR — proceeding without coverage data" >&2
+  else
+    echo "[build] coverage-gate PASSED" >&2
+  fi
+fi
+```
+
+After this runs, the coverage report at `docs/handoff/${TASK_ID}/coverage.yaml` is injected into the reviewer mission brief under `## Coverage gate`:
+
+```
+## Coverage gate
+File: docs/handoff/<task-id>/coverage.yaml
+If passed=false: the uncovered[] list contains functions added in this diff that have no test.
+Reviewer must flag each uncovered function as a finding (severity: medium unless it touches safety/publish paths — then high).
+```
+
+**When to inject:** always include this block in the Codex / critic mission file when `coverage.yaml` exists and `synthesis_attempted: false`. If `coverage.yaml` is absent (gate skipped — no Python changes), omit the block entirely.
+
 ### 4. Mission-drift check (MD-XX from lead-patterns)
 
 For each subagent deliverable:

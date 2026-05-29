@@ -202,6 +202,60 @@ context.yaml.verification.confirmed_at: <ISO>
 source .claude/scripts/leadv2-helpers.sh && leadv2_active_update_phase close
 ```
 
+### 6.5. Phase 7.5 — Soak-watch (invariant watchdog, post-verify gate)
+
+**Gate condition:** only run when the task diff touched runtime, publish, or safety paths. Skip for docs, UI-only, schema-only, and tooling-only tasks.
+
+```bash
+# Gate: runtime/publish/safety diff check
+_RUNTIME_CHANGED=$(git diff --name-only "${TASK_START_SHA}..HEAD" \
+  | grep -E '^(agent/|platform/(publish|safety|auth|engine|cycle)|platform/.*cycle.*\.py)' \
+  || true)
+
+if [[ -n "$_RUNTIME_CHANGED" ]]; then
+  echo "[verify] Phase 7.5 soak-watch: runtime/publish/safety paths touched — running invariant checks" >&2
+
+  # Schedule a 24h outcome watch (shorter than the 48h Heavy-class watch in Phase 8)
+  # to catch regressions that only surface after a few publish cycles
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-outcome-watch.sh" \
+    --schedule \
+    --task-id "${TASK_ID}" \
+    --delay-hours 24
+
+  # Immediate soak: run a second corroborating probe with an extended window
+  # using the same verify-probe override if available
+  SOAK_OVERRIDE="${CLAUDE_PROJECT_ROOT:-$PWD}/.claude/leadv2-overrides/soak-watch.sh"
+  if [[ -x "$SOAK_OVERRIDE" ]]; then
+    echo "[verify] running project soak-watch override: ${SOAK_OVERRIDE}" >&2
+    _SOAK_RC=0
+    LEADV2_TASK_ID="${TASK_ID}" \
+    LEADV2_START_SHA="${TASK_START_SHA}" \
+      bash "$SOAK_OVERRIDE" >/tmp/soak-watch-${TASK_ID}.out 2>&1 || _SOAK_RC=$?
+    if [[ $_SOAK_RC -ne 0 ]]; then
+      echo "[verify] WARN soak-watch override exited ${_SOAK_RC} — check /tmp/soak-watch-${TASK_ID}.out" >&2
+      # Write advisory finding to handoff; does NOT block Phase 8
+      printf 'soak_watch:\n  status: warn\n  exit_code: %d\n  output_file: /tmp/soak-watch-%s.out\n' \
+        "$_SOAK_RC" "$TASK_ID" \
+        >> "docs/handoff/${TASK_ID}/verify-probe-result.yaml"
+    else
+      printf 'soak_watch:\n  status: ok\n  exit_code: 0\n' \
+        >> "docs/handoff/${TASK_ID}/verify-probe-result.yaml"
+    fi
+  else
+    # No project override: log that soak-watch is pending via the scheduled outcome-watch
+    echo "[verify] no soak-watch.sh override found — 24h outcome-watch scheduled (docs/leadv2/watches/${TASK_ID}.yaml)" >&2
+    printf 'soak_watch:\n  status: scheduled\n  delay_hours: 24\n  note: "no immediate override — outcome-watch will fire at 24h"\n' \
+      >> "docs/handoff/${TASK_ID}/verify-probe-result.yaml"
+  fi
+else
+  echo "[verify] Phase 7.5 soak-watch: no runtime/publish/safety paths touched — skipped" >&2
+fi
+```
+
+**Soak-watch does NOT block Phase 8 Close.** A warn/failure result is an advisory finding — write it to `verify-probe-result.yaml` and surface in the Phase 8 reflect entry. The 24h scheduled watch will flip `outcome_watch` in STATE.md history when it fires (via `leadv2-stale-sweeper.sh --sweep` at next session start).
+
+**How to create a project soak-watch override:** place an executable `.claude/leadv2-overrides/soak-watch.sh` that exits 0 for stable and non-zero for regression. The script receives `LEADV2_TASK_ID` and `LEADV2_START_SHA` as env vars.
+
 Proceed to Phase 8 Close.
 
 ### 7. State update on failure
