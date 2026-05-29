@@ -114,6 +114,12 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-worktree-enforce.sh\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-tool-blowup-gate.sh\"",
+            "timeout": 5,
+            "statusMessage": "Checking tool-blowup hard gate..."
           }
         ]
       },

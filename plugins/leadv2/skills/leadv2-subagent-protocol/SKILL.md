@@ -178,6 +178,15 @@ Lead reads subagent output at three explicit tiers — never the full file by de
 
 Subagent produces `<role>.summary.md` (≤50 words for chat) + `<role>.full.md` (full content, ends with `DELIVERABLE_COMPLETE`). Lead may automatically emit `<role>.compressed.md` after detecting `DELIVERABLE_COMPLETE` — **do not generate the compressed file yourself**. The compression runs on the lead side via `leadv2_compress_handoff` and is transparent to the subagent.
 
+## Writable scope — $WRITE_ROOT
+
+**Rule: write ONLY under the worktree root you were spawned in.** Never touch main-repo paths.
+
+- Your writable prefix is the `cwd` you were spawned with (the worktree root). All file writes — code, configs, test fixtures — must resolve under that prefix.
+- **State files are lead-owned.** `docs/leadv2/active.yaml`, `.claude/settings.json`, `LEAD_V2_STATE.md` — never write them. If you need to signal state back to lead, write to `docs/handoff/<task-id>/<role>.full.md` (your deliverable).
+- **Main-repo paths are off-limits during worktree tasks.** If you find yourself writing to a path outside your worktree root (e.g., the main checkout under `/worktrees/../` parent), STOP — that is a guard violation. Signal via your deliverable instead.
+- If you need lead to update a state file, say so in your deliverable: `LEAD_ACTION: update active.yaml field X to Y`.
+
 ## Rules
 
 - **Trust context.yaml.** It's the single source of truth for this task.

@@ -9,6 +9,21 @@ set -euo pipefail
 CLAUDE_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 
 git fetch origin main
+
+# --- Step 0: divergence preflight (FIX #7) ---
+BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo "0")
+if [[ "$BEHIND" -gt 5 ]]; then
+  printf '[DIVERGENCE_BLOCK] task branch is %s commits behind origin/main — manual rebase required before deploy\n' "$BEHIND" >&2
+  exit 1
+elif [[ "$BEHIND" -gt 0 ]]; then
+  printf '[DIVERGENCE] task branch is %s commit(s) behind origin/main — attempting auto-rebase\n' "$BEHIND" >&2
+  git rebase origin/main || {
+    printf '[DIVERGENCE] rebase conflict — resolve manually then re-run deploy\n' >&2
+    exit 1
+  }
+  printf '[DIVERGENCE] rebase succeeded — proceeding\n' >&2
+fi
+
 git checkout main 2>/dev/null || true
 git pull --ff-only origin main || { echo "main moved during task — manual rebase needed"; exit 1; }
 git merge --ff-only "task/$LEADV2_TASK_ID" || { echo "ff-only merge failed — rebase task branch first"; exit 1; }

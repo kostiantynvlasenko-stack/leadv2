@@ -16,6 +16,21 @@ allowed-tools:
 
 ## Protocol
 
+### 0.1. Divergence preflight (Step 0 — run BEFORE 0.5 / before building further)
+
+```bash
+git fetch origin main
+BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo "0")
+```
+
+| `$BEHIND` | Action |
+|---|---|
+| 0 | Clean — proceed to 0.5 |
+| 1-5 | **WARN:** `"[DIVERGENCE] Task branch is ${BEHIND} commit(s) behind origin/main. Rebase NOW before continuing — ff-only merge will fail at deploy."` Attempt auto-rebase: `git rebase origin/main`. If rebase exits 0, proceed. If conflicts, STOP and surface to founder. |
+| >5 | **BLOCK:** do not attempt auto-rebase. Surface: `"[DIVERGENCE_BLOCK] ${BEHIND} commits behind — manual rebase required before deploy."` Set `LEAD_V2_STATE.status: paused`. |
+
+Record result in `context.yaml.deploy_gate.divergence_check` (`{behind: N, action: "clean|rebase_ok|rebase_conflict|block"}`).
+
 ### 0.5. Pre-mortem check (deploy phase)
 
 ```bash
