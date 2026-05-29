@@ -17,6 +17,7 @@
 #   LEADV2_COMMIT          — short SHA or "no-deploy"        (default: auto from git)
 #   LEADV2_VPS_DEPLOYED    — comma-separated list            (default: "")
 #   LEADV2_ALSO_CLOSES     — comma-separated list            (default: "")
+#   LEADV2_FOLLOWUPS       — newline-separated list          (default: "")
 #   LEADV2_BOARD_PROSE     — multiline (default: minimal auto-generated)
 #   LEADV2_DIALOGUE_PROSE  — multiline (default: minimal auto-generated)
 #
@@ -103,6 +104,17 @@ print(json.dumps(items))
 ')"
 fi
 
+# followups list
+FOLLOWUPS_JSON="[]"
+if [[ -n "${LEADV2_FOLLOWUPS:-}" ]]; then
+  FOLLOWUPS_JSON="$(printf -- '%s' "${LEADV2_FOLLOWUPS}" | python3 -c '
+import sys, json
+raw = sys.stdin.read().strip()
+items = [x.strip() for x in raw.split("\n") if x.strip()]
+print(json.dumps(items))
+')"
+fi
+
 # Default prose fields if not provided
 if [[ -z "${LEADV2_BOARD_PROSE:-}" ]]; then
   BOARD_PROSE="- **${TASK_ID} ✅ SHIPPED ${COMMIT}.** ${SUMMARY}"
@@ -131,6 +143,7 @@ CANDIDATE_YAML="$(
   COMMIT="$COMMIT" \
   VPS_JSON="$VPS_JSON" \
   ALSO_CLOSES_JSON="$ALSO_CLOSES_JSON" \
+  FOLLOWUPS_JSON="$FOLLOWUPS_JSON" \
   BOARD_PROSE="$BOARD_PROSE" \
   DIALOGUE_PROSE="$DIALOGUE_PROSE" \
   python3 - <<'PYEOF'
@@ -147,7 +160,7 @@ data = {
     "commit":           os.environ["COMMIT"],
     "vps_deployed":     json.loads(os.environ["VPS_JSON"]),
     "also_closes":      json.loads(os.environ["ALSO_CLOSES_JSON"]),
-    "followups":        [],
+    "followups":        json.loads(os.environ["FOLLOWUPS_JSON"]),
     "board_prose":      os.environ["BOARD_PROSE"],
     "dialogue_prose":   os.environ["DIALOGUE_PROSE"],
 }
