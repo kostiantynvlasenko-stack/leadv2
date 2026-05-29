@@ -24,20 +24,35 @@ Trigger condition: a THEME of related `pattern_for_immune` entries reaches ≥ t
 
 `pattern_for_immune` is authored as a unique full-sentence rule per incident, so exact/normalized text matching never clusters two entries — that approach produced **0 syntheses all-time** (2026-05-29 diagnosis). Cluster by THEME instead, using a cheap model.
 
-First extract every pattern (history + rotated log) to a temp file:
+First extract every pattern from the canonical machine-readable reflect history to a temp file.
+`docs/LEAD_V2_STATE.md` is NOT parseable as YAML (bare prose board lines, duplicated keys) — reading
+it with `yaml.safe_load` always crashes. Use `docs/leadv2/reflect-history.yaml` (clean, append-only)
+as the primary source. Fall back to `docs/ops/LEAD_HISTORY.md` only if it exists and is valid YAML.
 
 ```bash
-python3 - docs/LEAD_V2_STATE.md docs/ops/LEAD_HISTORY.md > /tmp/immune-patterns.txt <<'PY'
+python3 - docs/leadv2/reflect-history.yaml docs/ops/LEAD_HISTORY.md > /tmp/immune-patterns.txt <<'PY'
 import sys, yaml
-for path in sys.argv[1:]:
+
+def extract_patterns(path):
     try:
-        d = yaml.safe_load(open(path)) or {}
+        with open(path, encoding="utf-8") as fh:
+            d = yaml.safe_load(fh) or {}
     except FileNotFoundError:
-        continue
-    for h in (d.get('history') or []):
-        p = (h.get('reflect') or {}).get('pattern_for_immune')
-        if p and p.strip().lower() != 'none':
-            print(f"- [{h.get('task','?')}] {p}")
+        return
+    except yaml.YAMLError as e:
+        print(f"# WARN: skipped {path}: {e}", file=sys.stderr)
+        return
+    # reflect-history.yaml uses top-level 'entries:' list
+    entries = d.get("entries") or d.get("history") or []
+    for h in entries:
+        if not isinstance(h, dict):
+            continue
+        p = (h.get("reflect") or {}).get("pattern_for_immune")
+        if p and p.strip().lower() != "none":
+            print(f"- [{h.get('task', '?')}] {p}")
+
+for path in sys.argv[1:]:
+    extract_patterns(path)
 PY
 wc -l /tmp/immune-patterns.txt
 ```

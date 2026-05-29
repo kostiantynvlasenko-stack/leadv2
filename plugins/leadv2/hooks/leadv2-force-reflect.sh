@@ -78,11 +78,41 @@ for sess in sessions:
         taskdir = handoff_dir
 
     # Skip if already properly closed.
+    # reflect-done.flag: set by lead-reflect §5 after writing reflect-history.yaml entry.
+    # phase8-passed.flag: written by phase8-assert ONLY after reflect-history.yaml entry
+    #   exists (A4 hard check) — so it implies reflect ran.
+    # phase11-passed.flag: alias for older tasks.
+    # reflect-history.yaml entry: the authoritative structured signal — checked explicitly
+    #   so we do NOT treat phase8-passed.flag alone as proof (it was previously written
+    #   off the cosmetic board "✅" line via A4 checking LEAD_V2_STATE.md pattern only).
     closed = False
-    for flag in ("phase8-passed.flag", "phase11-passed.flag", "reflect-done.flag"):
+
+    # Check flag files first (fast path)
+    for flag in ("reflect-done.flag", "phase11-passed.flag"):
         if os.path.isfile(os.path.join(taskdir, flag)):
             closed = True
             break
+
+    # Check reflect-history.yaml for a structured entry (authoritative)
+    if not closed:
+        reflect_history = os.path.join(cwd, "docs", "leadv2", "reflect-history.yaml")
+        if os.path.isfile(reflect_history):
+            try:
+                import yaml  # pyyaml is a project dependency
+                with open(reflect_history, encoding="utf-8") as rh:
+                    rdata = yaml.safe_load(rh) or {}
+                entries = rdata.get("entries") or []
+                if any(isinstance(e, dict) and e.get("task") == task_id for e in entries):
+                    closed = True
+            except Exception:
+                pass  # parse failure → do not treat as closed, let block fire
+
+    # phase8-passed.flag: now gated on reflect-history.yaml via A4 hard check,
+    # so it IS a valid done signal — but only after the above checks to be safe.
+    if not closed:
+        if os.path.isfile(os.path.join(taskdir, "phase8-passed.flag")):
+            closed = True
+
     if closed:
         continue
 

@@ -59,6 +59,7 @@ QUEUE_FILE="${LEADV2_QUEUE_PATH}"
 TASKS_YAML="${LEADV2_PROJECT_ROOT}/docs/tasks.yaml"
 QUEUE_DIR="${LEADV2_PROJECT_ROOT}/docs/agents/product-owner/queue"
 SENTINEL="${LEADV2_HANDOFF_DIR}/${TASK_ID}/phase8-passed.flag"
+REFLECT_HISTORY="${LEADV2_PROJECT_ROOT}/docs/leadv2/reflect-history.yaml"
 
 TODAY="$(date '+%Y-%m-%d')"
 
@@ -151,25 +152,58 @@ else
   log_pass "A3 active.yaml: file absent (treated as empty — no active sessions)"
 fi
 
-# ── A4: LEAD_V2_STATE.md history has "<task_id> ✅" ──────────────────────────
+# ── A4: reflect-history.yaml has structured entry for task_id (real signal) ───
+# Also accepts cosmetic board "✅" line as secondary signal, but the structured
+# entry in reflect-history.yaml is required — it proves lead-reflect §5a ran
+# and learning data was captured (not just a board cosmetic render).
+A4_REFLECT_OK=0
+A4_BOARD_OK=0
+
+# Primary: structured entry in reflect-history.yaml
+if [[ -f "$REFLECT_HISTORY" ]]; then
+  if python3 - "$TASK_ID" "$REFLECT_HISTORY" <<'PYEOF' 2>/dev/null
+import sys, yaml
+task_id = sys.argv[1]
+path = sys.argv[2]
+try:
+    d = yaml.safe_load(open(path, encoding="utf-8")) or {}
+except Exception:
+    sys.exit(1)
+entries = d.get("entries") or []
+for e in entries:
+    if isinstance(e, dict) and e.get("task") == task_id:
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+  then
+    A4_REFLECT_OK=1
+    log_pass "A4 reflect-history.yaml: has structured entry for ${TASK_ID}"
+  else
+    log_fail "A4 reflect-history.yaml: NO entry for ${TASK_ID}"
+  fi
+else
+  log_fail "A4 reflect-history.yaml not found: ${REFLECT_HISTORY}"
+fi
+
+# Secondary (cosmetic fallback check — kept for debugging but NOT sufficient alone)
 if [[ -f "$STATE_FILE" ]]; then
   if python3 -c "
-import sys
+import sys, re
 content = open('${STATE_FILE}').read()
-# History line pattern: '  - PO-XXX ✅' OR 'PO-XXX ✅'
-import re
 if re.search(r'\b${TASK_ID}\s+✅', content):
     sys.exit(0)
 sys.exit(1)
 " 2>/dev/null; then
-    log_pass "A4 LEAD_V2_STATE.md: history has ${TASK_ID} ✅"
+    A4_BOARD_OK=1
+    log_pass "A4 LEAD_V2_STATE.md: board has ${TASK_ID} ✅ (cosmetic)"
   else
-    log_fail "A4 LEAD_V2_STATE.md: missing '${TASK_ID} ✅' history entry"
-    failures+=("A4: ${STATE_FILE} has no '${TASK_ID} ✅' line — update LEAD_V2_STATE history")
+    log_warning "A4 LEAD_V2_STATE.md: missing '${TASK_ID} ✅' board line — non-blocking (reflect-history.yaml is authoritative)"
   fi
-else
-  log_fail "A4 LEAD_V2_STATE.md not found: ${STATE_FILE}"
-  failures+=("A4: ${STATE_FILE} missing")
+fi
+
+# Hard assertion: structured reflect entry is REQUIRED
+if [[ $A4_REFLECT_OK -eq 0 ]]; then
+  failures+=("A4: docs/leadv2/reflect-history.yaml has no entry for ${TASK_ID} — run lead-reflect §5a to append structured entry (this is required; board ✅ line alone is insufficient)")
 fi
 
 # ── W1 (best-effort): BOARD.md HEAD has today's date AND task_id ─────────────

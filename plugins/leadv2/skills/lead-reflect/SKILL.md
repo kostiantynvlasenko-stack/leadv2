@@ -91,9 +91,65 @@ signature:
 
 ---
 
-## §5. Append to STATE history
+## §5. Append to STATE history and reflect-history.yaml
 
-Append to `docs/LEAD_V2_STATE.md` under `history:` section.
+### §5a. Append structured entry to `docs/leadv2/reflect-history.yaml` (canonical machine record)
+
+This is the primary machine-readable record consumed by skill-synthesize, phase8-assert A4,
+and force-reflect. Write it FIRST, before the human board line.
+
+```bash
+REFLECT_HISTORY="docs/leadv2/reflect-history.yaml"
+
+# Build the YAML entry (use python3 for safe multiline quoting)
+python3 - <<PYEOF
+import yaml, datetime, os
+
+entry = {
+    "task": "${task_id}",
+    "closed_at": datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=2))).isoformat(timespec='minutes'),
+    "reflect": {
+        "almost_missed": "${almost_missed}",
+        "opus_needed_for": "${opus_needed_for}",
+        "parallel_win": "${parallel_win}",
+        "codex_rounds": ${codex_rounds},
+        "pattern_for_immune": "${pattern_for_immune}",
+        "fix_quality": "${fix_quality}",
+    },
+    "signature": {
+        "phase": "${phase}",
+        "task_class": "${task_class}",
+        "failure_class": "${failure_class}",
+        "recovery_decision": "${recovery_decision}",
+        "outcome": "${outcome}",
+        "involved_agents": ${involved_agents_json},
+        "change_kind": "${change_kind}",
+    },
+}
+
+path = "${REFLECT_HISTORY}"
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+except FileNotFoundError:
+    data = {}
+
+entries = data.get("entries") or []
+entries.append(entry)
+data["entries"] = entries
+
+# Atomic write: write to tmp, then rename
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    yaml.dump(data, fh, allow_unicode=True, default_flow_style=False, sort_keys=False)
+os.replace(tmp, path)
+print(f"[lead-reflect] reflect-history.yaml updated: {len(entries)} entries")
+PYEOF
+```
+
+Shell variable substitution applies — fill in the reflect field values from §3/§4 before running.
+
+### §5b. Append human board line to `docs/LEAD_V2_STATE.md` under `history:` section
 
 ```yaml
   - task: <task_id>
@@ -118,7 +174,7 @@ Append to `docs/LEAD_V2_STATE.md` under `history:` section.
 
 If `history:` has >20 entries: rotate oldest entries to `docs/ops/LEAD_HISTORY.md` (append), keep only last 20 in STATE.md.
 
-After the history entry is written, mark reflect as done so the Stop-hook force-reflect guard (`leadv2-force-reflect.sh`) does not re-fire:
+After BOTH writes are complete, mark reflect as done so the Stop-hook force-reflect guard (`leadv2-force-reflect.sh`) does not re-fire:
 
 ```bash
 for d in "docs/handoff/${LEADV2_TASK_ID}" "docs/leadv2/tasks/${LEADV2_TASK_ID}"; do
