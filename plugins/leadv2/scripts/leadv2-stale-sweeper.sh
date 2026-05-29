@@ -387,4 +387,15 @@ if [[ -d "$WORKTREES_DIR" ]]; then
   done < <(git -C "$LEADV2_PROJECT_ROOT" worktree list --porcelain 2>/dev/null | grep '^worktree ')
 fi
 
+# ── Outcome-watch sweep (due watches from past Heavy/Standard closes) ──────────
+OUTCOME_WATCH_SCRIPT="${SCRIPT_DIR}/leadv2-outcome-watch.sh"
+if [[ -x "$OUTCOME_WATCH_SCRIPT" ]]; then
+  log "running outcome-watch sweep..."
+  if ! bash "$OUTCOME_WATCH_SCRIPT" --sweep 2>&1 | while IFS= read -r line; do log "$line"; done; then
+    log "outcome-watch sweep reported regression(s) — see docs/leadv2/watches/ for details"
+  fi
+else
+  log "[skip] leadv2-outcome-watch.sh not found — skipping sweep"
+fi
+
 exit 0

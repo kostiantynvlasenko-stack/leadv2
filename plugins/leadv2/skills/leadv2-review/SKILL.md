@@ -251,15 +251,31 @@ Read docs/handoff/<id>/critic.md
 - Immediately spawn `critic(opus)` as fallback primary
 - Do NOT retry Codex — rate limit means burst is over budget
 
-Read hack-detection results:
+Read and fold in hack-detection results — **mandatory, not optional**:
+
 ```bash
-# Read hack findings
-cat docs/handoff/<id>/hack-findings.yaml   # YAML list of findings
+# Read hack findings (written by the parallel Agent(developer) hack-detection run)
+# If file missing: treat as has_block=false, warn_count=0 (don't block on tooling absence)
+HACK_FILE="docs/handoff/<id>/hack-findings.yaml"
 ```
 
-Combine findings from all reviewers who ran into a single `context.yaml.reviews.round_1:` block.
+Parse the file and extract counts. Then **immediately execute** the following logic:
 
-Write to:
+```python
+# Pseudocode — execute inline or via a python3 -c call:
+import yaml, os
+hack_file = f"docs/handoff/{task_id}/hack-findings.yaml"
+if os.path.exists(hack_file):
+    findings = yaml.safe_load(open(hack_file)) or {}
+    summary = findings.get("summary", {})
+else:
+    summary = {"block_count": 0, "warn_count": 0, "has_block": False}
+block_count = summary.get("block_count", 0)
+warn_count  = summary.get("warn_count", 0)
+has_block   = summary.get("has_block", False)
+```
+
+Write to context.yaml **now** (before reading other reviewer outputs):
 ```yaml
 context.yaml.reviews.codex_round_1: {critical: N, high: N, medium: N}
 context.yaml.reviews.hack_findings:
@@ -269,11 +285,41 @@ context.yaml.reviews.hack_findings:
   has_block: true/false
 ```
 
-If `has_block: true` → mark task `needs_durable_fix: true` in LEAD_V2_STATE. Trigger Tier B decision:
+**Gate — execute before proceeding to §4 decision tree:**
+
+```bash
+# Fold hack-detection summary into round1-findings (concrete append, not optional):
+HACK_SUMMARY="docs/handoff/<id>/hack-detection.summary.md"
+ROUND1_FINDINGS="docs/handoff/<id>/reviews/round1-findings.md"
+mkdir -p "docs/handoff/<id>/reviews"
+if [[ -f "$HACK_SUMMARY" ]]; then
+  printf -- '\n## hack-detection\n' >> "$ROUND1_FINDINGS"
+  cat "$HACK_SUMMARY"              >> "$ROUND1_FINDINGS"
+fi
+
+# If has_block=true: HARD GATE — must get founder approval before disposition=resolved
+# Extract block snippets for the question:
+block_snippets=$(python3 -c "
+import yaml, sys, os
+f = 'docs/handoff/$TASK_ID/hack-findings.yaml'
+if not os.path.exists(f): sys.exit(0)
+d = yaml.safe_load(open(f)) or {}
+blocks = [x for x in d.get('findings',[]) if x.get('severity')=='block']
+for b in blocks[:3]: print(f\"  {b.get('type')}: {b.get('snippet','')[:80]}\")
+" 2>/dev/null || true)
 ```
-AskUserQuestion: "Hack-detection found <N> block-severity signal(s): <list snippets>.
-Options: (A) accept with band-aid (tech debt noted), (B) redesign for durable fix. Default: B."
+
+If `has_block == true`:
 ```
+AskUserQuestion: "Hack-detection found ${block_count} block-severity signal(s) in this diff:
+${block_snippets}
+Options: (A) accept with band-aid (appended to followups.md as tech debt), (B) fix now before deploy. Default: B."
+```
+- Do NOT set `disposition: resolved` until founder answers.
+- If (B): spawn `Agent(developer, sonnet)` to fix the flagged patterns, then re-run hack-detection once.
+- If (A): append to `docs/handoff/<id>/followups.md`: `"- [ ] HACK-BANDAID-<type>: <snippet>"` for each block finding, then proceed.
+
+If `has_block == false` → no gate. Incorporate warn-count into round_1 findings summary and proceed normally to §4.
 
 ### 3b. Negative-memory diff scan (after gathering Round 1 findings)
 

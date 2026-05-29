@@ -236,5 +236,23 @@ else
   log_info "[skip] leadv2-phase8-assert.sh not yet present — skipping gate assertions"
 fi
 
+# ── Outcome-watch: schedule for Heavy/Standard tasks ─────────────────────────
+# Deterministic shell dispatch — not prose the lead skips.
+# Writes docs/leadv2/watches/<TASK_ID>.yaml; swept at every SessionStart by stale-sweeper.
+OUTCOME_WATCH_SCRIPT="${SCRIPTS_DIR}/leadv2-outcome-watch.sh"
+if [[ -x "$OUTCOME_WATCH_SCRIPT" ]]; then
+  case "${CLASS}" in
+    Heavy|Standard)
+      log_info "Scheduling outcome-watch for ${TASK_ID} (+48h)"
+      bash "$OUTCOME_WATCH_SCRIPT" --schedule --task-id "$TASK_ID" --delay-hours 48 &
+      ;;
+    *)
+      log_info "[skip] outcome-watch not scheduled for class=${CLASS} (Heavy|Standard only)"
+      ;;
+  esac
+else
+  log_info "[skip] leadv2-outcome-watch.sh not found — outcome-watch not scheduled"
+fi
+
 log_info "Phase 8 close complete for ${TASK_ID} (YAML: ${YAML_PATH})"
 exit 0

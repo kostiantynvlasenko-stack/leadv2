@@ -168,30 +168,23 @@ Check `classification.class` from `docs/handoff/<task-id>/context.yaml`.
 
 If class is `Heavy` or `Standard` (touched runtime files):
 
-1. Record the deploy timestamp (`deploy_ts`) — use `context.yaml.verification.confirmed_at` or now().
-
-2. Schedule via CronCreate (session-level cron, fires once):
-
-```
-CronCreate(
-  cron="<M> <H> <D> <month> *",   # compute deploy_ts + 48h → cron fields
-  prompt="/leadv2 outcome-check <task-id>",
-  recurring=false
-)
-```
-
-3. Also write a durable fallback comment to `docs/handoff/<task-id>/outcome-watch.sh` for founder to optionally register in crontab:
+**Run this concrete shell command** — do not use CronCreate (session-scoped, unreliable):
 
 ```bash
-#!/usr/bin/env bash
-# Durable fallback — register in crontab if CronCreate was session-scoped:
-# <M> <H> * * *  /path/to/.claude/scripts/leadv2-outcome-watch.sh \
-#   --task-id <task-id> \
-#   --config docs/handoff/<task-id>/outcome-watch-config.yaml \
-#   --deploy-ts <deploy_ts>
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-outcome-watch.sh" \
+  --schedule \
+  --task-id "<task-id>" \
+  --delay-hours 48
 ```
 
-See `.claude/skills/leadv2-outcome-watch/SKILL.md` for the full outcome-watch protocol.
+This writes `docs/leadv2/watches/<task-id>.yaml` with `status: pending` and `due_at: <now+48h>`.
+The sweep runs automatically at every SessionStart via `leadv2-stale-sweeper.sh`, which calls
+`leadv2-outcome-watch.sh --sweep`. When due, the sweep executes `.claude/leadv2-overrides/outcome-watch.sh`
+(if present) and flips `outcome_watch: pending` → `stable|regression` in `LEAD_V2_STATE.md` history.
+
+Note: `leadv2-phase8-close.sh` (the shell executor for Phase 8) already calls this automatically for
+Heavy/Standard tasks. This step is for lead-driven (interactive) close paths that invoke the skill
+directly without going through the shell script.
 
 ### Step 7. Session-hygiene suggestion (cost discipline)
 
