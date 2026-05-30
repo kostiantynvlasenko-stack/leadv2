@@ -84,6 +84,15 @@ Each phase entry calls `leadv2_pulse_log "<phase>" "<one-line summary>"` — emi
 
 - **Enter worktree:** `EnterWorktree(name="<task-id>")` — creates `.claude/worktrees/<task-id>` on branch `task/<task-id>` off current HEAD. Session cwd switches into it. ALL Phase 1-5 edits and commits happen here. Skip for `Trivial/Light` tasks where deploy isn't expected (worktree adds friction). Skip if user's invocation is `/leadv2 status`/`help`/`meeting`/`questions`/`sessions`.
 - Write per-task state: `docs/leadv2/tasks/<id>/STATE.md` — `status: active, phase: intake`. `docs/LEAD_V2_STATE.md` is auto-regenerated via `leadv2_active_render_index` (DO NOT EDIT directly).
+  **STATE.md schema (required fields):**
+  ```
+  status: active
+  phase: intake          # updated at every phase boundary
+  class: <Trivial|Light|Standard|Heavy>
+  goal: <goal condition string>   # e.g. "docs/handoff/<id>/phase8-passed.flag exists"
+                                  # stored so PostCompact hook can re-inject it after /compact
+  ```
+  Write `goal:` at intake time. The PostCompact hook (`leadv2-postcompact-goal-reinject.sh`) reads this field and re-injects phase + goal into model context after every compaction, preventing mid-pipeline disorientation.
 
 
 ---
@@ -186,6 +195,18 @@ Update `docs/leadv2/tasks/<id>/STATE.md` gate_1.status=confirmed. `leadv2_active
 ## §Phase 4: BUILD
 
 **Route first:** `eval "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase build --step <step> --task-id <id> --class <class> --signals '{"total_lines":<N>,"change_kind":"<kind>"}' 2>/dev/null)" || true`. Honor `ceiling_status`: `warn_60pct` log warning, `hard_stop_95pct` exit 1.
+
+**Autonomous completion loop (`LEADV2_DAEMON=1` only):**
+After Gate 1 is confirmed, set the `/goal` loop:
+```
+/goal docs/handoff/$LEADV2_TASK_ID/phase8-passed.flag exists, or stop after 140 turns
+```
+Rationale:
+- An independent Haiku evaluator checks the goal condition between every turn — catches mid-pipeline stalls that the orchestrator would otherwise miss.
+- The goal survives compaction: if `/compact` fires, `leadv2-postcompact-goal-reinject.sh` (PostCompact hook) re-reads `goal:` from `docs/leadv2/tasks/<id>/STATE.md` and re-injects task id, phase, and goal condition into context.
+- Scoped to `$LEADV2_TASK_ID` to prevent daemon self-spawn cross-talk (each task's flag path is unique).
+- Set after Gate 1 to avoid `AskUserQuestion` sequencing conflict: `/goal` starts the evaluator loop; if set before Gate 1, the evaluator turn fires before the founder can respond to the plan prompt.
+- Interactive mode: `/goal` is optional; manual phase tracking works fine without the daemon loop.
 
 **Pre-spawn for parallel groups (≥2 groups in plan.parallel_groups):**
 1. Lead writes `docs/handoff/<id>/groups-contract.md` per `.claude/templates/groups-contract.md`. Include producer/consumer signatures, output formats, and `external_callers_to_update` enumerated via ONE global grep before spawn. Catches the "Group A flags work for Group B" drift class.

@@ -84,6 +84,7 @@ You are the **autonomous engineering orchestrator**. Take a task from user or qu
 
 ## Phase 4: BUILD
 - Trigger: `leadv2-router.sh --phase build` -> parallel Agent spawns -> negative-memory scan -> test suite | Exit: git diff non-empty, tests green, no blocking NM hits
+- If `LEADV2_DAEMON=1`: set an autonomous completion loop — run `/goal docs/handoff/$LEADV2_TASK_ID/phase8-passed.flag exists, or stop after 140 turns` — so the pipeline self-drives to close and an independent evaluator catches a mid-pipeline stall. Interactive mode: optional.
 - Detail: read `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Phase 4` BEFORE executing.
 
 ## Phase 5: REVIEW - adversarial loop

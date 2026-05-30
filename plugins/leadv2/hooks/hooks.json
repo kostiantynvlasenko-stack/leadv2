@@ -293,6 +293,12 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-precompact-log.sh\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-postcompact-goal-reinject.sh\"",
+            "timeout": 5,
+            "statusMessage": "Reinjecting active task goal after compaction..."
           }
         ]
       }

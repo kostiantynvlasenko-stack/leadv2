@@ -221,9 +221,77 @@ On any QUESTION_PENDING notification → run `leadv2-question-proxy` skill.
 
 **Spawn mechanism:** `Agent` tool (NOT claude-subsession). Agent tool gives architect/critic full MCP access + skills from their frontmatter in `.claude/agents/<role>.md`. claude-subsession is reserved for persona meetings (PO/strategist/architect weekly) where persistent conversation memory is needed.
 
+**Env flag:** `LEADV2_WORKFLOW_ENABLED=1` enables the dynamic-Workflow fan-out path for the Plan phase (requires Max/Team plan with `Workflow` tool). Default (unset) uses the manual path below.
+
 **Stage 1 — ONE message, parallel spawns:**
 
+> **If `LEADV2_WORKFLOW_ENABLED=1` (and `Workflow` tool is available):**
+>
+> Issue ONE `Workflow` call instead of manual parallel `Agent` spawns + `Monitor`. Script shape:
+>
+> ```js
+> // Workflow script — planning fan-out
+> const results = await parallel([
+>   agent("architect", {
+>     model: "claude-opus-4-5",
+>     prompt: `<architect mission — full mission context + graph context from /tmp/mission-<id>.md>`,
+>     outputSchema: {
+>       type: "object",
+>       properties: {
+>         recommendation: { type: "string" },
+>         decisions: { type: "array", items: { type: "object" } },
+>         off_limits: { type: "array", items: { type: "string" } },
+>         deliverable_path: { type: "string" }
+>       },
+>       required: ["recommendation", "decisions", "off_limits"]
+>     }
+>   }),
+>   agent("critic", {
+>     model: "claude-sonnet-4-5",
+>     prompt: `<initial framing review — review mission scope, highlight structural risks, do NOT review a plan (none exists yet)>`,
+>     outputSchema: {
+>       type: "object",
+>       properties: {
+>         concerns: { type: "array", items: { type: "string" } },
+>         severity_max: { type: "string", enum: ["critical", "high", "medium", "low", "none"] }
+>       },
+>       required: ["concerns", "severity_max"]
+>     }
+>   })
+> ]);
+>
+> // Synthesis stage (pipeline after parallel)
+> const synthesis = await pipeline(results, {
+>   agent: "lead",
+>   prompt: `Synthesize architect + critic outputs into context.yaml decisions/off_limits/plan.steps`,
+> });
+>
+> // Adversarial-verify stage — class >= Standard only
+> // For Heavy/Strategic: 2-of-3 refute kills a finding (majority vote)
+> if (taskClass >= "Standard") {
+>   const verified = await pipeline(synthesis, {
+>     agent: "critic",
+>     prompt: `Adversarial verify: for each proposed decision, refute or confirm.
+>              A decision is killed if ≥2 of 3 review dimensions (correctness, risk, feasibility) refute it.`,
+>     outputSchema: {
+>       type: "object",
+>       properties: {
+>         verified_decisions: { type: "array" },
+>         killed_decisions: { type: "array" },
+>         kill_reasons: { type: "object" }
+>       }
+>     }
+>   });
+> }
+> ```
+>
+> The Workflow returns structured JSON results directly — no Monitor polling, no manual deliverable-file reads. Codex (`leadv2-codex-planner.sh`) stays orthogonal: fire it as an optional background Bash call outside the Workflow if available.
+>
+> **Note:** `Workflow` requires Max or Team plan. If the tool is not available in the current session, fall through to the manual path below.
+
 ```
+# Manual path (default — LEADV2_WORKFLOW_ENABLED unset or ≠ 1):
+#
 # Codex (optional, cheap 2nd brain) — fire ONLY if available:
 # Check: bash ~/.claude/scripts/codex-task.sh status >/dev/null 2>&1 && echo "codex_ok"
 # If codex_ok → fire Codex in background. If unavailable → skip, Agent(critic) is sufficient.

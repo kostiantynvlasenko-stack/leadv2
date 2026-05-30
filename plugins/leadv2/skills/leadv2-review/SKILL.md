@@ -190,6 +190,8 @@ Reviewers spawn via **Agent tool** (shared session) — their `.claude/agents/<r
 
 Hack-detection runs in parallel with Codex/critic in ALL cases (see `leadv2-hack-detection` skill).
 
+**Env flag:** `LEADV2_WORKFLOW_ENABLED=1` enables the dynamic-Workflow fan-out path for the Review phase (requires Max/Team plan with `Workflow` tool). Default (unset) uses the manual Cases A/B/C below.
+
 **Codex invocation discipline:** `codex-task.sh adversarial-review` MUST be passed
 `--wait` and run as a `run_in_background=true` Bash tool call. `--wait` makes
 codex-companion run synchronously; the Bash tool's background flag is the only async
@@ -198,7 +200,103 @@ then returns immediately, the job runs detached, and the captured output file ge
 only the start banner (findings stay stranded in the plugin job-log). With `--wait`
 the full review lands in the Bash output file and `cx-tail.sh` reads it directly.
 
+> **If `LEADV2_WORKFLOW_ENABLED=1` (and `Workflow` tool is available):**
+>
+> Issue ONE `Workflow` call instead of manual parallel `Agent`/`Bash(codex)` calls + `Monitor`. Script shape:
+>
+> ```js
+> // Workflow script — review fan-out
+> const DIFF_PATH = `/tmp/leadv2-review-<id>.diff`;
+>
+> const round1 = await parallel([
+>   agent("critic", {
+>     model: safetyTouched ? "claude-opus-4-5" : "claude-sonnet-4-5",
+>     prompt: `Adversarial code review. Diff: ${DIFF_PATH}. Brief: /tmp/review-mission-<id>.md.
+>              Output CHALLENGE blocks per critic role format with severity tags.`,
+>     outputSchema: {
+>       type: "object",
+>       properties: {
+>         findings: {
+>           type: "array",
+>           items: {
+>             type: "object",
+>             properties: {
+>               severity: { type: "string", enum: ["critical", "high", "medium", "low", "nit"] },
+>               dimension: { type: "string" },
+>               description: { type: "string" },
+>               suggested_fix: { type: "string" }
+>             },
+>             required: ["severity", "dimension", "description"]
+>           }
+>         },
+>         max_severity: { type: "string" }
+>       },
+>       required: ["findings", "max_severity"]
+>     }
+>   }),
+>   // security-auditor fires only when safety-touched (same gate as manual Cases B/C)
+>   ...(safetyTouched ? [agent("security-auditor", {
+>     model: "claude-sonnet-4-5",
+>     prompt: `Security review. Diff: ${DIFF_PATH}. Full-file read allowed for security-sensitive paths.`,
+>     outputSchema: {
+>       type: "object",
+>       properties: {
+>         findings: { type: "array", items: { type: "object" } },
+>         has_critical: { type: "boolean" }
+>       },
+>       required: ["findings", "has_critical"]
+>     }
+>   })] : []),
+>   agent("developer", {
+>     model: "claude-sonnet-4-5",
+>     prompt: `Run hack-detection per .claude/skills/leadv2-hack-detection/SKILL.md on diff ${DIFF_PATH}.
+>              Output findings YAML with block_count/warn_count/has_block summary.`,
+>     outputSchema: {
+>       type: "object",
+>       properties: {
+>         findings: { type: "array" },
+>         summary: {
+>           type: "object",
+>           properties: {
+>             block_count: { type: "number" },
+>             warn_count: { type: "number" },
+>             has_block: { type: "boolean" }
+>           },
+>           required: ["block_count", "warn_count", "has_block"]
+>         }
+>       },
+>       required: ["findings", "summary"]
+>     }
+>   })
+> ]);
+>
+> // Adversarial-verify stage — per-finding 3-vote majority kill
+> // Each finding is put to 3 independent review dimensions; ≥2 refutations kill it.
+> const verified = await pipeline(round1, {
+>   agent: "critic",
+>   model: "claude-sonnet-4-5",
+>   prompt: `For each Critical/High finding from round1, apply 3-vote majority-kill:
+>            vote on (correctness, risk, actionability). If ≥2 votes refute → kill finding.
+>            Output: verified_findings[], killed_findings[] with kill_reasons.`,
+>   outputSchema: {
+>     type: "object",
+>     properties: {
+>       verified_findings: { type: "array" },
+>       killed_findings: { type: "array" },
+>       kill_reasons: { type: "object" }
+>     },
+>     required: ["verified_findings", "killed_findings"]
+>   }
+> });
+> ```
+>
+> The Workflow returns structured JSON findings directly — no Monitor polling, no manual deliverable-file reads. Write the JSON results to `docs/handoff/<id>/reviews/round1-findings.json` and proceed to §3 using the structured output (no `cx-tail.sh` needed). Codex review (`codex-task.sh adversarial-review`) stays orthogonal: fire it as an optional background Bash call outside the Workflow if available.
+>
+> **Note:** `Workflow` requires Max or Team plan. If the tool is not available in the current session, fall through to the manual Cases A/B/C below.
+
 ```bash
+# Manual path (default — LEADV2_WORKFLOW_ENABLED unset or ≠ 1):
+#
 # Case A: Codex OK, non-safety → Codex + hack-detection, parallel
 if $CODEX_OK && ! safety_touched; then
   # ONE message, two calls:
