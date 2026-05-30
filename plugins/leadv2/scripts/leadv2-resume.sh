@@ -10,8 +10,17 @@ TASK_ID="$1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# Task state convention: docs/leadv2/tasks/<id>/STATE.md
-TASK_DIR="$PROJECT_ROOT/docs/leadv2/tasks/$TASK_ID"
+# Load path overrides from .claude/leadv2-overrides/state-paths.yaml (if present).
+# This exports LEADV2_TASKS_DIR (among others), which may override docs/leadv2/tasks.
+export LEADV2_PROJECT_ROOT="$PROJECT_ROOT"
+# shellcheck source=leadv2-helpers.sh
+source "$SCRIPT_DIR/leadv2-helpers.sh" 2>/dev/null || true
+_lv2_load_paths 2>/dev/null || true
+
+# Task state convention: <tasks-dir>/<id>/STATE.md
+# LEADV2_TASKS_DIR is set by _lv2_load_paths (default: docs/leadv2/tasks).
+_LV2_TASKS_BASE="${LEADV2_TASKS_DIR:-$PROJECT_ROOT/docs/leadv2/tasks}"
+TASK_DIR="$_LV2_TASKS_BASE/$TASK_ID"
 STATE_FILE="$TASK_DIR/STATE.md"
 # ACTIVE_FILE kept for reference — uses docs/leadv2/active.yaml
 # shellcheck disable=SC2034
@@ -42,9 +51,13 @@ echo ""
 
 # === git status for current repo ===
 echo "--- Git status ---"
-BR="$(git -C "$PROJECT_ROOT" branch --show-current 2>/dev/null || echo '')"
-DIRTY="$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-printf "  %-18s branch=%s dirty=%s\n" "project:" "${BR:-?}" "$DIRTY"
+if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree &>/dev/null; then
+  BR="$(git -C "$PROJECT_ROOT" branch --show-current 2>/dev/null || echo '')"
+  DIRTY="$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ' || echo '?')"
+  printf "  %-18s branch=%s dirty=%s\n" "project:" "${BR:-?}" "$DIRTY"
+else
+  echo "  (not a git repo — skipping git status)"
+fi
 
 # === PR status (gh if available) ===
 PR_MANIFEST="$TASK_DIR/pr-manifest.yaml"

@@ -77,6 +77,7 @@ path_defaults = {
     "LEADV2_HANDOFF_DIR":       project_root + "/docs/handoff",
     "LEADV2_LEADV2_DIR":        project_root + "/docs/leadv2",
     "LEADV2_QUEUE_ARCHIVE_DIR": project_root + "/docs/agents/product-owner/queue/_archive",
+    "LEADV2_TASKS_DIR":         project_root + "/docs/leadv2/tasks",
 }
 path_key_map = {
     "board_path":        "LEADV2_BOARD_PATH",
@@ -86,6 +87,7 @@ path_key_map = {
     "handoff_dir":       "LEADV2_HANDOFF_DIR",
     "leadv2_dir":        "LEADV2_LEADV2_DIR",
     "queue_archive_dir": "LEADV2_QUEUE_ARCHIVE_DIR",
+    "leadv2_tasks_dir":  "LEADV2_TASKS_DIR",
 }
 # Non-path keys — for project-specific extensions via state-paths.yaml.
 str_key_map = {}
@@ -124,9 +126,10 @@ for ek, val in out.items():
   [[ -z "${_lv2_produced[LEADV2_HANDOFF_DIR]+x}"       ]] && : "${LEADV2_HANDOFF_DIR:=${LEADV2_PROJECT_ROOT}/docs/handoff}"
   [[ -z "${_lv2_produced[LEADV2_LEADV2_DIR]+x}"        ]] && : "${LEADV2_LEADV2_DIR:=${LEADV2_PROJECT_ROOT}/docs/leadv2}"
   [[ -z "${_lv2_produced[LEADV2_QUEUE_ARCHIVE_DIR]+x}" ]] && : "${LEADV2_QUEUE_ARCHIVE_DIR:=${LEADV2_PROJECT_ROOT}/docs/agents/product-owner/queue/_archive}"
+  [[ -z "${_lv2_produced[LEADV2_TASKS_DIR]+x}"         ]] && : "${LEADV2_TASKS_DIR:=${LEADV2_PROJECT_ROOT}/docs/leadv2/tasks}"
   export LEADV2_BOARD_PATH LEADV2_DIALOGUE_PATH LEADV2_QUEUE_PATH \
          LEADV2_LEAD_STATE_PATH LEADV2_HANDOFF_DIR LEADV2_LEADV2_DIR \
-         LEADV2_QUEUE_ARCHIVE_DIR
+         LEADV2_QUEUE_ARCHIVE_DIR LEADV2_TASKS_DIR
 }
 
 # ── Codex policy ──────────────────────────────────────────────────────────
@@ -938,17 +941,22 @@ leadv2_task_id() {
 }
 
 leadv2_task_dir() {
-  # Echo absolute path to docs/leadv2/tasks/<id>/
+  # Echo absolute path to <tasks-dir>/<id>/
+  # Uses LEADV2_TASKS_DIR if set (populated by _lv2_load_paths from state-paths.yaml
+  # leadv2_tasks_dir override); falls back to docs/leadv2/tasks for backward compat.
+  # Accepts task id from $1 OR LEADV2_TASK_ID env var ($1 takes priority).
   # Creates the directory if it does not yet exist.
-  # Prints nothing when LEADV2_TASK_ID is unset — caller must handle fallback.
+  # Prints nothing when no task id is available — caller must handle fallback.
   local tid
-  tid="${LEADV2_TASK_ID:-}"
+  tid="${1:-${LEADV2_TASK_ID:-}}"
   if [[ -z "$tid" ]]; then
     printf -- ''
     return 0
   fi
+  local _tasks_base
+  _tasks_base="${LEADV2_TASKS_DIR:-${LEADV2_PROJECT_ROOT}/docs/leadv2/tasks}"
   local dir
-  dir="${LEADV2_PROJECT_ROOT}/docs/leadv2/tasks/${tid}"
+  dir="${_tasks_base}/${tid}"
   mkdir -p "$dir"
   printf -- '%s' "$dir"
 }
@@ -956,11 +964,13 @@ leadv2_task_dir() {
 leadv2_state_path() {
   # Returns path to the STATE.md for the current task.
   # Task-scoped when LEADV2_TASK_ID is set; legacy global path otherwise.
+  # Respects LEADV2_TASKS_DIR override (set by _lv2_load_paths from state-paths.yaml).
   local tid
   tid="${LEADV2_TASK_ID:-}"
   if [[ -n "$tid" ]]; then
-    local dir
-    dir="${LEADV2_PROJECT_ROOT}/docs/leadv2/tasks/${tid}"
+    local _tasks_base dir
+    _tasks_base="${LEADV2_TASKS_DIR:-${LEADV2_PROJECT_ROOT}/docs/leadv2/tasks}"
+    dir="${_tasks_base}/${tid}"
     mkdir -p "$dir"
     printf -- '%s/STATE.md' "$dir"
   else
