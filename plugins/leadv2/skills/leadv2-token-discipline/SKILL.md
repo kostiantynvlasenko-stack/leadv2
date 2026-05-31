@@ -131,3 +131,14 @@ Effective for Sonnet/Haiku via OAuth. Opus 1h cache via direct SDK requires `ANT
 | Complex | sonnet (or opus if T1/T2/T6/T9) | architect-opus + critic-opus | sonnet | critic-opus + reviewer-sonnet + sec-auditor |
 
 Total Opus calls per Standard task ≈ 2-3 (Plan + Review). NOT every phase. NOT lead.
+
+## Workflow tool — model is per-`agent()`, no global default
+
+When the lead authors a `Workflow` tool script (fan-out orchestration), the model-routing rule is **the same as for the Agent tool but multiplied by fan-out** — and there is **no settings.json default** for workflows. Every `agent()` with no `model:` opt inherits the **main-loop model**. An Opus lead authoring a bare-`agent()` workflow runs the whole fleet on Opus.
+
+- **Rule: every `agent()` in a workflow script carries an explicit `model:`.** No exceptions. A bare `agent()` is a bug — same severity as forgetting `model=` on `Agent(Explore)`.
+- Routing mirrors the §model-routing table: `model:'haiku'` for trace/read/discovery (pair with `agentType:'Explore'`), `model:'sonnet'` for write/verify/refute/synthesize, `model:'opus'` only for a single deep-reasoning step — never the whole fleet.
+- Hoist the model into a `const` and pass it on every call; forgetting on one call silently routes that agent to Opus.
+- `meta.phases[].model` is **display-only** (labels the progress group); it does NOT route. Routing is `opts.model` in the `agent()` call.
+- Before launching: compute `agents = items × stages (+ synth)`. If that count on the inherited model is not what you intend, the `model:` opts are missing. (Incident 2026-05-31: a 13-subsystem × trace+verify pipeline shipped 27 Opus agents because no call set `model:`.)
+- This applies in **all repos**. In m3-market, workflow agents must still carry `model:` (Claude tiers only — no Codex/gpt-5 routing inside scripts).
