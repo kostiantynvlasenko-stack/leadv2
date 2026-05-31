@@ -222,6 +222,8 @@ On any QUESTION_PENDING notification → run `leadv2-question-proxy` skill.
 **Spawn mechanism:** `Agent` tool (NOT claude-subsession). Agent tool gives architect/critic full MCP access + skills from their frontmatter in `.claude/agents/<role>.md`. claude-subsession is reserved for persona meetings (PO/strategist/architect weekly) where persistent conversation memory is needed.
 
 **Env flag:** `LEADV2_WORKFLOW_ENABLED=1` enables the dynamic-Workflow fan-out path for the Plan phase (requires Max/Team plan with `Workflow` tool). Default (unset) uses the manual path below.
+>
+> **Self-enable (orchestrator-judged):** you MAY set `LEADV2_WORKFLOW_ENABLED=1` for the session yourself — without a founder prompt — when Plan meets the fan-out test (≥4 independent units / needs independent perspectives). See `docs/goal-workflow-autonomy.md`.
 
 **Stage 1 — ONE message, parallel spawns:**
 

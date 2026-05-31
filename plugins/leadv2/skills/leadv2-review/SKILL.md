@@ -191,6 +191,8 @@ Reviewers spawn via **Agent tool** (shared session) — their `.claude/agents/<r
 Hack-detection runs in parallel with Codex/critic in ALL cases (see `leadv2-hack-detection` skill).
 
 **Env flag:** `LEADV2_WORKFLOW_ENABLED=1` enables the dynamic-Workflow fan-out path for the Review phase (requires Max/Team plan with `Workflow` tool). Default (unset) uses the manual Cases A/B/C below.
+>
+> **Self-enable (orchestrator-judged):** you MAY set `LEADV2_WORKFLOW_ENABLED=1` for the session yourself — without a founder prompt — when Review meets the fan-out test (multi-dimension review / adversarial verify). See `docs/goal-workflow-autonomy.md`.
 
 **Codex invocation discipline:** `codex-task.sh adversarial-review` MUST be passed
 `--wait` and run as a `run_in_background=true` Bash tool call. `--wait` makes

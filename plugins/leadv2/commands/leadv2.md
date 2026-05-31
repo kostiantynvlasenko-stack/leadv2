@@ -154,6 +154,13 @@ Agent(subagent_type=<role>, model=<opus|sonnet>,
 
 ---
 
+# Autonomous tooling — `/goal` & `Workflow` (self-judged)
+
+The orchestrator decides on its own when to fire `/goal` and when to author a `Workflow` — the founder need not request them. Full rubric: `${CLAUDE_PLUGIN_ROOT}/docs/goal-workflow-autonomy.md`.
+
+- **`/goal`** (autonomous completion loop): fire when the task is multi-turn AND has a machine-checkable done-state provable from your own output (flag file exists, tests exit 0, git clean) AND you include a turn cap. Self-set it interactively for Standard+/Heavy tasks at stall-risk. NOT in Phase 7 verify (sleeping bash is cheaper); NOT for Trivial/Light or ≤3-turn tasks.
+- **`Workflow`** (deterministic fan-out): author one when work splits into ≥4 independent units, needs independent perspectives (adversarial verify / judge panel), or exceeds one context. Invoking `/leadv2` IS the opt-in; self-set `LEADV2_WORKFLOW_ENABLED=1` when Plan/Review meets the fan-out test. Every `agent()` carries an explicit `model:` (haiku reads, sonnet synth, opus rare). NOT for <3 units or linear single-file work.
+
 # Where to look (lazy reads)
 
 | Need | File |

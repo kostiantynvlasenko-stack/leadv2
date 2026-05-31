@@ -206,7 +206,7 @@ Rationale:
 - The goal survives compaction: if `/compact` fires, `leadv2-postcompact-goal-reinject.sh` (PostCompact hook) re-reads `goal:` from `docs/leadv2/tasks/<id>/STATE.md` and re-injects task id, phase, and goal condition into context.
 - Scoped to `$LEADV2_TASK_ID` to prevent daemon self-spawn cross-talk (each task's flag path is unique).
 - Set after Gate 1 to avoid `AskUserQuestion` sequencing conflict: `/goal` starts the evaluator loop; if set before Gate 1, the evaluator turn fires before the founder can respond to the plan prompt.
-- Interactive mode: `/goal` is optional; manual phase tracking works fine without the daemon loop.
+- Interactive mode: `/goal` is optional, BUT the orchestrator SHOULD self-set it (without asking the founder) for any Standard+/Heavy task it judges at stall-risk — same condition + turn cap. Full rubric: `docs/goal-workflow-autonomy.md`.
 
 **Pre-spawn for parallel groups (≥2 groups in plan.parallel_groups):**
 1. Lead writes `docs/handoff/<id>/groups-contract.md` per `.claude/templates/groups-contract.md`. Include producer/consumer signatures, output formats, and `external_callers_to_update` enumerated via ONE global grep before spawn. Catches the "Group A flags work for Group B" drift class.
