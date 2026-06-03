@@ -24,39 +24,11 @@ Use the task description from one of:
 - The PO QUEUE item `body` or `title` field (for `/leadv2 next`)
 - `LEAD_V2_STATE.md note:` field as fallback
 
-### 2. Gemini summarize gate (large history)
-
-Before running the script, check if `LEAD_V2_STATE.md` (or the configured
-`history_path`) is large enough to warrant summarization:
+### 2. Set effective history path
 
 ```bash
 HISTORY_PATH="${LEADV2_HISTORY_PATH:-docs/LEAD_V2_STATE.md}"
-HISTORY_CHARS=$(wc -c < "$HISTORY_PATH" 2>/dev/null || echo 0)
-
-if [[ "$HISTORY_CHARS" -gt 8000 ]]; then
-  # Check if Gemini is available (gate)
-  GEMINI_OK=0
-  if bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-gemini-check.sh" >/dev/null 2>&1; then
-    GEMINI_OK=1
-  fi
-
-  if [[ "$GEMINI_OK" == "1" ]]; then
-    SUMMARY_FILE="$(mktemp /tmp/leadv2-rag-history-summary.XXXXXX)"
-    bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-gemini-task.sh" summarize \
-      --input-file "$HISTORY_PATH" \
-      --prompt "Summarize the completed tasks in this leadv2 state history. For each task include: task_id, outcome, class, and key_lessons (max 2 per task). Output valid YAML list only." \
-      --out "$SUMMARY_FILE" || {
-        # Fallback: use original file if Gemini fails
-        SUMMARY_FILE="$HISTORY_PATH"
-      }
-    EFFECTIVE_HISTORY="$SUMMARY_FILE"
-  else
-    # Gemini unavailable — read directly (may be large)
-    EFFECTIVE_HISTORY="$HISTORY_PATH"
-  fi
-else
-  EFFECTIVE_HISTORY="$HISTORY_PATH"
-fi
+EFFECTIVE_HISTORY="$HISTORY_PATH"
 ```
 
 ### 3. Run the script

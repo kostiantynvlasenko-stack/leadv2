@@ -46,8 +46,11 @@ deterministically (`parallel()` / `pipeline()`), each `agent()` carrying an expl
 Returns structured results; the subagents' work stays out of the lead's context.
 
 **FIRE when ANY hold:**
-- The work decomposes into **≥4 independent units** runnable in parallel (multi-area/multi-file
-  audit, codebase-wide sweep, N-candidate design panel, per-item migration).
+- The session contains **≥2 independent tasks** that can run in parallel (parallel Workflow phases
+  instead of serial Agent spawns — serial multi-task spawns proved ~2× slower). Per-phase the old
+  ≥4-unit bar still applies for pure fan-out within a single phase; but at session level ≥2 is enough.
+- The work decomposes into **≥4 independent units** within a single phase runnable in parallel
+  (multi-area/multi-file audit, codebase-wide sweep, N-candidate design panel, per-item migration).
 - Confidence needs **independent perspectives**: adversarial verify (N skeptics per finding),
   judge panel, perspective-diverse review.
 - Scale **exceeds one context**: broad review/research/migration one transcript can't hold.
@@ -58,8 +61,7 @@ and Phase 5 Review: the orchestrator MAY self-set `LEADV2_WORKFLOW_ENABLED=1` fo
 Plan/Review meets the fan-out test above.
 
 **DO NOT fire:**
-- Linear single-file work, `<3` units, or anything one `Agent` / one direct edit handles. A workflow
-  for 2 tasks is pure overhead.
+- Linear single-file work or anything one `Agent` / one direct edit handles.
 - When you can't name the independent units up front — **scout inline first** (list the files / find
   the sites / scope the diff), then fan out over the discovered work-list.
 

@@ -478,11 +478,3 @@ Proceed to Phase 5 Review (after PO loop completes, if invoked).
 - Adding new steps mid-Build because "would be nice" — scope creep, park as follow-up.
 - Using claude-subsession by default for every developer task — 5-10x cost for no benefit on short tasks.
 
-## Gemini developer mode (optional accelerator)
-
-When agentic quota is available (`leadv2-gemini-check.sh` returns ok AND mode is `agent`):
-- Caller writes a mission file with `Create file WORKSPACE/foo with exact content:` sections
-- Invoke: `bash $CLAUDE_PLUGIN_ROOT/scripts/leadv2-gemini-developer.sh --mission-file <path> --workspace <scratch> --handoff-dir <handoff> --out <log> --timeout 120`
-- Success: SCRIPT_EXIT=0, files in workspace, result in handoff/gemini-result.md
-- Failure/quota exhausted (exit 2 or 3): fall back to Agent(subagent_type=developer)
-- NEVER use for m3-market (see gemini-policy.yaml)
