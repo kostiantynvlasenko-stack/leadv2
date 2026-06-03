@@ -14,39 +14,20 @@ allowed-tools:
 
 ## Protocol
 
-### 0. Causal lookup — identify root cause before proposing fix
+### 0. Root cause context
 
-**Run before spawning architect.** This amplifies durable-fix bias: knowing the original bug source
-allows architect to fix the root, not the symptom.
-
-```bash
-# Run causal analysis (non-blocking — fall through on failure)
-CAUSED_BY=$(
-  bash .claude/scripts/lv2 leadv2-causal-analyze.sh \
-    --regression-task <task-id> 2>/tmp/causal-warn.log
-) || {
-  CAUSED_BY="caused_by:\n  task_id: null\n  cause_unknown: true\n  lesson: causal lookup failed"
-  cat /tmp/causal-warn.log >&2
-}
-```
-
-Inject the `caused_by:` block into the recovery brief (`/tmp/recovery-<task-id>-<N>.md`) so
-architect sees it as context. Example addition to the brief:
+Set a static default — architect determines root cause from diff and probe output in the recovery brief.
 
 ```
-Causal analysis:
-  caused_by.task_id: NIK-42 (causality_score: 0.82)
-  lesson: "NIK-42 modified publish_feed; null-ref was introduced there"
-  → Root cause is in NIK-42 changes, not in the immediate failing code path
+CAUSED_BY:
+  task_id: null
+  cause_unknown: true
 ```
 
-If `cause_unknown: true` — still include in brief as "causal lookup inconclusive" so architect
-knows this was attempted.
-
-**Rules:**
-- Causal lookup must NOT block recovery — if `leadv2-causal-analyze.sh` times out or errors, continue without it.
-- Never delay spawning architect by more than 60s waiting for causal lookup.
-- Log the `caused_by` result to `docs/handoff/<task-id>/rollback.md` alongside other recovery actions.
+Log to `docs/handoff/<task-id>/rollback.md`:
+```
+caused_by: unknown (architect to determine from diff)
+```
 
 ### 0b. Validate probe result contract (PO-058)
 
@@ -269,7 +250,7 @@ history:
       pattern_for_immune: "when <probe-type> fails with <signature>, <decision> worked"
 ```
 
-This feeds `leadv2-skill-synthesize` for future auto-learning.
+This feeds immune memory for future pattern avoidance.
 
 ## Rules
 

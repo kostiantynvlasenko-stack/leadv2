@@ -95,7 +95,7 @@ signature:
 
 ### §5a. Append structured entry to `docs/leadv2/reflect-history.yaml` (canonical machine record)
 
-This is the primary machine-readable record consumed by skill-synthesize, phase8-assert A4,
+This is the primary machine-readable record consumed by phase8-assert A4
 and force-reflect. Write it FIRST, before the human board line.
 
 ```bash
@@ -211,7 +211,7 @@ if [[ "$detect_mode" != "0" ]]; then
   source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)" 2>/dev/null || true
   # leadv2-correction-detect reads last 6 user messages from session
   # and classifies corrections vs reinforcements vs preferences
-  # Results are written to candidates.jsonl (shadow) or immune memory (live)
+  # Results are written to immune memory (live)
   # See leadv2-correction-detect/SKILL.md for full protocol
   echo "[lead-reflect] invoking leadv2-correction-detect (mode=$detect_mode)"
 fi

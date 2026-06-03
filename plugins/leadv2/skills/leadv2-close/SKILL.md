@@ -72,6 +72,25 @@ history:
 
 See `lead-reflect` skill for guidance on filling each reflect field. Pass `$GRAPH_FOOTPRINT` as context — lead-reflect merges it and applies risk cross-validation.
 
+### Step 2b. Capture learning to ledger
+
+Append ONE line to `docs/leadv2/learnings.md` summarizing the single key learning
+from this task (or the literal word `none` if nothing notable):
+
+```bash
+LEDGER="docs/leadv2/learnings.md"
+REPO=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "unknown")
+DATE=$(date +%Y-%m-%d)
+# Replace <learning> with one concrete sentence; use "none" if task had no new insight
+printf '| %s | %s | %s | personal |\n' "$DATE" "$REPO" "<learning>" >> "$LEDGER"
+```
+
+If the file is missing, create it first with the standard header (see `docs/leadv2/learnings.md`
+in persona-engine for the canonical format). Rules:
+- Capture is a side-effect of EVERY close — not optional, not skipped on short tasks.
+- Default tier is ALWAYS `personal`. Never write `repo` or `plugin` at close time.
+- Promotion to repo/plugin tier is a human-initiated review of the ledger, never automated.
+
 ### Step 3. Reset state
 
 Update `docs/LEAD_V2_STATE.md`:
