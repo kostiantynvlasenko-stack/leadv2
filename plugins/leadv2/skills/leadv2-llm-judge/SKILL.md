@@ -81,7 +81,7 @@ Packet assembly rule: if a field is missing/unknown, omit it rather than invent 
 Use `leadv2-router.sh` to confirm model selection:
 
 ```bash
-router_out=$(bash .claude/scripts/leadv2-router.sh \
+router_out=$(bash .claude/scripts/lv2 leadv2-router.sh \
   --phase deploy --step llm_judge \
   --task-id <id> --class <classification>)
 model=$(echo "$router_out" | grep '^model=' | cut -d= -f2)

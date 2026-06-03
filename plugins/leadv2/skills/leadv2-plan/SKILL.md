@@ -298,7 +298,7 @@ On any QUESTION_PENDING notification → run `leadv2-question-proxy` skill.
 # Check: bash ~/.claude/scripts/codex-task.sh status >/dev/null 2>&1 && echo "codex_ok"
 # If codex_ok → fire Codex in background. If unavailable → skip, Agent(critic) is sufficient.
 Bash(
-  command: .claude/scripts/leadv2-codex-planner.sh --task-id <id> --mission-file /tmp/mission-<id>.md --effort <high|xhigh>
+  command: bash .claude/scripts/lv2 leadv2-codex-planner.sh --task-id <id> --mission-file /tmp/mission-<id>.md --effort <high|xhigh>
   run_in_background: true
 )  # ← only when codex_ok
 
@@ -460,7 +460,7 @@ preferences, not hard constraints. See subagent-preamble.md §1.1.
 Write context.yaml atomically, validate schema on write (PO-057):
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)"
 # Preferred: atomic write + schema validation in one step.
 _atomic_write_yaml "docs/handoff/<task-id>/context.yaml" "$context_yaml_content" "context" || {
   echo "context.yaml schema invalid — rewrite synthesis"; exit 1
@@ -579,7 +579,7 @@ If validation fails → rewrite the offending steps before proceeding to Gate 1.
 After context.yaml is written but BEFORE proceeding to Gate 1 / Build:
 
 ```bash
-bash .claude/scripts/leadv2-premortem.sh \
+bash .claude/scripts/lv2 leadv2-premortem.sh \
   --task-id <task-id> \
   --phase build
 pm_rc=$?
@@ -603,7 +603,7 @@ LEAD_V2_STATE.md:
 ```
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh && leadv2_active_update_phase build
+source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)" && leadv2_active_update_phase build
 ```
 
 Proceed to Phase 3 Gate 1.

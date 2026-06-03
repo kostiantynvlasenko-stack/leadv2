@@ -22,7 +22,7 @@ readonly SCRIPT_DIR
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 readonly REPO_ROOT
 
-# shellcheck source=.claude/scripts/leadv2-helpers.sh
+# shellcheck source=leadv2-helpers.sh
 source "${SCRIPT_DIR}/leadv2-helpers.sh" || { echo "FATAL: cannot source leadv2-helpers.sh" >&2; exit 1; }
 
 # ── Logging ─────────────────────────────────────────────────────────────────

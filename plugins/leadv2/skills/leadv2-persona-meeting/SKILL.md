@@ -19,7 +19,7 @@ allowed-tools:
 > ```bash
 > # Guard (run first, before any other step):
 > [[ -d "personas" ]] || exit 0
-> source "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-helpers.sh"
+> source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)"
 > [[ "$(_lv2_stack_scalar db '')" == "supabase" ]] || exit 0
 > ```
 
@@ -77,7 +77,7 @@ Your deliverable — write ALL of these:
 4. (PO only) Add/update tasks in docs/tasks.yaml via lib — do NOT rewrite QUEUE.md (it is frozen with a redirect banner).
    For each new PO task identified during the meeting:
    ```bash
-   source .claude/scripts/leadv2-tasks-lib.sh
+   source "$(bash .claude/scripts/lv2 --path leadv2-tasks-lib.sh)"
    leadv2_tasks_add "<task-id>" action <priority> \
      --title "<one-sentence mission>" \
      --origin po
@@ -101,7 +101,7 @@ DELIVERABLE_COMPLETE
 
 ```bash
 # Use leadv2-claude-subsession.sh (wraps claude-subsession.sh + enables tool-output compression)
-.claude/scripts/leadv2-claude-subsession.sh --role <persona> --model sonnet \
+bash .claude/scripts/lv2 leadv2-claude-subsession.sh --role <persona> --model sonnet \
   --task-id meeting-<persona>-<date> \
   --mission-file /tmp/meeting-<persona>-<date>.md \
   --wait
@@ -116,7 +116,7 @@ After subsession exits, verify all 3-4 expected files updated:
 stat -f "%Sm" docs/agents/<persona>/STATE.md                  # should be recent
 tail -30 docs/agents/<persona>/DIALOGUE.md                    # new entry present
 cat docs/agents/<persona>/LAST_MEETING.md                     # timestamp refreshed
-[[ <persona> == "product-owner" ]] && source .claude/scripts/leadv2-tasks-lib.sh && leadv2_tasks_top_n 5
+[[ <persona> == "product-owner" ]] && source "$(bash .claude/scripts/lv2 --path leadv2-tasks-lib.sh)" && leadv2_tasks_top_n 5
 ```
 
 If any missing or stale → flag as incomplete meeting → retry once, else report to founder.

@@ -115,7 +115,7 @@ Monitor:
 Read `outcome:` from `verify-probe-result.yaml` — do NOT rely solely on exit code:
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)"
 PROBE_RESULT="docs/handoff/${TASK_ID}/verify-probe-result.yaml"
 _validate_probe_result "$PROBE_RESULT" || echo "[verify] WARN: probe result schema invalid"
 outcome=$(python3 -c "import yaml; print(yaml.safe_load(open('$PROBE_RESULT'))['outcome'])" 2>/dev/null)
@@ -199,7 +199,7 @@ context.yaml.verification.confirmed_at: <ISO>
 ```
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh && leadv2_active_update_phase close
+source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)" && leadv2_active_update_phase close
 ```
 
 Proceed to Phase 8 Close.

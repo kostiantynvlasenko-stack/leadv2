@@ -27,7 +27,7 @@ allowed-tools:
 ### Step 1: Classify
 
 ```bash
-CLASS=$(bash .claude/scripts/leadv2-founder-question-classify.sh "$FOUNDER_MSG")
+CLASS=$(bash .claude/scripts/lv2 leadv2-founder-question-classify.sh "$FOUNDER_MSG")
 ```
 
 Possible classes:
@@ -41,7 +41,7 @@ Possible classes:
 
 | Class | Lead action |
 |---|---|
-| `status` | `bash .claude/scripts/leadv2-status-snapshot.sh` → quote output verbatim. NO LLM judgment. |
+| `status` | `bash .claude/scripts/lv2 leadv2-status-snapshot.sh` → quote output verbatim. NO LLM judgment. |
 | `judgment` | `Skill(leadv2-judge)` with `mode: question` + the question + active task context. Quote Opus verdict. |
 | `explanation` | `Agent(subagent_type=Explore, model=haiku)` with question + word limit 120. Quote summary. |
 | `action_request` | Acknowledge + write new RECOVERY-task to BOARD or amend `context.yaml` plan.steps. Do NOT execute the change yourself. |
@@ -61,7 +61,7 @@ If active phase has a pending action from `leadv2-phase-advance.sh`, continue it
 
 **Founder:** "где мы по фазе"
 - Class: `status`
-- Action: `bash .claude/scripts/leadv2-status-snapshot.sh`
+- Action: `bash .claude/scripts/lv2 leadv2-status-snapshot.sh`
 - Output: "phase=review, verdicts=[APPROVE, REVISE], action=spawn_developer_revise"
 
 **Founder:** "стоит ли деплоить или подождать"

@@ -34,7 +34,7 @@ Record result in `context.yaml.deploy_gate.divergence_check` (`{behind: N, actio
 ### 0.5. Pre-mortem check (deploy phase)
 
 ```bash
-bash .claude/scripts/leadv2-premortem.sh \
+bash .claude/scripts/lv2 leadv2-premortem.sh \
   --task-id <task-id> \
   --phase deploy
 pm_rc=$?
@@ -60,7 +60,7 @@ AND hack_findings.block == 0
 
 If not skipped:
 ```bash
-judge_out=$(bash .claude/scripts/leadv2-llm-judge.sh \
+judge_out=$(bash .claude/scripts/lv2 leadv2-llm-judge.sh \
   --task-id <task-id> --class <classification>)
 judge_rc=$?
 
@@ -70,7 +70,7 @@ judge_model=$(printf '%s\n' "$judge_out" | grep '^model=' | cut -d= -f2)
 
 Spawn Opus/Sonnet judge agent, parse response via:
 ```bash
-bash .claude/scripts/leadv2-llm-judge-parse.sh \
+bash .claude/scripts/lv2 leadv2-llm-judge-parse.sh \
   --task-id <task-id> \
   --response-file <agent_response_file> \
   --model <judge_model>
@@ -96,7 +96,7 @@ Otherwise → compose Tier B decision via `leadv2-founder-input` with recommende
 ### 0.8. Compress Review outputs before reading
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source .claude/scripts/lv2 leadv2-helpers.sh
 for f in \
   "docs/handoff/${TASK_ID}/critic.md" \
   "docs/handoff/${TASK_ID}/developer.md" \
@@ -188,7 +188,7 @@ Update `context.yaml.deploy_gate` with deploy result.
 ### 6. State update
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh && leadv2_active_update_phase verify
+source .claude/scripts/lv2 leadv2-helpers.sh && leadv2_active_update_phase verify
 ```
 
 Log: `"commit <hash>, deploy rc=<rc>, verify pending"` to `LEAD_V2_STATE.md`.

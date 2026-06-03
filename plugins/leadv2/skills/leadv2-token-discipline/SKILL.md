@@ -40,7 +40,7 @@ If you hit turn 30 in one task → something's wrong (founder asking too much fo
 ### 2. Subagent deliverables on disk, NOT in chat
 - Every spawn: `run_in_background=true`. Lead receives task-notification (~100 words), not the body.
 - Read deliverable with `Read limit=30` for header + summary_for_lead only.
-- For review/critic deliverables: use `bash .claude/scripts/leadv2-critic-tail.sh <file>` — extracts Verdict + summary + severity counts (~50 lines vs ~500).
+- For review/critic deliverables: use `bash .claude/scripts/lv2 leadv2-critic-tail.sh <file>` — extracts Verdict + summary + severity counts (~50 lines vs ~500).
 - Full read ONLY if Verdict says REVISE or no-ship.
 
 ### 3. No graph discovery in subagents
@@ -64,7 +64,7 @@ If you hit turn 30 in one task → something's wrong (founder asking too much fo
 - `leadv2-resume.sh` is for explicit founder-triggered resume, not periodic re-check.
 
 ### 8. Cache MCP results within a task
-- `bash .claude/scripts/leadv2-mcp-cache.sh warm <task-id>` at intake.
+- `bash .claude/scripts/lv2 leadv2-mcp-cache.sh warm <task-id>` at intake.
 - Lead does graph queries once in Phase 0/1, caches via `set <key> <file>`. Phases 3/5/7 read via `get <key>`.
 
 ### 9. Heredocs don't enter chat-store
@@ -72,12 +72,12 @@ If you hit turn 30 in one task → something's wrong (founder asking too much fo
 - **NEVER use `Bash(cat > path <<EOF ...EOF)` to create handoff/state/spec files.** Use `Write({file_path, content})` directly — Bash tool stores the FULL command text including the heredoc body, and that body lives in your transcript every future turn. OPS-DEPLOY-LATEST-DO-UPDATE-01 (Apr 29) had 4 bash heredocs at 5-9KB each = ~30KB transcript bloat from one task. Hook `~/.claude/hooks/leadv2-block-bash-heredoc.sh` blocks heredoc-bash inputs >2KB; override with `# bash-guard: allow` only when truly necessary.
 
 ### 10. Cost-estimate before Complex
-- `bash .claude/scripts/leadv2-cost-estimate.sh --task-id <id>` runs before Plan-triad on Complex.
+- `bash .claude/scripts/lv2 leadv2-cost-estimate.sh --task-id <id>` runs before Plan-triad on Complex.
 - If `within_cap: false` → propose 1-tier-down to founder via single AskUserQuestion.
 
 ## Watching the burn
 
-- `bash .claude/scripts/leadv2-token-watch.sh` — shows 24h Opus consumption
+- `bash .claude/scripts/lv2 leadv2-token-watch.sh` — shows 24h Opus consumption
 - Threshold: if Opus 24h > 30M tokens → switch lead to Sonnet for next task
 - Set `LEADV2_MAIN_MODEL=sonnet` in env to force
 

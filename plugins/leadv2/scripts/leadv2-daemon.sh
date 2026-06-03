@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+_LV2_D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # leadv2-daemon.sh — long-running daemon for Phase 4 autonomous operation.
 # Polls task queue, spawns /leadv2 next per item.
 # Implements: quiet hours, outcome-based circuit breaker, parallel tasks, state file, resume.
@@ -255,7 +256,7 @@ PY
         log "decision $dec_id → pause_indefinite: daemon paused"
         ;;
       rollback_and_investigate)
-        local rollback_script="${PROJECT_ROOT:-$(pwd)}/.claude/scripts/leadv2-rollback.sh"
+        local rollback_script="$_LV2_D/leadv2-rollback.sh"
         if [[ -f "$rollback_script" ]]; then
           bash "$rollback_script" --yes 2>&1 | tee -a "$LOGFILE" || true
         else
@@ -881,7 +882,7 @@ while true; do
   # ── Nightly priors compile (once every 20h) ────────────────────────────────
   # Suggested cron for always-on systems (runs as persona user, SHELL=/bin/bash):
   #   0 3 * * * SHELL=/bin/bash /path/to/.claude/scripts/leadv2-priors-compile.sh >> /tmp/leadv2-priors.log 2>&1
-  _PRIORS_COMPILE_SCRIPT="${PROJECT_ROOT:-$(pwd)}/.claude/scripts/leadv2-priors-compile.sh"
+  _PRIORS_COMPILE_SCRIPT="$_LV2_D/leadv2-priors-compile.sh"
   _PRIORS_YAML="${PROJECT_ROOT:-$(pwd)}/docs/leadv2-priors.yaml"
   if [[ -f "$_PRIORS_COMPILE_SCRIPT" ]]; then
     _needs_compile=0
@@ -921,7 +922,7 @@ print('1' if age_h > 20 else '0')
   fi
 
   # Daily budget check — pause daemon until UTC midnight if exceeded
-  _DAILY_BUDGET_SCRIPT="${PROJECT_ROOT:-$(pwd)}/.claude/scripts/leadv2-daily-budget.sh"
+  _DAILY_BUDGET_SCRIPT="$_LV2_D/leadv2-daily-budget.sh"
   if [[ -f "$_DAILY_BUDGET_SCRIPT" ]]; then
     if ! bash "$_DAILY_BUDGET_SCRIPT" --check 2>/dev/null; then
       # Calculate seconds until next UTC midnight
@@ -947,7 +948,7 @@ print(max(60, int((midnight - now).total_seconds())))
   fi
 
   # W6-fix: flush any pending async cost markers that weren't recorded at subsession exit
-  COST_FLUSH="${PROJECT_ROOT:-$(pwd)}/.claude/scripts/leadv2-cost-flush.sh"
+  COST_FLUSH="$_LV2_D/leadv2-cost-flush.sh"
   if [[ -f "$COST_FLUSH" ]]; then
     bash "$COST_FLUSH" 2>/dev/null || true
   fi

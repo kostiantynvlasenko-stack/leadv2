@@ -43,7 +43,7 @@ If ANY condition is false → proceed with normal review flow below.
 Skip for Light class when the §0 skip-review gate has already passed (do not double-gate Light tasks).
 
 ```bash
-.claude/scripts/leadv2-trajectory-check.sh \
+bash .claude/scripts/lv2 leadv2-trajectory-check.sh \
   --task-id "${TASK_ID}" \
   --class "${TASK_CLASS}"
 # Exit codes:
@@ -82,7 +82,7 @@ Skip for Light class when the §0 skip-review gate has already passed (do not do
 
 ```
 # Check Codex availability first (requires active ChatGPT login):
-CODEX_OK=$(bash ~/.claude/scripts/codex-task.sh status >/dev/null 2>&1 && echo "1" || echo "0")
+CODEX_OK=$(bash .claude/scripts/lv2 codex-task.sh status >/dev/null 2>&1 && echo "1" || echo "0")
 
 Always fire (one of):
   if CODEX_OK: Codex adversarial-review (background) + Agent(critic, sonnet) in Stage 2
@@ -163,8 +163,8 @@ If Review phase will fire critic(opus) **and** security-auditor (Case B), pre-wa
 # Call warm_chain if claude-subsession.sh is sourced, else call warmer directly:
 warm_chain "critic:opus" "security-auditor:sonnet"
 # Or directly:
-.claude/scripts/leadv2-cache-warm.sh --role critic --model opus &
-.claude/scripts/leadv2-cache-warm.sh --role security-auditor --model sonnet &
+bash .claude/scripts/lv2 leadv2-cache-warm.sh --role critic --model opus &
+bash .claude/scripts/lv2 leadv2-cache-warm.sh --role security-auditor --model sonnet &
 # Proceed immediately (max 3s wait enforced by warm_chain)
 ```
 
@@ -175,7 +175,7 @@ Skip if single-spawn phase (only Codex + hack-detection, no critic/security-audi
 Before reading developer.md / diff.md produced by the Build phase, compress them if large:
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source .claude/scripts/lv2 leadv2-helpers.sh
 leadv2_compress_handoff "docs/handoff/${TASK_ID}/developer.md"
 leadv2_compress_handoff "docs/handoff/${TASK_ID}/diff.md"
 # Then read via helper (falls back to original when no twin exists)
@@ -499,7 +499,7 @@ When all Critical/High resolved:
 - Write `docs/handoff/<task-id>/reviews/disposition.yaml` and validate its schema before proceeding:
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source .claude/scripts/lv2 leadv2-helpers.sh
 if ! leadv2_validate_handoff "docs/handoff/<task-id>/reviews/disposition.yaml" review_disposition 2>/tmp/hv-err.txt; then
   err=$(</tmp/hv-err.txt)
   # Fix the disposition.yaml once (call back to the Review phase writer with the error):
@@ -510,7 +510,7 @@ if ! leadv2_validate_handoff "docs/handoff/<task-id>/reviews/disposition.yaml" r
 fi
 ```
 - ```bash
-  source .claude/scripts/leadv2-helpers.sh && leadv2_active_update_phase deploy
+  source .claude/scripts/lv2 leadv2-helpers.sh && leadv2_active_update_phase deploy
   ```
 - Proceed to Phase 6 Deploy.
 

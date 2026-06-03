@@ -55,7 +55,7 @@ OUTPUT_FILE="${HANDOFF_DIR}/llm-judge.yaml"
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # Source helpers for atomic write validation (PO-057).
-# shellcheck source=.claude/scripts/leadv2-helpers.sh
+# shellcheck source=leadv2-helpers.sh
 source "${SCRIPT_DIR}/leadv2-helpers.sh" 2>/dev/null || true
 
 python3 - "$RESPONSE_FILE" "$OUTPUT_FILE" "$TASK_ID" "$MODEL_USED" "$NOW" <<'PYEOF'

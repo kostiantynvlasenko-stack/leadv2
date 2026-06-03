@@ -22,7 +22,7 @@ allows architect to fix the root, not the symptom.
 ```bash
 # Run causal analysis (non-blocking — fall through on failure)
 CAUSED_BY=$(
-  bash .claude/scripts/leadv2-causal-analyze.sh \
+  bash .claude/scripts/lv2 leadv2-causal-analyze.sh \
     --regression-task <task-id> 2>/tmp/causal-warn.log
 ) || {
   CAUSED_BY="caused_by:\n  task_id: null\n  cause_unknown: true\n  lesson: causal lookup failed"
@@ -54,7 +54,7 @@ Before classifying failure, validate the probe result file against the contract
 (`docs/specs/leadv2-verify-contract.md`):
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)"
 PROBE_RESULT="docs/handoff/${TASK_ID}/verify-probe-result.yaml"
 if [[ -f "$PROBE_RESULT" ]]; then
   _validate_probe_result "$PROBE_RESULT" || {
@@ -102,7 +102,7 @@ If `docs/leadv2-negative-memory.yaml` missing → skip, proceed normally.
 Before reading any prior-phase handoff files (architect.md, developer.md, diff.md), compress them if large to reduce recovery-brief token cost:
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)"
 for f in \
   "docs/handoff/${TASK_ID}/architect.md" \
   "docs/handoff/${TASK_ID}/developer.md" \
@@ -125,7 +125,7 @@ This prevents the full incident log (potentially hundreds of KB) from being inge
 **Attempt 1:** If error_trace shows identifiable root cause → propose durable fix via architect(opus) alt-approach. Tag as `fix_quality: durable`.
 **Attempt 2 (only if attempt 1 fails):** Rollback to last good state (`fix_quality: reasonable`) + open `RECOVERY-<task-id>` task in docs/tasks.yaml via lib:
 ```bash
-source .claude/scripts/leadv2-tasks-lib.sh
+source "$(bash .claude/scripts/lv2 --path leadv2-tasks-lib.sh)"
 leadv2_tasks_add "RECOVERY-${TASK_ID}" recovery critical \
   --title "investigate recovery failure: ${TASK_ID}" \
   --origin recovery
@@ -184,7 +184,7 @@ Read `docs/handoff/<id>/architect.md` (overwritten with recovery output).
 When recovery attempt 2 spawns (after attempt 1 fails), **do NOT replay full incident log**.
 
 **Protocol:**
-1. Call `.claude/scripts/leadv2-recovery-context.sh --task-id <id> --attempt 2`
+1. Call `bash .claude/scripts/lv2 leadv2-recovery-context.sh --task-id <id> --attempt 2`
 2. The script emits the compact RECOVERY-CONTEXT format and archives the full log:
    ```
    RECOVERY-CONTEXT (compact)
@@ -205,7 +205,7 @@ When recovery attempt 2 spawns (after attempt 1 fails), **do NOT replay full inc
 
 | Decision | fix_quality | Action |
 |---|---|---|
-| A ROLLBACK | reasonable | `.claude/scripts/leadv2-rollback.sh --task-id <id> --reason "<brief>" --target-commit <context.yaml.deploy_gate.commit_hash> --yes` → re-verify deployed state |
+| A ROLLBACK | reasonable | `bash .claude/scripts/lv2 leadv2-rollback.sh --task-id <id> --reason "<brief>" --target-commit <context.yaml.deploy_gate.commit_hash> --yes` → re-verify deployed state |
 | B HOTFIX | band-aid (if patch) / durable (if root-cause fix) | `Agent(developer, sonnet)` with architect's plan → commit → push → re-deploy → re-verify. Tag based on scope of fix. |
 | C CONFIG FIX | durable (if misconfiguration was root cause) | `Agent(devops-engineer, sonnet)` with config change plan → update env → systemctl reload → re-verify |
 | D ABANDON | reasonable | Rollback + re-open Gate 1 with revised scope (new task-id) |

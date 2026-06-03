@@ -65,7 +65,7 @@ HANDOFF_DIR="${PROJECT_ROOT}/docs/handoff/${TASK_ID}"
 OUTPUT_FILE="${HANDOFF_DIR}/premortem-${PHASE}.yaml"
 
 # Source helpers for _atomic_write_yaml and leadv2_validate_yaml (PO-057).
-# shellcheck source=.claude/scripts/leadv2-helpers.sh
+# shellcheck source=leadv2-helpers.sh
 source "${SCRIPT_DIR}/leadv2-helpers.sh" || { echo "FATAL: cannot source leadv2-helpers.sh" >&2; exit 1; }
 
 [[ ! -d "$HANDOFF_DIR" ]] && { log_error "handoff dir not found: $HANDOFF_DIR"; exit 1; }

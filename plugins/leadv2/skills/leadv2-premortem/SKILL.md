@@ -12,7 +12,7 @@ allowed-tools:
 ## When
 - Before Build spawn: `--phase build` — predict build success given plan complexity
 - Before Deploy commit: `--phase deploy` — predict verify success + regression risk
-- Ad-hoc: `bash .claude/scripts/leadv2-premortem.sh --task-id <id> --phase <build|deploy>`
+- Ad-hoc: `bash .claude/scripts/lv2 leadv2-premortem.sh --task-id <id> --phase <build|deploy>`
 
 ## When NOT
 - Light class with clean offlimits and no negative-memory hits — skip to save time
@@ -224,12 +224,12 @@ Exit codes:
 
 ## Wire-in points
 
-- **Between Plan and Build (Phase 3→4):** call `leadv2-premortem.sh --task-id <id> --phase build`
+- **Between Plan and Build (Phase 3→4):** call `bash .claude/scripts/lv2 leadv2-premortem.sh --task-id <id> --phase build`
   - If exit=2: Tier B pause before Build, recommend architect redesign
   - If exit=1: spawn extra critic pass reviewing plan complexity
   - If exit=0: proceed to Build as normal
 
-- **Between Review and Deploy (Phase 5→6):** call `leadv2-premortem.sh --task-id <id> --phase deploy`
+- **Between Review and Deploy (Phase 5→6):** call `bash .claude/scripts/lv2 leadv2-premortem.sh --task-id <id> --phase deploy`
   - If exit=2: Tier B pause, default=redesign
   - If exit=1: pre-mortem verdict added to LLM-judge packet (caution flag)
   - If exit=0: proceed to LLM-judge gate

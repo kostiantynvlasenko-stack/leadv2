@@ -64,7 +64,7 @@ PACKET_FILE="/tmp/deploy-packet-${TASK_ID}.yaml"
 [[ ! -d "$HANDOFF_DIR" ]] && { log_error "handoff dir not found: $HANDOFF_DIR"; exit 1; }
 
 # Source helpers for _atomic_write_yaml and leadv2_validate_yaml (PO-057).
-# shellcheck source=.claude/scripts/leadv2-helpers.sh
+# shellcheck source=leadv2-helpers.sh
 source "${SCRIPT_DIR}/leadv2-helpers.sh" 2>/dev/null || true
 
 # Helper: validate + atomic re-flush a YAML file (write-tmp -> mv).

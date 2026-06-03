@@ -3,6 +3,7 @@
 # Reads JSON input from stdin to extract command; if it matches the pattern,
 # runs leadv2-codex-round-gate.sh and blocks if exit != 0.
 set -euo pipefail
+_LV2_D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 
 INPUT="$(cat 2>/dev/null || true)"
@@ -21,7 +22,12 @@ except Exception:
 
 # Match codex adversarial-review launches
 if [[ "$CMD" == *"codex-task.sh adversarial-review"* ]] || [[ "$CMD" == *"codex-task.sh "* && "$CMD" == *"adversarial"* ]]; then
-  GATE="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/.claude/scripts/leadv2-codex-round-gate.sh"
+  # Prefer plugin canonical; fallback to hook-relative ../scripts/
+  if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -f "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-codex-round-gate.sh" ]]; then
+    GATE="${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-codex-round-gate.sh"
+  else
+    GATE="$_LV2_D/../scripts/leadv2-codex-round-gate.sh"
+  fi
   if [[ -x "$GATE" ]]; then
     if ! bash "$GATE" "${LEADV2_TASK_ID:-}" 2>&1; then
       python3 - <<'PYEOF'

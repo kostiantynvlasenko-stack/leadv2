@@ -6,6 +6,12 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-install-dispatcher.sh\"",
+            "timeout": 5,
+            "statusMessage": "Installing lv2 dispatcher..."
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-stale-pid-sweep.sh\"",
             "timeout": 5,
             "statusMessage": "Sweeping stale leadv2 sessions..."

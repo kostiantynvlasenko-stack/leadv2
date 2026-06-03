@@ -34,7 +34,7 @@ EFFECTIVE_HISTORY="$HISTORY_PATH"
 ### 3. Run the script
 
 ```bash
-bash .claude/scripts/leadv2-rag-intake.sh \
+bash .claude/scripts/lv2 leadv2-rag-intake.sh \
   --task-description "<task description>" \
   --top-k 3 \
   --history-path "$EFFECTIVE_HISTORY"

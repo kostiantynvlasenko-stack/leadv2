@@ -81,7 +81,7 @@ If `plan.parallel_groups` has >1 developer in the same group → pre-warm before
 # Warm developer/sonnet prefix if ≥2 developer spawns in first group
 warm_chain "developer:sonnet"
 # Or directly:
-.claude/scripts/leadv2-cache-warm.sh --role developer --model sonnet &
+bash .claude/scripts/lv2 leadv2-cache-warm.sh --role developer --model sonnet &
 # Proceed to spawn — warm runs in background, max 3s wait enforced
 ```
 
@@ -248,7 +248,7 @@ fi
 Before reading any handoff file produced by the Plan phase (architect.md, critic.md), compress it if large:
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source .claude/scripts/lv2 leadv2-helpers.sh
 # Compress plan outputs; leadv2_read_handoff picks compressed twin automatically
 leadv2_compress_handoff "docs/handoff/${TASK_ID}/architect.md"
 leadv2_compress_handoff "docs/handoff/${TASK_ID}/critic.md"
@@ -272,7 +272,7 @@ git diff --stat
 For any subagent that produces structured YAML output beyond context.yaml:
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source .claude/scripts/lv2 leadv2-helpers.sh
 for f in docs/handoff/<task-id>/*.yaml; do
   leadv2_validate_yaml "$f" || echo "[build] invalid YAML: $f"
 done
@@ -283,7 +283,7 @@ Invalid YAML → re-spawn the subagent with explicit "output must be valid YAML"
 For the three typed handoff files, use the stricter semantic validator after generic YAML check passes:
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source .claude/scripts/lv2 leadv2-helpers.sh
 # Validate context.yaml schema before spawning build agents
 if ! leadv2_validate_handoff "docs/handoff/<task-id>/context.yaml" context 2>/tmp/hv-err.txt; then
   err=$(</tmp/hv-err.txt)
@@ -300,7 +300,7 @@ fi
 When a build round fails and next round needs re-prompt, **do NOT re-send full context**.
 
 **Protocol:**
-1. Call `.claude/scripts/leadv2-build-feedback.sh --task-id <id> --previous-attempt <n>`
+1. Call `bash .claude/scripts/lv2 leadv2-build-feedback.sh --task-id <id> --previous-attempt <n>`
 2. The script emits a compact prompt: `<previous-summary ≤80w>\n<diff-only>\n<failure reason>\n<fix request>`
 3. Inject that output as the ONLY context in the next developer mission (not the full plan)
 4. Target: 70-90% reduction vs full context replay
@@ -318,7 +318,7 @@ This lets attempt N+1 diff precisely against what attempt N actually committed.
 After all agents complete and worktree merges are done, run applicable static checks:
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source .claude/scripts/lv2 leadv2-helpers.sh
 
 # TypeScript check (if any .ts/.tsx files changed)
 if git diff --name-only HEAD~1 2>/dev/null | grep -qE '\.(ts|tsx)$'; then
@@ -345,7 +345,7 @@ _PY_CHANGED=$(git diff --name-only "${TASK_START_SHA}..HEAD" \
   | grep -E '^(platform|agent)/.*\.py$' || true)
 
 if [[ -n "$_PY_CHANGED" ]]; then
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-coverage-gate.sh" \
+  bash .claude/scripts/lv2 leadv2-coverage-gate.sh \
     --start-sha "${TASK_START_SHA}" \
     --task-id "${TASK_ID}" \
     --threshold 50
@@ -418,7 +418,7 @@ LEAD_V2_STATE.md:
 ```
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh && leadv2_active_update_phase review
+source .claude/scripts/lv2 leadv2-helpers.sh && leadv2_active_update_phase review
 ```
 
 ## Phase 4.5 — PO Feedback Loop (auto-trigger for UI features)

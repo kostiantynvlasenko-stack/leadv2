@@ -4,10 +4,15 @@
 set -euo pipefail
 trap 'echo "[$(basename "$0")] err line $LINENO" >&2; exit 0' ERR
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="${LEADV2_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 TASKS_DIR="$REPO_ROOT/docs/leadv2/tasks"
 OUTPUT="$REPO_ROOT/docs/leadv2/immune-patterns.yaml"
-EXTRACTOR="$REPO_ROOT/.claude/scripts/leadv2-immune-aggregate.py"
+# Prefer plugin canonical copy; fallback to project .claude/scripts/
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -f "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-immune-aggregate.py" ]]; then
+  EXTRACTOR="${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-immune-aggregate.py"
+else
+  EXTRACTOR="${REPO_ROOT}/.claude/scripts/leadv2-immune-aggregate.py"
+fi
 
 python3 "$EXTRACTOR" "$TASKS_DIR" "$OUTPUT"
 echo "[immune-aggregate] done → $OUTPUT"

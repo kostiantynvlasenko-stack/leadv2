@@ -17,7 +17,7 @@ allowed-tools:
 ### Step 0. Emit cost telemetry (NEW — before reading)
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)"
 leadv2_emit_costs "$LEADV2_TASK_ID"
 # Continue regardless of exit code — costs.yaml absence does not block Close.
 ```
@@ -28,7 +28,7 @@ Codex log files in the handoff dir. Idempotent: safe to call multiple times.
 Then update `docs/leadv2-cost-accuracy.yaml` with real actual_usd:
 
 ```bash
-bash .claude/scripts/leadv2-cost-flush.sh "docs/handoff/$LEADV2_TASK_ID"
+bash .claude/scripts/lv2 leadv2-cost-flush.sh "docs/handoff/$LEADV2_TASK_ID"
 ```
 
 ### Step 1. Read cost telemetry
@@ -171,7 +171,7 @@ If class is `Heavy` or `Standard` (touched runtime files):
 **Run this concrete shell command** — do not use CronCreate (session-scoped, unreliable):
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-outcome-watch.sh" \
+bash .claude/scripts/lv2 leadv2-outcome-watch.sh \
   --schedule \
   --task-id "<task-id>" \
   --delay-hours 48
@@ -213,7 +213,7 @@ If this task was sourced from the task queue, release the claimed item now.
 `LEADV2_PO_LANE` is exported by `leadv2_po_claim` at intake — the release resolves the lane automatically from this env var.
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)"
 
 if [[ -n "${LEADV2_PO_ITEM_ID:-}" ]]; then
     # Signature: leadv2_po_release <item_id> <status> [<lane>] [<reject_reason>]
@@ -237,7 +237,7 @@ Do NOT skip this step even on error-path close — failure to release leaves the
 After `LEAD_V2_STATE.md` is finalized (Step 3) and history appended (Step 2), remove this task from `docs/leadv2/active.md`:
 
 ```bash
-source .claude/scripts/leadv2-helpers.sh
+source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)"
 leadv2_active_unregister
 ```
 

@@ -117,7 +117,7 @@ caused_by:
 
 ```bash
 # Analyze a specific regression task
-.claude/scripts/leadv2-causal-analyze.sh --regression-task <task-id>
+bash .claude/scripts/lv2 leadv2-causal-analyze.sh --regression-task <task-id>
 
 # Show last 10 causal links (for leadv2-status.sh --causal-log)
 grep -A9 '- timestamp:' docs/leadv2-causal-log.yaml | head -100

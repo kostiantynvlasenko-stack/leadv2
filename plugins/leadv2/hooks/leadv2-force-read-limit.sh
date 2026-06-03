@@ -81,7 +81,7 @@ Fix one of:
   1. Read with limit=30 if you need the header/summary
   2. Read with offset=N limit=M for a specific section
   3. Delegate full read to Explore-haiku via Agent(subagent_type=Explore, model=haiku, run_in_background=true)
-  4. For review/critic deliverables: bash .claude/scripts/leadv2-critic-tail.sh "$FPATH"
+  4. For review/critic deliverables: bash .claude/scripts/lv2 leadv2-critic-tail.sh "$FPATH"
 
 Override (rare): export LEADV2_ALLOW_FULL_READ=1 for this turn.
 MSG

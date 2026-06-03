@@ -262,9 +262,9 @@ sys.exit(1)
   fi
 
   # ── 5. tasks.yaml summary_one_line update (best-effort via lib) ─────────────
-  local _lib_sh="${PROJECT_ROOT}/.claude/scripts/leadv2-tasks-lib.sh"
+  local _lib_sh="${SCRIPT_DIR}/leadv2-tasks-lib.sh"
   if [[ -f "$_lib_sh" ]]; then
-    # shellcheck source=/dev/null
+    # shellcheck source=leadv2-tasks-lib.sh
     source "$_lib_sh" 2>/dev/null || true
     if declare -f leadv2_tasks_update >/dev/null 2>&1; then
       leadv2_tasks_update "${YAML_TASK_ID}" --key summary_one_line --value "${YAML_SUMMARY}" \
@@ -298,7 +298,7 @@ _cleanup_handoff_artifacts() {
 # Called after render_task so the sentinel is already on disk.
 _queue_release_task() {
   local tid="$1"
-  local tasks_lib="${PROJECT_ROOT}/.claude/scripts/leadv2-tasks-lib.sh"
+  local tasks_lib="${SCRIPT_DIR}/leadv2-tasks-lib.sh"
   [[ ! -f "$tasks_lib" ]] && return 0
   # shellcheck source=leadv2-tasks-lib.sh
   source "$tasks_lib"

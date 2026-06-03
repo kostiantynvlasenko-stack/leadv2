@@ -200,9 +200,9 @@ done
 | `action` value | What to do |
 |---|---|
 | `retry_task` | Clear `paused`, reset consecutive_failures=0, re-run the task |
-| `skip_task` | Mark task as `blocked` via lib, resume normal flow:<br>`source .claude/scripts/leadv2-tasks-lib.sh && leadv2_tasks_update <id> --key status --value blocked` |
+| `skip_task` | Mark task as `blocked` via lib, resume normal flow:<br>`source "$(bash .claude/scripts/lv2 --path leadv2-tasks-lib.sh)" && leadv2_tasks_update <id> --key status --value blocked` |
 | `pause_indefinite` | Keep paused, wait for `leadv2-daemon.sh --resume` |
-| `rollback_and_investigate` | Call `leadv2-rollback.sh --yes`, open recovery task via lib (replaces former QUEUE.md append):<br>`source .claude/scripts/leadv2-tasks-lib.sh && leadv2_tasks_add "RECOVERY-<id>" recovery high --title "investigate rollback: <id>" --origin founder`, then resume |
+| `rollback_and_investigate` | Call `leadv2-rollback.sh --yes`, open recovery task via lib (replaces former QUEUE.md append):<br>`source "$(bash .claude/scripts/lv2 --path leadv2-tasks-lib.sh)" && leadv2_tasks_add "RECOVERY-<id>" recovery high --title "investigate rollback: <id>" --origin founder`, then resume |
 
 After applying: move the decision file to `docs/leadv2-decisions/_resolved/<YYYYMMDD>/<id>.yaml`.
 

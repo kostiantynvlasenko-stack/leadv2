@@ -208,7 +208,7 @@ Before immune memory integration (§7), invoke correction-detect on the session:
 detect_mode="${LEADV2_CORRECTION_DETECT:-0}"
 
 if [[ "$detect_mode" != "0" ]]; then
-  source .claude/scripts/leadv2-helpers.sh 2>/dev/null || true
+  source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)" 2>/dev/null || true
   # leadv2-correction-detect reads last 6 user messages from session
   # and classifies corrections vs reinforcements vs preferences
   # Results are written to candidates.jsonl (shadow) or immune memory (live)
@@ -240,12 +240,11 @@ skills get surfaced. Cheap — runs ~7 grep passes, no network.
 
 ```bash
 LOG=docs/leadv2/skill-usage.log
-TALLY="${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-skill-usage-tally.sh"
 week_now=$(date +%G-W%V)
 last_week=$(grep -E '^# week=' "$LOG" 2>/dev/null | tail -1 | sed 's/^# week=//')
-if [[ "$week_now" != "$last_week" ]] && [[ -x "$TALLY" ]]; then
+if [[ "$week_now" != "$last_week" ]]; then
   echo "# week=$week_now ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOG"
-  bash "$TALLY" >> "$LOG"
+  bash .claude/scripts/lv2 leadv2-skill-usage-tally.sh >> "$LOG"
 fi
 ```
 

@@ -9,6 +9,8 @@
 
 set -euo pipefail
 
+_LV2_D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Fail-safe paths anchored to project root.
 # Resolution order (PO-060):
 #   1. Already-exported LEADV2_PROJECT_ROOT (tests / CI set this explicitly).
@@ -46,6 +48,40 @@ LEADV2_LOCK="$LEADV2_PROJECT_ROOT/docs/.leadv2.lock"
 # shellcheck disable=SC2034  # exported for external callers that source this script
 LEADV2_LIVE="$LEADV2_PROJECT_ROOT/docs/LEAD_V2_LIVE.md"
 LEADV2_HANDOFF_DIR="$LEADV2_PROJECT_ROOT/docs/handoff"
+
+# ── Script resolver (A2/A3 transition indirection) ───────────────────────
+# lv2_script BASENAME  — echoes the first existing path among:
+#   1. $CLAUDE_PLUGIN_ROOT/scripts/$1   (plugin canonical, preferred)
+#   2. $LEADV2_PROJECT_ROOT/.claude/leadv2-overrides/scripts/$1  (project override)
+#   3. $LEADV2_PROJECT_ROOT/.claude/scripts/$1  (legacy fallback until A6 cleanup)
+# Returns 1 (non-zero) and emits an error if none found.
+# Guard: CLAUDE_PLUGIN_ROOT and LEADV2_PROJECT_ROOT must be set; unset = fall through.
+lv2_script() {
+  local _basename="${1:?lv2_script: BASENAME argument required}"
+  local _plugin_root="${CLAUDE_PLUGIN_ROOT:-}"
+  local _project_root="${LEADV2_PROJECT_ROOT:-}"
+  local _candidate
+
+  # 1. Plugin canonical
+  if [[ -n "$_plugin_root" ]]; then
+    _candidate="$_plugin_root/scripts/$_basename"
+    if [[ -f "$_candidate" ]]; then printf -- '%s' "$_candidate"; return 0; fi
+  fi
+
+  # 2. Project override
+  if [[ -n "$_project_root" ]]; then
+    _candidate="$_project_root/.claude/leadv2-overrides/scripts/$_basename"
+    if [[ -f "$_candidate" ]]; then printf -- '%s' "$_candidate"; return 0; fi
+
+    # 3. Legacy fallback (.claude/scripts/ — kept until A6 cleanup)
+    _candidate="$_project_root/.claude/scripts/$_basename"
+    if [[ -f "$_candidate" ]]; then printf -- '%s' "$_candidate"; return 0; fi
+  fi
+
+  printf -- '[lv2_script] ERROR: %s not found in plugin, overrides, or .claude/scripts\n' \
+    "$_basename" >&2
+  return 1
+}
 
 # ── Path loader — reads .claude/leadv2-overrides/state-paths.yaml ────────
 # Exports LEADV2_BOARD_PATH, LEADV2_DIALOGUE_PATH, LEADV2_QUEUE_PATH,
@@ -1244,7 +1280,7 @@ leadv2_active_list() {
 # ── Active registry (multi-session YAML-backed store) ─────────────────────
 # Source after LEADV2_PROJECT_ROOT is set so the registry inherits the path.
 # shellcheck source=leadv2-active-registry.sh
-_LEADV2_REGISTRY="${LEADV2_PROJECT_ROOT}/.claude/scripts/leadv2-active-registry.sh"
+_LEADV2_REGISTRY="$(lv2_script leadv2-active-registry.sh 2>/dev/null || true)"
 if [[ -f "$_LEADV2_REGISTRY" ]]; then
   source "$_LEADV2_REGISTRY"
 fi
@@ -1638,7 +1674,7 @@ leadv2_po_claim() {
   # Exit 2 = nothing available; other non-zero = error.
   local prefer="${1:-}"
   local claim_script
-  claim_script="${LEADV2_PROJECT_ROOT}/.claude/scripts/leadv2-queue-claim.sh"
+  claim_script="$(lv2_script leadv2-queue-claim.sh 2>/dev/null || printf -- '%s' "$_LV2_D/leadv2-queue-claim.sh")"
   local claimer="${LEADV2_TASK_ID:?LEADV2_TASK_ID not set}"
 
   local raw_output rc
@@ -1695,7 +1731,8 @@ leadv2_po_lane_for_id() {
   # Reads lane field from docs/tasks.yaml via leadv2-tasks-lib.sh.
   # Prints lane name on found, exit 0; exit 1 on not-found or empty lane.
   local _id="${1:?leadv2_po_lane_for_id: item_id required}"
-  local _tasks_lib="${PROJECT_ROOT:-${LEADV2_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}}/.claude/scripts/leadv2-tasks-lib.sh"
+  local _tasks_lib
+  _tasks_lib="$(lv2_script leadv2-tasks-lib.sh 2>/dev/null || printf -- '%s' "$_LV2_D/leadv2-tasks-lib.sh")"
   if [[ ! -f "$_tasks_lib" ]]; then return 1; fi
   # shellcheck source=leadv2-tasks-lib.sh
   source "$_tasks_lib"
@@ -1720,7 +1757,7 @@ leadv2_po_release() {
   local _lane_arg="${3:-}"
   local _reject_reason="${4:-}"
   local _release_script
-  _release_script="${LEADV2_PROJECT_ROOT}/.claude/scripts/leadv2-queue-release.sh"
+  _release_script="$(lv2_script leadv2-queue-release.sh 2>/dev/null || printf -- '%s' "$_LV2_D/leadv2-queue-release.sh")"
 
   # Resolve lane: $3 > LEADV2_PO_LANE > lane_for_id fallback
   local _lane="${_lane_arg:-${LEADV2_PO_LANE:-}}"
@@ -2203,4 +2240,5 @@ if [[ -n "${BASH_VERSION:-}" ]]; then
   export -f leadv2_wait_answer
   export -f _leadv2_claude_agents_json
   export -f _lv2_load_quality_engine_config
+  export -f lv2_script
 fi
