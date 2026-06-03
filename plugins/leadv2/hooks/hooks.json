@@ -126,6 +126,12 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-tool-blowup-gate.sh\"",
             "timeout": 5,
             "statusMessage": "Checking tool-blowup hard gate..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-routing-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Routing guard (model check)..."
           }
         ]
       },

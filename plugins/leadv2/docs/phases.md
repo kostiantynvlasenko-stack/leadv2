@@ -146,7 +146,7 @@ generators BEFORE the convergent Plan triad commits. Ported from ADHD
 ```bash
 # CODEX_PLAN_ID = actual task-id printed by leadv2-codex-planner.sh
 Monitor(
-  command="for i in $(seq 1 20); do codex-task.sh status \"$CODEX_PLAN_ID\" 2>/dev/null | grep -q 'Phase: done' && { echo \"CODEX_PLAN_DONE: $CODEX_PLAN_ID\"; exit 0; }; sleep 30; done; echo \"CODEX_MONITOR_TIMEOUT: $CODEX_PLAN_ID\"; exit 1",
+  command="for i in $(seq 1 20); do \"${CLAUDE_PLUGIN_ROOT}/scripts/codex-poll-done.sh\" \"$CODEX_PLAN_ID\" && { echo \"CODEX_PLAN_DONE: $CODEX_PLAN_ID\"; exit 0; }; sleep 30; done; echo \"CODEX_MONITOR_TIMEOUT: $CODEX_PLAN_ID\"; exit 1",
   description="Codex planner $CODEX_PLAN_ID completion",
   timeout_ms=600000,
   persistent=false
