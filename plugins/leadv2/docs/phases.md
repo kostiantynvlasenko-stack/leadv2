@@ -74,7 +74,8 @@ Each phase entry calls `leadv2_pulse_log "<phase>" "<one-line summary>"` — emi
   ```
 - `LEADV2_MAIN_MODEL=$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-main-model-check.sh")` — pick orchestrator model
 - `source "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-helpers.sh" && leadv2_lock_acquire || exit` — per-task lock (delegates to `leadv2_active_register` in active.yaml)
-- `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-stale-sweeper.sh"` — surface stale sessions at startup; ghost-spawn reconciliation
+- `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-stale-sweeper.sh"` — surface stale sessions at startup; ghost-spawn reconciliation; GC worktrees whose branch is an ancestor of origin/<default>
+- `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-main-sync.sh"` — FF-sync local default branch to origin before worktree creation (warn-not-reset on divergence); prevents stale-main drift from in-worktree deploys
 - `leadv2_threshold_warn_if_inverted || true` — sanity check
 - `leadv2_live_update intake startup` — LIVE tracker
 - `export LEADV2_TASK_ID=<id> && "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-mcp-cache.sh" warm <id>` — warm MCP cache, then dispatch standard queries (detect_changes, get_architecture) and write results via `leadv2-mcp-cache.sh set`
@@ -218,6 +219,7 @@ Parallel Agent spawns per `context.yaml plan.parallel_groups:` — developer / p
 - (v0.2: deliverable-routing-check script — currently manual. Read `docs/handoff/<id>/build-*-output.md` files and check `external_callers_to_update` from groups-contract for any "punted to Group B" items. Resolve before opening review.)
 - `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-negative-memory-trigger-scan.sh" --task-id "$LEADV2_TASK_ID"` — exit 2 → diff matched a regex-tagged negative memory entry; surface NM-id + run leadv2-negative-memory unblock check before commit.
 - **After Build (class ≥ Standard, source files touched):** run the project's test suite (`pytest` / `go test` / `pnpm test` per `stack.yaml`). Coverage < 50% on changed lines → circuit break and add tests before Phase 5. (v0.2: dedicated `leadv2-test-synthesis` skill.)
+- **Adversarial self-review (class ≥ Standard, decision-gated):** if any built change involves branching logic, an irreversible operation (migration / data backfill / external write), an unverifiable invariant, or a module-boundary contract → `Skill(skill="leadv2-doubt-driven")` on that decision BEFORE opening review. Runs the CLAIM/EXTRACT/DOUBT/RECONCILE/STOP loop with a fresh-context critic. Skip for Trivial/Light or purely additive changes with no branching.
 
 
 ---
