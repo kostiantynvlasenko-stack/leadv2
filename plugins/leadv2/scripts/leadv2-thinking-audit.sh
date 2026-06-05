@@ -32,18 +32,107 @@
 
 set -euo pipefail
 
+log()       { printf -- '[leadv2-thinking-audit] %s\n' "$*" >&2; }
+log_warn()  { printf -- '[leadv2-thinking-audit] WARN: %s\n' "$*" >&2; }
+
+# ── --gate mode: handle BEFORE sourcing helpers / config check ────────────────
+# PreToolUse gate mode — exits non-zero if file contains thinking directives
+# AND no explicit_reason_required: true in context.yaml.
+# Runs standalone — does not need quality-engine.yaml to be present.
+if [[ "${1:-}" == "--gate" ]]; then
+  GATE_FILE="${2:-}"
+  if [[ -z "$GATE_FILE" ]]; then
+    printf -- 'Usage: leadv2-thinking-audit.sh --gate <mission-file>\n' >&2
+    exit 2
+  fi
+  if [[ ! -f "$GATE_FILE" ]]; then
+    # File doesn't exist — nothing to gate
+    exit 0
+  fi
+
+  # Resolve context.yaml relative to project root
+  _gate_root="${LEADV2_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  # Try to find active task's context.yaml
+  _gate_context=""
+  for _cand in "$_gate_root/docs/handoff/"*/context.yaml; do
+    [[ -f "$_cand" ]] && _gate_context="$_cand" && break
+  done
+
+  python3 - "$GATE_FILE" "${_gate_context:-}" <<'GATE_PYEOF'
+import sys, re, os
+
+mission_file = sys.argv[1]
+context_yaml = sys.argv[2] if len(sys.argv) > 2 else ""
+
+THINKING_DIRECTIVES = re.compile(
+    r'(?:^|\b)(ultrathink|think\s+hard(?:er)?|think\s+deeply|think\s+step\s+by\s+step|extended\s+thinking)',
+    re.IGNORECASE
+)
+
+def strip_fenced_and_quotes(text):
+    lines = []
+    in_fence = False
+    fence_marker = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not in_fence:
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = True
+                fence_marker = stripped[:3]
+                continue
+        else:
+            if stripped.startswith(fence_marker):
+                in_fence = False
+            continue
+        if stripped.startswith(">"):
+            continue
+        lines.append(stripped)
+    return lines
+
+try:
+    with open(mission_file, encoding="utf-8", errors="replace") as fh:
+        content = fh.read()
+except OSError:
+    sys.exit(0)
+
+clean_lines = strip_fenced_and_quotes(content)
+has_directive = any(THINKING_DIRECTIVES.match(line) for line in clean_lines)
+
+if not has_directive:
+    sys.exit(0)
+
+# Check for explicit_reason_required: true in context.yaml
+explicit_ok = False
+if context_yaml and os.path.isfile(context_yaml):
+    try:
+        ctx_text = open(context_yaml, encoding="utf-8", errors="replace").read()
+        if re.search(r'explicit_reason_required\s*:\s*true', ctx_text, re.IGNORECASE):
+            explicit_ok = True
+    except OSError:
+        pass
+
+if explicit_ok:
+    sys.exit(0)
+
+# Directive found, no explicit permission — gate blocks
+print(f"[leadv2-thinking-audit] GATE BLOCKED: mission file '{os.path.basename(mission_file)}' "
+      f"contains a thinking directive (ultrathink/think hard/etc) but context.yaml does not have "
+      f"explicit_reason_required: true. Remove the directive or add explicit_reason_required: true "
+      f"to context.yaml.", file=sys.stderr)
+sys.exit(1)
+GATE_PYEOF
+  exit $?
+fi
+
+# ── aggregate audit mode: source helpers + check config ──────────────────────
 # shellcheck source=./leadv2-helpers.sh
 source "$(dirname "$(readlink -f "$0")")/leadv2-helpers.sh"
 
 _lv2_load_quality_engine_config "l_d" || exit 4
 
-log()       { printf -- '[leadv2-thinking-audit] %s\n' "$*" >&2; }
-log_warn()  { printf -- '[leadv2-thinking-audit] WARN: %s\n' "$*" >&2; }
-
-# ── argument parsing ──────────────────────────────────────────────────────────
 TASK_ID="${1:-}"
 if [[ -z "$TASK_ID" ]]; then
-  printf -- 'Usage: leadv2-thinking-audit.sh <task-id>\n' >&2
+  printf -- 'Usage: leadv2-thinking-audit.sh <task-id>\n  OR:  leadv2-thinking-audit.sh --gate <mission-file>\n' >&2
   exit 2
 fi
 

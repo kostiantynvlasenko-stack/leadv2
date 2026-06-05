@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Stop hook — count words in last assistant message. If >100 prose words AND no tool_use,
-# log violation + emit additionalContext warning for next turn (self-correction).
-#
-# Doesn't block — Stop hooks can't unsend output. Goal: train lead to be tool-only.
+# Stop hook — pulse-mode HARD clamp on assistant prose.
+# Sums ALL text blocks in the turn (not just last).
+# Phase caps: intake/classify/build/deploy/verify=80, review=100, plan=150, close=120.
+# Tool-use turns: 60% of cap.
+# Blocks AT MOST ONCE per turn (corrective message), then passes through — no deadlock.
 
 set -euo pipefail
 trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
@@ -40,15 +41,15 @@ else
   exit 0
 fi
 
-# Phase-aware threshold (cleared by-phase ceiling; still has tool/no-tool distinction)
+# Pulse-mode phase caps (tight)
 case "${LEADV2_PHASE:-}" in
-  intake|classify) PHASE_CAP=300 ;;
-  plan)            PHASE_CAP=600 ;;
-  build)           PHASE_CAP=350 ;;
-  review)          PHASE_CAP=400 ;;
-  deploy|verify)   PHASE_CAP=250 ;;
-  close)           PHASE_CAP=200 ;;
-  *)               PHASE_CAP=300 ;;
+  intake|classify) PHASE_CAP=80  ;;
+  plan)            PHASE_CAP=150 ;;
+  build)           PHASE_CAP=80  ;;
+  review)          PHASE_CAP=100 ;;
+  deploy|verify)   PHASE_CAP=80  ;;
+  close)           PHASE_CAP=120 ;;
+  *)               PHASE_CAP=80  ;;
 esac
 
 INPUT="$(cat 2>/dev/null || true)"
@@ -73,11 +74,16 @@ for p in glob.glob(os.path.expanduser('~/.claude/projects/*/${SESSION_ID}.jsonl'
 
 [[ -z "$JSONL" || ! -f "$JSONL" ]] && exit 0
 
-# Get last assistant message
-LAST_TEXT="$(python3 -c "
-import json
-last = None
-with open('$JSONL') as f:
+# Sum ALL text blocks in the turn; detect tool_use presence
+PARSE_OUT="$(python3 - "$JSONL" <<'PYEOF' 2>/dev/null || true
+import sys, json
+
+jsonl_path = sys.argv[1]
+last_turn_text_parts = []
+last_turn_has_tool = False
+last_turn_found = False
+
+with open(jsonl_path) as f:
     for line in f:
         try:
             r = json.loads(line)
@@ -85,35 +91,42 @@ with open('$JSONL') as f:
                 m = r.get('message', {})
                 content = m.get('content', [])
                 if isinstance(content, list):
-                    text_parts = [c.get('text','') for c in content if c.get('type') == 'text']
+                    text_parts = [c.get('text', '') for c in content if c.get('type') == 'text']
                     has_tool = any(c.get('type') == 'tool_use' for c in content)
-                    last = ('\\n'.join(text_parts), has_tool)
+                    last_turn_text_parts = text_parts
+                    last_turn_has_tool = has_tool
+                    last_turn_found = True
         except Exception:
             continue
-if last:
-    text, has_tool = last
-    print(f'TOOL={1 if has_tool else 0}')
+
+if last_turn_found:
+    print(f'TOOL={1 if last_turn_has_tool else 0}')
     print('TEXT_START')
-    print(text)
-" 2>/dev/null || true)"
+    print('\n'.join(last_turn_text_parts))
+PYEOF
+)"
 
-[[ -z "$LAST_TEXT" ]] && exit 0
+[[ -z "$PARSE_OUT" ]] && exit 0
 
-HAS_TOOL="$(echo "$LAST_TEXT" | grep -E '^TOOL=' | head -1 | sed 's/TOOL=//')"
-TEXT_BODY="$(echo "$LAST_TEXT" | awk '/^TEXT_START$/{f=1; next} f' | head -200)"
-WORD_COUNT=$(echo "$TEXT_BODY" | wc -w | tr -d ' ')
+HAS_TOOL="$(printf '%s' "$PARSE_OUT" | grep -E '^TOOL=' | head -1 | sed 's/TOOL=//')"
+TEXT_BODY="$(printf '%s' "$PARSE_OUT" | awk '/^TEXT_START$/{f=1; next} f')"
+WORD_COUNT=$(printf '%s' "$TEXT_BODY" | wc -w | tr -d ' ')
 
-# Threshold: phase-aware cap, with tool_use turns getting 60% of phase cap
+# Apply 60% cap when tool_use present in turn
 THRESHOLD="$PHASE_CAP"
-[[ "$HAS_TOOL" == "1" ]] && THRESHOLD=$(( PHASE_CAP * 60 / 100 ))
+if [[ "${HAS_TOOL:-0}" == "1" ]]; then
+  THRESHOLD=$(( PHASE_CAP * 60 / 100 ))
+fi
 
 if [[ "$WORD_COUNT" -le "$THRESHOLD" ]]; then exit 0; fi
 
 # Log violation
 LOG="$HOME/.claude/leadv2-prose-violations.log"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) session=$SESSION_ID words=$WORD_COUNT threshold=$THRESHOLD has_tool=$HAS_TOOL" >> "$LOG"
+printf '%s session=%s words=%s threshold=%s has_tool=%s phase=%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION_ID" "$WORD_COUNT" "$THRESHOLD" \
+  "${HAS_TOOL:-0}" "${LEADV2_PHASE:-}" >> "$LOG" 2>/dev/null || true
 
-# Retry guard: max 2 blocks per stop, then let through (avoid infinite loop)
+# Block AT MOST ONCE per turn: check retry counter
 RETRY_FILE="$HOME/.claude/leadv2-prose-retry-${SESSION_ID}.txt"
 RETRY_COUNT=0
 if [[ -f "$RETRY_FILE" ]]; then
@@ -121,27 +134,24 @@ if [[ -f "$RETRY_FILE" ]]; then
   RETRY_COUNT="${RETRY_COUNT:-0}"
 fi
 
-if [[ "$RETRY_COUNT" -ge 2 ]]; then
+if [[ "$RETRY_COUNT" -ge 1 ]]; then
+  # Already blocked once this turn — pass through to avoid deadlock
   rm -f "$RETRY_FILE"
   exit 0
 fi
-printf '%d\n' $(( RETRY_COUNT + 1 )) > "$RETRY_FILE"
+printf '1\n' > "$RETRY_FILE"
 
-# Emit continue:false to force retry
-if [[ "$WORD_COUNT" -gt "$THRESHOLD" ]]; then
-  python3 - "$WORD_COUNT" "$THRESHOLD" <<'PYEOF2'
+# Block with corrective message (once only)
+python3 - "$WORD_COUNT" "$THRESHOLD" "$PHASE_CAP" "${LEADV2_PHASE:-}" <<'PYEOF2'
 import sys, json
-wc, th = sys.argv[1], sys.argv[2]
+wc, th, cap, phase = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 print(json.dumps({
     'continue': False,
-    'stopReason': 'PROSE_GUARD: ' + wc + ' words (limit ' + th + '). Tighten or use tool calls.'
+    'stopReason': (
+        f'Pulse only: emit a ≤80-word pulse line; move detail to a deliverable file. '
+        f'No reasoning narration. '
+        f'({wc} words, limit {th} [{phase} cap={cap}])'
+    )
 }))
 PYEOF2
-  exit 0
-fi
-
-# Stop hooks cannot inject additionalContext (schema-invalid).
-# Write warning to per-session file; user-prompt-context.sh picks it up next turn.
-WARN_FILE="$HOME/.claude/leadv2-pending-warn-${SESSION_ID}.txt"
-echo "[leadv2-lead-prose-guard] Last response had $WORD_COUNT words of prose (limit $THRESHOLD). Lead's job is dispatch, not narration. Next response: tool calls only OR ≤30 words ack." > "$WARN_FILE"
 exit 0

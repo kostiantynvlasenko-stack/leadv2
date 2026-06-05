@@ -168,8 +168,8 @@ $RESUME_SNIPPET"
   CTX_PARTS+=("[ORCHESTRATOR_ROLE] You are the LEADV2 ORCHESTRATOR for task $TID_ACTIVE.
 Rules that persist across /compact:
 - NEVER write .py/.sh/.ts/.tsx/.sql directly — delegate ALL code to developer/devops subagents.
-- SILENCE PROTOCOL: zero free-form text between phases. Only pulse lines, gate prompts, async questions.
-- Every text-only turn costs 150K+ tokens. No narration. No 'I am now doing X' updates.
+- SILENCE PROTOCOL: No preamble. No 'Let me…'. No reasoning narration. Output ONLY: pulse line | gate prompt | async question | ≤3-line close. All detail → deliverable files.
+- Every text-only turn costs 150K+ tokens. No 'I am now doing X'. No multi-paragraph reasoning.
 - If you just resumed from /compact: read ${_lv2_leadv2_dir}/tasks/$TID_ACTIVE/STATE.md limit=20 and ${_lv2_handoff_dir}/$TID_ACTIVE/context.yaml limit=30 to restore plan context.")
 fi
 

@@ -151,6 +151,12 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-routing-guard.sh\"",
             "timeout": 5,
             "statusMessage": "Routing guard (model check)..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-thinking-audit-gate.sh\"",
+            "timeout": 8,
+            "statusMessage": "Thinking-directive gate..."
           }
         ]
       },

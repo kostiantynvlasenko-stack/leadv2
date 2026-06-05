@@ -50,15 +50,15 @@ if [[ -z "${LEADV2_TASK_ID:-}" ]]; then
 fi
 [[ -n "${LEADV2_TASK_ID:-}" ]] || exit 0
 
-# Phase-aware word budget (was global 100w → killed planning/review subagents)
+# Phase-aware advisory word budget — matches prose-guard hard caps
 case "${LEADV2_PHASE:-}" in
-  intake|classify) WORD_LIMIT=200 ;;
-  plan)            WORD_LIMIT=500 ;;
-  build)           WORD_LIMIT=250 ;;
-  review)          WORD_LIMIT=300 ;;
-  deploy|verify)   WORD_LIMIT=200 ;;
-  close)           WORD_LIMIT=150 ;;
-  *)               WORD_LIMIT=200 ;;
+  intake|classify) WORD_LIMIT=80  ;;
+  plan)            WORD_LIMIT=150 ;;
+  build)           WORD_LIMIT=80  ;;
+  review)          WORD_LIMIT=100 ;;
+  deploy|verify)   WORD_LIMIT=80  ;;
+  close)           WORD_LIMIT=120 ;;
+  *)               WORD_LIMIT=80  ;;
 esac
 
 INPUT="$(cat 2>/dev/null || true)"
