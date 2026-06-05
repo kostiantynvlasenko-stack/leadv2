@@ -1,3 +1,11 @@
+---
+name: leadv2-token-discipline
+description: Enforce token-budget discipline in every /leadv2 phase — background-only Agent spawns, Read with offset/limit, Bash output pre-truncation, pulse-mode silence, MCP caching, and compact triggers. Apply when a session grows long, context cost spikes, a subagent deliverable risks flooding chat, or you are about to spawn agents / read files / emit Bash output. Always on; never skip.
+allowed-tools:
+  - Read
+  - Bash
+---
+
 # leadv2-token-discipline — Keep Opus available, kill conversation bloat
 
 ## When: every /leadv2 phase. Always on.

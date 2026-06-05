@@ -1,6 +1,6 @@
 ---
 name: leadv2-judge
-description: "[internal] Unified Opus judge for leadv2 decisions."
+description: "[internal] Unified Opus judge for leadv2 gate decisions — adjudicates a multi-option fork in classify/plan/build/review/recovery and returns a single ruling with rationale when the specialized judges (judge-review, judge-recovery) do not apply."
 allowed-tools:
   - Read
   - Bash

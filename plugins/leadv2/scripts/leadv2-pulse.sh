@@ -11,7 +11,7 @@
 set -uo pipefail
 
 # Guard: no-op when pulse mode not enabled
-[[ "${LEADV2_PULSE_MODE:-0}" == "1" ]] || exit 0
+[[ "${LEADV2_PULSE_MODE:-1}" == "1" ]] || exit 0  # default ON for fresh installs
 
 usage() {
   printf -- 'Usage: leadv2-pulse.sh <task_id> <phase> <text>\n' >&2

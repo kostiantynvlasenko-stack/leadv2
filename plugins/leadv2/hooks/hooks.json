@@ -1,5 +1,5 @@
 {
-  "description": "leadv2 autonomous orchestrator hooks — guards, counters, delegations, lifecycle",
+  "description": "leadv2 autonomous orchestrator hooks \u2014 guards, counters, delegations, lifecycle",
   "hooks": {
     "SessionStart": [
       {
@@ -43,11 +43,28 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-pulse-enforcer.sh\"",
             "timeout": 8,
             "statusMessage": "Pulse-mode enforcer..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-compact-warn.sh\"",
+            "timeout": 5,
+            "statusMessage": "Turn-count compact warner..."
           }
         ]
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-loop-detect-hook.sh\"",
+            "timeout": 5,
+            "statusMessage": "Tool-cap loop guard..."
+          }
+        ]
+      },
       {
         "matcher": "Bash",
         "hooks": [

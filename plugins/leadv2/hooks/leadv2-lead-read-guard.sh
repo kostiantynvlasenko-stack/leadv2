@@ -11,8 +11,9 @@
 set -euo pipefail
 trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 
-# Off by default
-[[ "${LEADV2_LEAD_GUARD:-0}" == "1" ]] || exit 0
+# Advisory fires by default (LEADV2_LEAD_GUARD=0 disables, =1 hard-blocks).
+[[ "${LEADV2_LEAD_GUARD:-advisory}" == "0" ]] && exit 0
+LEAD_GUARD_MODE="${LEADV2_LEAD_GUARD:-advisory}"
 
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
@@ -76,18 +77,12 @@ esac
 # Code file extensions — block when leadv2 active
 case "$FILE_PATH" in
   *.py|*.ts|*.tsx|*.js|*.jsx|*.sql|*.json|*.go|*.rs|*.swift|*.kt|*.cs|*.sh|*.bash|*.zsh|*.fish|*.rb|*.java|*.c|*.cc|*.cpp|*.h|*.hpp|*.m|*.mm|*.lua|*.pl|*.php)
-    cat <<MSG >&2
-[leadv2-lead-read-guard] Lead reading code file directly is forbidden during /leadv2.
-  file: $FILE_PATH
-
-Lead's job: dispatch. Spawn one of:
-  - Agent(subagent_type=Explore, model=haiku) for explanation
-  - Skill(leadv2-judge-question) for "should I" questions
-  - leadv2-phase-advance.sh for state transitions
-
-Override: \`unset LEADV2_LEAD_GUARD\` if this is genuinely a Phase 0 graph-warm read.
-MSG
-    exit 2
+    printf '[leadv2-lead-read-guard] WARN: lead reading code file %s directly.\n' "$FILE_PATH" >&2
+    printf '  Prefer: Agent(Explore,haiku) | get_code_snippet | search_graph\n' >&2
+    printf '  Disable warn: export LEADV2_LEAD_GUARD=0  Hard-block: =1\n' >&2
+    [[ "$LEAD_GUARD_MODE" == "1" ]] && python3 -c \
+      "import sys,json; f=sys.argv[1]; print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':'[leadv2-lead-read-guard] BLOCKED: '+f+'. Set LEADV2_LEAD_GUARD=0 to allow.'}}))" -- "$FILE_PATH"
+    exit 0
     ;;
 esac
 

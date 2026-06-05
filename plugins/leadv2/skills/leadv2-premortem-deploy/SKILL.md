@@ -1,6 +1,7 @@
 ---
 name: leadv2-premortem-deploy
-description: [internal] Token-ceiling guard before deploy; compares cost-estimate.yaml to routing.yaml ceiling; emits…
+description: "[internal] Token-ceiling guard before deploy — compares cost-estimate.yaml against the routing.yaml ceiling and emits a proceed / warn / hard-stop verdict so a deploy cannot blow the task token budget."
+status: deferred-v0.2
 allowed-tools:
   - Read
   - Bash

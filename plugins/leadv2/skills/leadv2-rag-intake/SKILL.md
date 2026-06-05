@@ -1,6 +1,7 @@
 ---
 name: leadv2-rag-intake
-description: [internal] Phase 0 mini-RAG: cosine-ranks LEAD_V2_STATE history against new task; surfaces top-3 similar…
+description: "[internal] Phase 0 mini-RAG — cosine-ranks LEAD_V2_STATE history against the new task and surfaces the top-3 most similar past tasks so the lead can reuse prior decisions and avoid repeating known failures."
+status: deferred-v0.2
 allowed-tools:
   - Read
   - Write
