@@ -52,10 +52,10 @@ _is_active_leadv2() {
     local active_yaml="${_root}/docs/leadv2/active.yaml"
     if [[ -f "$active_yaml" ]]; then
         local sessions
-        sessions=$(python3 -c "
-import sys, yaml
+        sessions=$(ACTIVE_YAML="$active_yaml" python3 -c "
+import os, yaml
 try:
-    data = yaml.safe_load(open('$active_yaml')) or {}
+    data = yaml.safe_load(open(os.environ['ACTIVE_YAML'])) or {}
     sessions = data.get('sessions', [])
     print('yes' if sessions else 'no')
 except Exception:

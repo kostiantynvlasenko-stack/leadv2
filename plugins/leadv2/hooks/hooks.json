@@ -221,6 +221,12 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-memory-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Memory guard (MEMORY.md leak prevention)..."
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-edit-guard.sh\"",
             "timeout": 5,
             "statusMessage": "leadv2 lead-edit guard..."

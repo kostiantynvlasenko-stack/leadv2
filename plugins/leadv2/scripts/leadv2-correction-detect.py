@@ -81,14 +81,6 @@ def _log(msg: str) -> None:
     print(f"[leadv2-correction-detect] {msg}", file=sys.stderr)
 
 
-def _get_memory_dir() -> Path:
-    """Return the project memory directory, dynamic or overridden."""
-    if override := os.environ.get("CLAUDE_PROJECT_MEMORY_DIR"):
-        return Path(override)
-    cwd = os.getcwd()
-    slug = cwd.replace("/", "-").lstrip("-")
-    return Path.home() / ".claude" / "projects" / slug / "memory"
-
 
 def _get_project_root() -> Path:
     """Return the git project root or cwd."""
@@ -337,66 +329,6 @@ def _write_candidates(
 
     return written
 
-
-def _auto_promote(
-    candidate: dict,
-    task_id: str,
-    memory_dir: Path,
-) -> bool:
-    """Write high-confidence correction to MEMORY.md and individual feedback file."""
-    fact = candidate.get("fact", "")
-    if not fact:
-        return False
-
-    memory_file = memory_dir / "MEMORY.md"
-    if not memory_file.exists():
-        _log(f"MEMORY.md not found at {memory_file}; skipping auto-promote")
-        return False
-
-    # Idempotency: check if first 30 chars of fact already present
-    fact_snippet = fact[:30]
-    existing = memory_file.read_text()
-    if fact_snippet in existing:
-        _log(f"Fact already in MEMORY.md (idempotent skip): {fact_snippet!r}")
-        return False
-
-    ts = datetime.now(tz=timezone.utc).isoformat()
-
-    # Derive a snake_case filename from the fact
-    snake_name = "".join(c if c.isalnum() or c == "_" else "_" for c in fact[:40].lower())
-    snake_name = "_".join(p for p in snake_name.split("_") if p)
-    if not snake_name:
-        snake_name = "auto_promoted"
-    feedback_filename = f"feedback_{snake_name}.md"
-    feedback_file = memory_dir / feedback_filename
-
-    # Write individual feedback file
-    feedback_content = (
-        f"# {fact[:60]}\n\n"
-        f"{fact}\n\n"
-        f"Source: auto-promoted by leadv2-correction-detect from task {task_id} "
-        f"at {ts}. Confidence: {candidate.get('confidence', 0.0):.2f}.\n"
-    )
-    feedback_file.write_text(feedback_content)
-
-    # Append to MEMORY.md under Feedback — Tech section
-    entry = (
-        f"- [{fact[:60]}]({feedback_filename}) — "
-        f"{fact} ({task_id} auto-promoted by correction-detect)\n"
-    )
-
-    # Insert after "## Feedback — Tech" or at end
-    if "## Feedback — Tech" in existing:
-        idx = existing.index("## Feedback — Tech")
-        # Find end of that line
-        eol = existing.index("\n", idx) + 1
-        new_content = existing[:eol] + "\n" + entry + existing[eol:]
-    else:
-        new_content = existing + "\n" + entry
-
-    memory_file.write_text(new_content)
-    _log(f"Auto-promoted to MEMORY.md: {fact[:60]!r}")
-    return True
 
 
 def main() -> None:
