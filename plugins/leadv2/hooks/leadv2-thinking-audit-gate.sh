@@ -46,7 +46,7 @@ if [[ "${MISSION_FILE}" != /* ]]; then
 fi
 
 # Run gate — exits non-zero if blocked
-if ! "$AUDIT_SCRIPT" --gate "$MISSION_FILE" 2>&1; then
+if ! "$AUDIT_SCRIPT" --gate "$MISSION_FILE" 2>/dev/null; then
   # Disable ERR trap before intentional exit 2
   trap - ERR
   python3 -c "
