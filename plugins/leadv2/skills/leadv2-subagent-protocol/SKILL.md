@@ -1,6 +1,6 @@
 ---
 name: leadv2-subagent-protocol
-description: Operating rules for all /leadv2 subagents: handoff/off_limits discipline, ask-lead.sh graph proxy, <=50 word chat, DELIVERABLE_COMPLETE marker. Triggers: any subagent role in /leadv2 flow.
+description: "Operating rules for all /leadv2 subagents: handoff/off_limits discipline, ask-lead.sh graph proxy, <=50 word chat, DELIVERABLE_COMPLETE marker. Triggers: any subagent role in /leadv2 flow."
 allowed-tools:
   - Read
   - Write

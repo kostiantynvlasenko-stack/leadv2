@@ -1,6 +1,6 @@
 ---
 name: leadv2-emergency-mode
-description: Reduced-scope review for emergency hotfixes when founder grants "no approvals". Syntax check and pinpoint critic still mandatory. Triggers: founder says "no approvals"/"skip review"/"emergency"/"hotfix now"; context.yaml has autonomy_level=3; STATE.md has emergency_mode=true.
+description: "Reduced-scope review for emergency hotfixes when founder grants \"no approvals\". Syntax check and pinpoint critic still mandatory. Triggers: founder says \"no approvals\"/\"skip review\"/\"emergency\"/\"hotfix now\"; context.yaml has autonomy_level=3; STATE.md has emergency_mode=true."
 allowed-tools:
   - Read
   - Write

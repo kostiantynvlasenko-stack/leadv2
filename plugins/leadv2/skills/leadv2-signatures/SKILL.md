@@ -1,6 +1,6 @@
 ---
 name: leadv2-signatures
-description: [internal] Closed-vocab schema for lead-reflect signatures; aggregates phase/failure_class tuples,…
+description: "[internal] Closed-vocab schema for lead-reflect signatures; aggregates phase/failure_class tuples,…"
 allowed-tools:
   - Read
   - Write

@@ -1,6 +1,6 @@
 ---
 name: leadv2-priors
-description: [internal] Injects relevant slice of leadv2-priors.yaml into classify/plan/build/premortem/llm-judge;…
+description: "[internal] Injects relevant slice of leadv2-priors.yaml into classify/plan/build/premortem/llm-judge;…"
 allowed-tools:
   - Read
   - Bash

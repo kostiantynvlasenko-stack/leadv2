@@ -1,6 +1,6 @@
 ---
 name: leadv2-negative-memory
-description: [internal] Filters approaches against leadv2-negative-memory.yaml; blocks any whose failure_mode recurs…
+description: "[internal] Filters approaches against leadv2-negative-memory.yaml; blocks any whose failure_mode recurs…"
 allowed-tools:
   - Read
   - Write

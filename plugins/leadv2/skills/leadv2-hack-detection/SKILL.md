@@ -1,6 +1,6 @@
 ---
 name: leadv2-hack-detection
-description: [internal] Scans git diff for band-aids (TODO, magic numbers, broad except, hardcoded creds); emits YAML…
+description: "[internal] Scans git diff for band-aids (TODO, magic numbers, broad except, hardcoded creds); emits YAML…"
 allowed-tools:
   - Read
   - Write

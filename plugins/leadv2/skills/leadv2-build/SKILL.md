@@ -1,6 +1,6 @@
 ---
 name: leadv2-build
-description: Phase 4 — parallel Sonnet code writers per plan.parallel_groups; escalates to claude-subsession for long-context tasks. Triggers: Gate 1 approved, class >= Light.
+description: "Phase 4 — parallel Sonnet code writers per plan.parallel_groups; escalates to claude-subsession for long-context tasks. Triggers: Gate 1 approved, class >= Light."
 allowed-tools:
   - Read
   - Write
