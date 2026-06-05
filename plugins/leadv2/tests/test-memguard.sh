@@ -9,8 +9,8 @@ DETECT="${BASH_SOURCE[0]%/*}/../scripts/leadv2-correction-detect.py"
 PASS=0
 FAIL=0
 
-pass() { echo "PASS: $1"; (( PASS++ )) || true; }
-fail() { echo "FAIL: $1"; (( FAIL++ )) || true; }
+pass() { echo "PASS: $1"; PASS=$(( PASS + 1 )); }
+fail() { echo "FAIL: $1"; FAIL=$(( FAIL + 1 )); }
 
 # Helper: run guard with a given JSON payload and optional env vars
 # Returns exit code
@@ -139,6 +139,32 @@ fi
 
 rm -rf "$TMP_DIR"
 unset LEADV2_IMMUNE_STORE LEADV2_CORRECTION_DETECT LEADV2_CANDIDATES_FILE
+
+# ---------------------------------------------------------------------------
+# (e) MultiEdit payload: edits[] targeting MEMORY.md must be denied
+# ---------------------------------------------------------------------------
+MULTIEDIT_MEM_PAYLOAD='{"tool_input":{"edits":[{"file_path":"/x/memory/MEMORY.md","old_string":"a","new_string":"b"}]}}'
+MULTIEDIT_NORM_PAYLOAD='{"tool_input":{"edits":[{"file_path":"/x/docs/README.md","old_string":"a","new_string":"b"}]}}'
+
+# MultiEdit to MEMORY.md must deny (exit 2)
+e_stdout=""
+e_exit=0
+e_stdout=$(LEADV2_TASK_ID=test-task-e01 bash "$GUARD" <<<"$MULTIEDIT_MEM_PAYLOAD" 2>/dev/null) || e_exit=$?
+if [[ $e_exit -eq 2 ]] && printf '%s' "$e_stdout" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); assert d['hookSpecificOutput']['permissionDecision']=='deny'" 2>/dev/null; then
+    pass "(e) MultiEdit to MEMORY.md via edits[] is denied (exit 2 + deny JSON)"
+else
+    fail "(e) MultiEdit to MEMORY.md via edits[] should be denied (exit=$e_exit stdout=${e_stdout:0:80})"
+fi
+find /tmp/leadv2-memory-guard -name "test-task-e01_*.blocked" -delete 2>/dev/null || true
+
+# MultiEdit to a normal path must allow (exit 0)
+e2_exit=0
+LEADV2_TASK_ID=test-task-e02 bash "$GUARD" <<<"$MULTIEDIT_NORM_PAYLOAD" >/dev/null 2>&1 || e2_exit=$?
+if [[ $e2_exit -eq 0 ]]; then
+    pass "(e) MultiEdit to normal path via edits[] is allowed (exit 0)"
+else
+    fail "(e) MultiEdit to normal path via edits[] should be allowed (exit=$e2_exit)"
+fi
 
 # ---------------------------------------------------------------------------
 # Summary

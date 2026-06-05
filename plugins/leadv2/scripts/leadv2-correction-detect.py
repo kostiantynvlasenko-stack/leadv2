@@ -12,7 +12,6 @@ Environment:
   LEADV2_CORRECTION_WINDOW   int, max user messages to classify (default: 6)
   ANTHROPIC_API_KEY          API key (required unless using OAuth fallback)
   CLAUDE_CODE_OAUTH_TOKEN    OAuth token fallback (if no API key)
-  CLAUDE_PROJECT_MEMORY_DIR  Override for ~/.claude/projects/.../memory path
   LEADV2_IMMUNE_STORE        Override path for immune-patterns.yaml
                              (default: docs/leadv2/immune-patterns.yaml in project root)
   LEADV2_CANDIDATES_FILE     Override path for correction-detect-candidates.jsonl
@@ -271,7 +270,11 @@ def _call_haiku(user_messages: list[str]) -> list[dict]:
         _log(f"API call failed: {exc}; returning []")
         return []
 
-    raw_text = response.content[0].text.strip()
+    block = response.content[0]
+    raw_text = block.text.strip() if hasattr(block, 'text') else ''
+    if not raw_text:
+        _log("Non-text block from API; returning []")
+        return []
 
     # Strip markdown fences if present
     if raw_text.startswith("```"):

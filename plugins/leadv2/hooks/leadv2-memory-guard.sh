@@ -17,20 +17,29 @@ INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
 # ---------------------------------------------------------------------------
-# 1. Extract file_path from tool input (Write or Edit both use file_path)
+# 1. Extract file_path(s) from tool input (Write/Edit use file_path; MultiEdit uses edits[])
 # ---------------------------------------------------------------------------
-FILE_PATH="$(printf '%s' "$INPUT" | python3 -c "
+MEMORY_HIT="$(printf '%s' "$INPUT" | python3 -c "
 import sys, json
 try:
     data = json.loads(sys.stdin.read())
     inp = data.get('tool_input', data)
     fp = inp.get('file_path', inp.get('path', ''))
-    print(fp)
+    paths = [fp] if fp else []
+    for edit in inp.get('edits', []):
+        ep = edit.get('file_path', edit.get('path', ''))
+        if ep:
+            paths.append(ep)
+    # print the first MEMORY.md path found, empty if none
+    hit = next((p for p in paths if p.endswith('/memory/MEMORY.md')), '')
+    print(hit)
 except Exception:
     pass
 " 2>/dev/null || true)"
 
-[[ -z "$FILE_PATH" ]] && exit 0
+[[ -z "$MEMORY_HIT" ]] && exit 0
+
+FILE_PATH="$MEMORY_HIT"
 
 # ---------------------------------------------------------------------------
 # 2. Check if path targets */memory/MEMORY.md
