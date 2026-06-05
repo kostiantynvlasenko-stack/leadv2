@@ -1,6 +1,6 @@
 ---
 name: leadv2-correction-detect
-description: "[internal] §6.5 of lead-reflect — classify last N user messages as correction/reinforcement/preference/context using haiku; write high-confidence items to candidates.jsonl or immune memory."
+description: "[internal] §6.5 of lead-reflect — classify last N user messages as correction/reinforcement/preference/context using haiku; write high-confidence corrections to docs/leadv2/immune-patterns.yaml (plugin immune store); candidates.jsonl stored at docs/leadv2/correction-detect-candidates.jsonl. Never writes to global MEMORY.md."
 allowed-tools:
   - Read
   - Write
@@ -116,7 +116,9 @@ candidates = [m for m in classifications if m["confidence"] >= WRITE_THRESHOLD]
 Write ALL candidates (confidence ≥ 0.8) to candidates file. Never write immune memory.
 
 ```bash
-CANDIDATES_FILE="${CLAUDE_PROJECT_MEMORY_DIR:-$HOME/.claude/projects/$(pwd | tr '/' '-' | sed 's/^-//')/memory}/correction-detect-candidates.jsonl"
+# Default: docs/leadv2/correction-detect-candidates.jsonl in project root
+# Override: LEADV2_CANDIDATES_FILE env var
+CANDIDATES_FILE="${LEADV2_CANDIDATES_FILE:-$(git rev-parse --show-toplevel)/docs/leadv2/correction-detect-candidates.jsonl}"
 ```
 
 Each line is a JSON object (JSONL format):
@@ -137,33 +139,34 @@ For each candidate with confidence ≥ 0.8:
 
 ---
 
-## §6. Auto-promote to immune memory
+## §6. Auto-promote to plugin immune store
 
-Auto-promote path: `${CLAUDE_PROJECT_MEMORY_DIR:-$HOME/.claude/projects/$(pwd | tr '/' '-' | sed 's/^-//')/memory}/MEMORY.md`
+**Target: `docs/leadv2/immune-patterns.yaml`** (the plugin immune store).
+Global `MEMORY.md` is NEVER written by this skill.
 
 Auto-promote only when ALL of:
 - `detect_mode == "1"` (not shadow)
 - `category == "correction"`
 - `confidence >= 0.95`
 
-Write format — append to the `## Feedback — Tech` section (or `## Feedback — Process` if the correction is process-related):
+Entry schema (matches `scripts/leadv2-immune-aggregate.py`):
 
-```markdown
-- [<short title derived from fact>](<snake_case_filename>.md) — <fact text> (<task_id> auto-promoted by correction-detect)
+```yaml
+- id: <sha1[:12] of normalised fact text>
+  task_origin: <task_id>
+  keywords: [correction, ...]   # auto-tagged from fact text
+  summary: <first sentence of fact, ≤100 chars>
+  action: <second sentence or "Check: <summary>", ≤200 chars>
+  created: <YYYY-MM-DD>
+  seen_count: 1
+  source: correction            # marks auto-promoted corrections
+  confidence: 0.95              # classifier confidence
 ```
 
-Also create the individual feedback file at:
-`${CLAUDE_PROJECT_MEMORY_DIR:-$HOME/.claude/projects/$(pwd | tr '/' '-' | sed 's/^-//')/memory}/<snake_case_filename>.md`
+Idempotency: stable `id` (sha1 of normalised fact) — if already present, increment `seen_count` only. No duplicates.
 
-```markdown
-# <Short Title>
-
-<full fact text>
-
-Source: auto-promoted by leadv2-correction-detect from task <task_id> at <ISO ts>. Confidence: <float>.
-```
-
-Idempotency check: before writing, grep MEMORY.md for the `fact` text (first 30 chars). If already present, skip.
+Override store path: `LEADV2_IMMUNE_STORE` env var.
+Override candidates path: `LEADV2_CANDIDATES_FILE` env var.
 
 ---
 

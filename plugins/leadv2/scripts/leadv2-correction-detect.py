@@ -13,15 +13,30 @@ Environment:
   ANTHROPIC_API_KEY          API key (required unless using OAuth fallback)
   CLAUDE_CODE_OAUTH_TOKEN    OAuth token fallback (if no API key)
   CLAUDE_PROJECT_MEMORY_DIR  Override for ~/.claude/projects/.../memory path
+  LEADV2_IMMUNE_STORE        Override path for immune-patterns.yaml
+                             (default: docs/leadv2/immune-patterns.yaml in project root)
+  LEADV2_CANDIDATES_FILE     Override path for correction-detect-candidates.jsonl
+                             (default: docs/leadv2/correction-detect-candidates.jsonl)
+
+NOTE: Auto-promote writes to the plugin immune store (docs/leadv2/immune-patterns.yaml),
+      NOT to global MEMORY.md. Global MEMORY.md is never touched by this script.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import yaml  # type: ignore[import]
+    _YAML_AVAILABLE = True
+except ImportError:
+    _YAML_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Config
@@ -73,6 +88,155 @@ def _get_memory_dir() -> Path:
     cwd = os.getcwd()
     slug = cwd.replace("/", "-").lstrip("-")
     return Path.home() / ".claude" / "projects" / slug / "memory"
+
+
+def _get_project_root() -> Path:
+    """Return the git project root or cwd."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return Path(result.stdout.strip())
+    except Exception:
+        pass
+    return Path(os.getcwd())
+
+
+def _get_immune_store() -> Path:
+    """Return the path to the immune-patterns.yaml store."""
+    if override := os.environ.get("LEADV2_IMMUNE_STORE"):
+        return Path(override)
+    return _get_project_root() / "docs" / "leadv2" / "immune-patterns.yaml"
+
+
+def _get_candidates_file() -> Path:
+    """Return the path to the correction-detect-candidates.jsonl file."""
+    if override := os.environ.get("LEADV2_CANDIDATES_FILE"):
+        return Path(override)
+    return _get_project_root() / "docs" / "leadv2" / "correction-detect-candidates.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# Immune store helpers (mirrors leadv2-immune-aggregate.py schema)
+# ---------------------------------------------------------------------------
+
+KEYWORD_STEMS: dict[str, list[str]] = {
+    "correction": ["correction", "auto-promoted", "founder corrected"],
+    "UTC": ["utc", "timezone", "tz", "timestamptz"],
+    "freshness": ["fresh", "stale", "staleness", "is_fresh"],
+    ".env": [r"\.env", "env.file", "env var", "environmentfile"],
+    "partial-index": ["partial.index", "partial unique", "where predicate"],
+    "upsert": ["upsert", "on conflict", "pgrst102"],
+    "RLS": [r"\brls\b", "row level security", "policy"],
+    "race": [r"\brace\b", "race condition", "concurrent"],
+    "retry": ["retry", "backoff", "max_retries"],
+    "timeout": ["timeout", "wait_for"],
+    "deploy": ["deploy", "deploy-latest", "both vps"],
+    "bash-syntax": ["apostrophe", "single.quot", "bash.n", "syntax error", "set -e", "pipefail"],
+    "schema": ["migration", "schema", "create table", "alter table", "column"],
+    "grep-only": ["grep", "repo grep"],
+}
+
+
+def _tag_keywords(text: str) -> list[str]:
+    low = text.lower()
+    tags: list[str] = []
+    for kw, patterns in KEYWORD_STEMS.items():
+        for p in patterns:
+            if re.search(p, low):
+                tags.append(kw)
+                break
+    return sorted(set(tags))
+
+
+def _stable_id(text: str) -> str:
+    normalised = re.sub(r"\s+", " ", text.strip().lower())
+    return hashlib.sha1(normalised.encode()).hexdigest()[:12]
+
+
+def _auto_promote_to_immune(
+    candidate: dict,
+    task_id: str,
+) -> bool:
+    """
+    Append a high-confidence correction to docs/leadv2/immune-patterns.yaml.
+    Uses the same schema as leadv2-immune-aggregate.py.
+    Never touches global MEMORY.md.
+    """
+    if not _YAML_AVAILABLE:
+        _log("yaml not installed; cannot write to immune store — skipping auto-promote")
+        return False
+
+    fact = candidate.get("fact", "")
+    if not fact:
+        return False
+
+    immune_store = _get_immune_store()
+    pid = _stable_id(fact)
+    ts = datetime.now(tz=timezone.utc).date().isoformat()
+    confidence = candidate.get("confidence", 0.0)
+    keywords = _tag_keywords(fact)
+
+    # Load existing patterns
+    if immune_store.exists():
+        try:
+            data: dict = yaml.safe_load(immune_store.read_text(encoding="utf-8")) or {}
+        except Exception as exc:
+            _log(f"Failed to read immune store: {exc}")
+            data = {}
+    else:
+        data = {}
+
+    patterns: list[dict] = data.get("patterns") or []
+    existing_ids = {p["id"] for p in patterns}
+
+    if pid in existing_ids:
+        # Idempotent: already present — increment seen_count only
+        for p in patterns:
+            if p["id"] == pid:
+                p["seen_count"] = p.get("seen_count", 1) + 1
+                _log(f"Immune store: idempotent update seen_count for {pid!r}: {fact[:40]!r}")
+        immune_store.parent.mkdir(parents=True, exist_ok=True)
+        immune_store.write_text(
+            yaml.dump({"patterns": patterns}, allow_unicode=True, sort_keys=False, default_flow_style=False),
+            encoding="utf-8",
+        )
+        return False  # Not a new entry
+
+    # Build new entry matching immune-aggregate schema
+    # Split fact into summary (first sentence) and action (second sentence or default)
+    parts = [s.strip() for s in re.split(r"[.\n]", fact.strip()) if s.strip()]
+    summary = parts[0][:100] if parts else fact[:100]
+    if len(parts) > 1:
+        action = parts[1][:200]
+        if not action.lower().startswith(("if ", "when ", "always ", "never ", "check ")):
+            action = "Check: " + action
+    else:
+        action = "Check: " + summary[:200]
+
+    new_entry: dict = {
+        "id": pid,
+        "task_origin": task_id,
+        "keywords": keywords,
+        "summary": summary,
+        "action": action,
+        "created": ts,
+        "seen_count": 1,
+        "source": "correction",
+        "confidence": round(confidence, 2),
+    }
+
+    patterns.append(new_entry)
+    immune_store.parent.mkdir(parents=True, exist_ok=True)
+    immune_store.write_text(
+        yaml.dump({"patterns": patterns}, allow_unicode=True, sort_keys=False, default_flow_style=False),
+        encoding="utf-8",
+    )
+    _log(f"Auto-promoted to immune store ({immune_store}): {fact[:60]!r} [confidence={confidence:.2f}]")
+    return True
 
 
 def _build_user_prompt(messages: list[str]) -> str:
@@ -284,8 +448,7 @@ def main() -> None:
         if c.get("confidence", 0.0) >= WRITE_THRESHOLD:
             candidate_texts.append(user_messages[i] if i < len(user_messages) else "")
 
-    memory_dir = _get_memory_dir()
-    candidates_file = memory_dir / "correction-detect-candidates.jsonl"
+    candidates_file = _get_candidates_file()
 
     written = 0
     auto_promoted = 0
@@ -302,13 +465,13 @@ def main() -> None:
             written = _write_candidates(
                 candidates, task_id, session_id, "1", candidate_texts, candidates_file
             )
-            # Auto-promote high-confidence corrections
+            # Auto-promote high-confidence corrections to immune store (not MEMORY.md)
             for candidate in candidates:
                 if (
                     candidate.get("category") == "correction"
                     and candidate.get("confidence", 0.0) >= AUTO_PROMOTE_THRESHOLD
                 ):
-                    if _auto_promote(candidate, task_id, memory_dir):
+                    if _auto_promote_to_immune(candidate, task_id):
                         auto_promoted += 1
 
     _log(

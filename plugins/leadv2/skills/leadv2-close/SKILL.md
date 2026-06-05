@@ -171,15 +171,17 @@ Pattern reference: `skills/leadv2-followup-consolidator/SKILL.md`.
 
 ### Step 5c. Correction-detect (inline, all classes)
 
-Scan THIS task's chat for founder corrections ("no", "не так", "stop doing X", "это уже было"); classify and write to memory as feedback entries.
+Scan THIS task's chat for founder corrections ("no", "не так", "stop doing X", "это уже было"); classify and write to the **plugin immune store** as structured entries.
 
 Inline rules (no separate skill call required — apply at close, using lead's own knowledge of the conversation):
-- If founder said "stop X" or "не делай Y" twice or more → write `~/.claude/projects/.../memory/feedback_<short-slug>.md` if no equivalent exists
-- If founder confirmed an unusual choice ("yes exactly", "правильно") → save as validated-pattern feedback
-- Do NOT save the same feedback twice — first `grep -l "<key phrase>" memory/` before writing
-- Update `MEMORY.md` index after each new memory file
+- If founder said "stop X" or "не делай Y" twice or more → append to `docs/leadv2/immune-patterns.yaml` (source: correction) if no equivalent id exists
+- If founder confirmed an unusual choice ("yes exactly", "правильно") → save as validated-pattern immune entry
+- Do NOT save the same feedback twice — idempotency is by stable sha1 id of normalised fact text
+- **NEVER write to global `MEMORY.md` or individual `memory/feedback_*.md` files** — immune store only
 
-Pattern reference: `skills/leadv2-correction-detect/SKILL.md` (folded in 2026-05-19 audit).
+Immune entry schema: `id` (sha1[:12]), `task_origin`, `keywords`, `summary`, `action`, `created`, `seen_count`, `source: correction`, `confidence`.
+
+Pattern reference: `skills/leadv2-correction-detect/SKILL.md` (immune routing updated 2026-06-05).
 
 ### Step 6. For Heavy tasks (or any task that touched runtime) — schedule outcome-watch at +48h
 
