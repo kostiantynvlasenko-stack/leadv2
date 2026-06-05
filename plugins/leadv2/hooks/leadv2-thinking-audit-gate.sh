@@ -47,9 +47,12 @@ fi
 
 # Run gate — exits non-zero if blocked
 if ! "$AUDIT_SCRIPT" --gate "$MISSION_FILE" 2>&1; then
-  jq -n '{
-    decision: "block",
-    reason: "Thinking-directive gate: mission file contains ultrathink/think-hard/etc without explicit_reason_required: true in context.yaml. Remove the directive or set explicit_reason_required: true."
-  }'
+  # Disable ERR trap before intentional exit 2
+  trap - ERR
+  python3 -c "
+import sys, json
+print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':'Thinking-directive gate: mission contains ultrathink/think-hard without explicit_reason_required: true in context.yaml. Remove the directive or set explicit_reason_required: true.'}}))
+"
+  exit 2
 fi
 exit 0

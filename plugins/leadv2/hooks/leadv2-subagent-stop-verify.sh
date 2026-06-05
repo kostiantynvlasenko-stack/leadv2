@@ -101,9 +101,9 @@ is_multi_para = len(paragraphs) > 2
 
 NARRATION_RE = re.compile(
     r'^(let me|first,?\s+i|now i\s+will|i\s+will\s+now|i\s+need\s+to|to\s+accomplish)',
-    re.IGNORECASE | re.MULTILINE
+    re.IGNORECASE
 )
-has_narration = bool(NARRATION_RE.search(last_text))
+has_narration = bool(NARRATION_RE.match(last_text.lstrip()))
 
 if word_count > 50:
     print(f'WORD_OVER:{word_count}')

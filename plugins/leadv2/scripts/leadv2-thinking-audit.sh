@@ -50,13 +50,24 @@ if [[ "${1:-}" == "--gate" ]]; then
     exit 0
   fi
 
-  # Resolve context.yaml relative to project root
+  # Resolve context.yaml from the mission file's task directory (walk up to find it)
   _gate_root="${LEADV2_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-  # Try to find active task's context.yaml
   _gate_context=""
-  for _cand in "$_gate_root/docs/handoff/"*/context.yaml; do
-    [[ -f "$_cand" ]] && _gate_context="$_cand" && break
+  # Prefer task-specific context.yaml derived from mission path
+  # Walk from mission file's directory upward looking for context.yaml
+  _walk_dir="$(dirname "$(readlink -f "$GATE_FILE" 2>/dev/null || echo "$GATE_FILE")")"
+  while [[ "$_walk_dir" != "/" && "$_walk_dir" != "$_gate_root" ]]; do
+    if [[ -f "$_walk_dir/context.yaml" ]]; then
+      _gate_context="$_walk_dir/context.yaml"
+      break
+    fi
+    _walk_dir="$(dirname "$_walk_dir")"
   done
+  # Fallback: use LEADV2_TASK_ID env var if set
+  if [[ -z "$_gate_context" && -n "${LEADV2_TASK_ID:-}" ]]; then
+    _cand="$_gate_root/docs/handoff/${LEADV2_TASK_ID}/context.yaml"
+    [[ -f "$_cand" ]] && _gate_context="$_cand"
+  fi
 
   python3 - "$GATE_FILE" "${_gate_context:-}" <<'GATE_PYEOF'
 import sys, re, os
@@ -96,7 +107,7 @@ except OSError:
     sys.exit(0)
 
 clean_lines = strip_fenced_and_quotes(content)
-has_directive = any(THINKING_DIRECTIVES.match(line) for line in clean_lines)
+has_directive = any(THINKING_DIRECTIVES.search(line) for line in clean_lines)
 
 if not has_directive:
     sys.exit(0)

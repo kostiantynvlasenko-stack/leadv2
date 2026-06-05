@@ -118,7 +118,10 @@ if [[ "${HAS_TOOL:-0}" == "1" ]]; then
   THRESHOLD=$(( PHASE_CAP * 60 / 100 ))
 fi
 
-if [[ "$WORD_COUNT" -le "$THRESHOLD" ]]; then exit 0; fi
+if [[ "$WORD_COUNT" -le "$THRESHOLD" ]]; then
+  rm -f "$HOME/.claude/leadv2-prose-retry-${SESSION_ID}.txt" 2>/dev/null || true
+  exit 0
+fi
 
 # Log violation
 LOG="$HOME/.claude/leadv2-prose-violations.log"
