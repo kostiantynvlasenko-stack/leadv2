@@ -94,7 +94,7 @@ if TALLY.exists():
         )
         for line in result.stdout.splitlines():
             parts = line.split()
-            if len(parts) >= 2 and parts[1] in ("DISPATCH", "WIRED", "DORMANT", "AUTO"):
+            if len(parts) >= 2 and parts[1] in ("DISPATCH", "WIRED", "DORMANT", "AUTO", "DEFERRED"):
                 tally_by_name[parts[0]] = parts[1]
     except Exception as exc:
         print(f"WARN: could not run tally script: {exc}", file=sys.stderr)
@@ -104,14 +104,15 @@ else:
 for s in skills:
     s["status"] = tally_by_name.get(s["skill_name"], "UNKNOWN")
 
-# ── 3. Sort: DORMANT first, then by token cost desc ──────────────────────────
-STATUS_ORDER = {"DORMANT": 0, "UNKNOWN": 1, "WIRED": 2, "AUTO": 3, "DISPATCH": 4}
+# ── 3. Sort: DORMANT first, DEFERRED next, then by token cost desc ───────────
+STATUS_ORDER = {"DORMANT": 0, "DEFERRED": 1, "UNKNOWN": 2, "WIRED": 3, "AUTO": 4, "DISPATCH": 5}
 
 skills.sort(key=lambda s: (STATUS_ORDER.get(s["status"], 9), -s["est_tokens"]))
 
 # ── 4. Report ─────────────────────────────────────────────────────────────────
 total_tokens = sum(s["est_tokens"] for s in skills)
 dormant   = [s for s in skills if s["status"] == "DORMANT"]
+deferred  = [s for s in skills if s["status"] == "DEFERRED"]
 desc_long = [s for s in skills if s["desc_words"] > 80]
 desc_short= [s for s in skills if 0 < s["desc_words"] < 4]
 dups      = [s for s in skills if s["dup_of"] is not None]
@@ -121,8 +122,8 @@ print("=" * 72)
 print("leadv2 Skill Budget Audit")
 print("=" * 72)
 print(f"Total skills : {len(skills)}   Est. total tokens : {total_tokens:,}")
-print(f"DORMANT      : {len(dormant)}   Desc too long (>80w) : {len(desc_long)}")
-print(f"Desc short(<4w): {len(desc_short)}   Dup names : {len(dups)}   YAML errors : {len(bad_fm)}")
+print(f"DORMANT      : {len(dormant)}   DEFERRED             : {len(deferred)}")
+print(f"Desc long(>80w): {len(desc_long)}   Desc short(<4w): {len(desc_short)}   Dup names : {len(dups)}   YAML errors : {len(bad_fm)}")
 print()
 print(f"{'SKILL':<42} {'STATUS':<10} {'~TOKENS':>8}  {'DESC_W':>6}  FLAGS")
 print("-" * 72)
@@ -133,13 +134,14 @@ for s in skills:
     if s["desc_words"] > 80:       flags.append("DESC-LONG")
     if 0 < s["desc_words"] < 4:   flags.append("DESC-SHORT")
     if s["status"] == "DORMANT":   flags.append("RECOMMEND-REVIEW")
+    if s["status"] == "DEFERRED":  flags.append("DEFERRED-V0.2+")
     print(f"{s['skill_name']:<42} {s['status']:<10} {s['est_tokens']:>8,}  {s['desc_words']:>6}  {'  '.join(flags)}")
 
 print()
 print(f"TOTAL estimated tokens loaded per session: {total_tokens:,}")
 
 # ── 5. Recommendations ────────────────────────────────────────────────────────
-if bad_fm or dups or desc_long or desc_short or dormant:
+if bad_fm or dups or desc_long or desc_short or dormant or deferred:
     print()
     print("RECOMMENDATIONS (read-only — nothing deleted):")
     for s in bad_fm:
@@ -152,3 +154,5 @@ if bad_fm or dups or desc_long or desc_short or dormant:
         print(f"  EXPAND-DESC[{s['skill_name']}]: {s['desc_words']} word(s) — expand to >=4 words")
     for s in dormant:
         print(f"  DORMANT    [{s['skill_name']}]: ~{s['est_tokens']:,} tokens, unused — inline or dispatch")
+    for s in deferred:
+        print(f"  DEFERRED   [{s['skill_name']}]: ~{s['est_tokens']:,} tokens, parked pending v0.2+ milestone")
