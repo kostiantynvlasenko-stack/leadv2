@@ -1,0 +1,30 @@
+name: Validate Skills
+
+on:
+  push:
+    paths:
+      - 'plugins/leadv2/skills/**/SKILL.md'
+      - 'plugins/leadv2/scripts/leadv2-validate-skills.sh'
+  pull_request:
+    paths:
+      - 'plugins/leadv2/skills/**/SKILL.md'
+      - 'plugins/leadv2/scripts/leadv2-validate-skills.sh'
+
+jobs:
+  validate-skills:
+    name: Validate SKILL.md front-matter
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      - name: Run skill validator
+        run: bash plugins/leadv2/scripts/leadv2-validate-skills.sh
