@@ -39,10 +39,20 @@ _lv2_handoff_dir=$(grep -E "^[[:space:]]*handoff_dir[[:space:]]*:" "$_lv2_sp_yam
 _lv2_board_path=$(grep -E "^[[:space:]]*board_path[[:space:]]*:" "$_lv2_sp_yaml" 2>/dev/null | head -1 | sed -E "s/^[[:space:]]*board_path[[:space:]]*:[[:space:]]*//" | sed -E "s/^['\"]//; s/['\"][[:space:]]*$//" | tr -d '\r' || true)
 [[ -z "$_lv2_board_path" || "$_lv2_board_path" == "null" || "$_lv2_board_path" == "~" ]] && _lv2_board_path="docs/BOARD.md"
 
-# Dynamic whitelist check for configured paths (runs before case — handles non-default repos)
-[[ "$FILE_PATH" == */"${_lv2_handoff_dir}"/* ]] && exit 0
-[[ "$FILE_PATH" == */"${_lv2_leadv2_dir}"/* ]] && exit 0
-[[ "$FILE_PATH" == */"${_lv2_board_path}" ]] && exit 0
+# Dynamic whitelist check for configured paths (runs before case — handles non-default repos).
+# Supports both absolute paths (prefix match) and relative path components (substring match).
+_lv2_match_path() {
+  local file_path="$1" pattern="$2"
+  # If pattern is absolute, use prefix match; otherwise use substring glob.
+  if [[ "$pattern" == /* ]]; then
+    [[ "$file_path" == "${pattern}"/* || "$file_path" == "${pattern}" ]]
+  else
+    [[ "$file_path" == */"${pattern}"/* || "$file_path" == */"${pattern}" || "$file_path" == "${pattern}"/* ]]
+  fi
+}
+_lv2_match_path "$FILE_PATH" "$_lv2_handoff_dir" && exit 0
+_lv2_match_path "$FILE_PATH" "$_lv2_leadv2_dir" && exit 0
+_lv2_match_path "$FILE_PATH" "$_lv2_board_path" && exit 0
 
 # Whitelist: handoff, BOARD, LEAD_V2_STATE, refs, active.yaml, .summary.md, .full.md
 case "$FILE_PATH" in

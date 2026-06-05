@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Stop hook — enforce LEADV2 pulse-mode word limit (30 words).
-# Outputs continue:false to force model retry when LEADV2 session exceeds limit.
-# Retry guard: max 2 blocks per stop, then lets through (avoids infinite loop).
+# UserPromptSubmit hook — ADVISORY pulse-mode word-count warner.
+# Emits a warning via additionalContext when lead's last assistant turn exceeds
+# the phase word budget.  ADVISORY ONLY: never returns continue:false, never
+# blocks or silences the session (founder decision: pulse silence is advisory).
+# Retry guard and continue:false logic removed — exit 0 always.
 # Self-contained: no external Python helper files.
 # PO-064: active.yaml reads use 5s cache; LEADV2_HOOK_PROFILE=1 enables timing log.
 
@@ -110,33 +112,19 @@ WORD_COUNT=$(printf '%s' "$TEXT_BODY" | wc -w | tr -d ' ')
 
 [[ "$WORD_COUNT" -le "$WORD_LIMIT" ]] && exit 0
 
-# Retry guard: give up after 2 blocks to avoid infinite loop
-RETRY_FILE="$HOME/.claude/leadv2-pulse-retry-${SESSION_ID}.txt"
-RETRY_COUNT=0
-if [[ -f "$RETRY_FILE" ]]; then
-    RETRY_COUNT=$(tr -d '[:space:]' < "$RETRY_FILE" 2>/dev/null || true)
-    RETRY_COUNT="${RETRY_COUNT:-0}"
-fi
+# Advisory warning only — log violation and inject a reminder via additionalContext.
+# Never emit continue:false; never suppress the session.
+printf '%s WARN session=%s words=%s limit=%s task=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION_ID" "$WORD_COUNT" "$WORD_LIMIT" "$LEADV2_TASK_ID" \
+    >> "$HOME/.claude/leadv2-prose-violations.log" 2>/dev/null || true
 
-if [[ "$RETRY_COUNT" -ge 2 ]]; then
-    rm -f "$RETRY_FILE"
-    printf '%s GAVE_UP session=%s words=%s task=%s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION_ID" "$WORD_COUNT" "$LEADV2_TASK_ID" \
-        >> "$HOME/.claude/leadv2-prose-violations.log"
-    exit 0
-fi
-
-printf '%d\n' $(( RETRY_COUNT + 1 )) > "$RETRY_FILE"
-
-printf '%s BLOCKED retry=%s session=%s words=%s task=%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RETRY_COUNT" "$SESSION_ID" "$WORD_COUNT" "$LEADV2_TASK_ID" \
-    >> "$HOME/.claude/leadv2-prose-violations.log"
-
-python3 - "$WORD_COUNT" "$LEADV2_TASK_ID" "$WORD_LIMIT" "${LEADV2_PHASE:-}" <<'PYEOF'
+python3 - "$WORD_COUNT" "$LEADV2_TASK_ID" "$WORD_LIMIT" "${LEADV2_PHASE:-}" <<'PYEOF' 2>/dev/null || true
 import sys, json
 wc, tid, lim, phase = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 print(json.dumps({
-    'continue': False,
-    'stopReason': f'PULSE_MODE phase={phase}: {wc} words (limit {lim}). Tighten or use tool calls. task={tid}'
+    'hookSpecificOutput': {
+        'hookEventName': 'UserPromptSubmit',
+        'additionalContext': f'[PULSE_WARN] phase={phase}: last turn {wc} words (limit {lim}). Tighten prose or use tool calls. task={tid}'
+    }
 }))
 PYEOF

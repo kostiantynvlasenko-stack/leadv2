@@ -7,7 +7,7 @@
 #   LEADV2_LOOP_DETECT=1       on by default (set to 0 to disable)
 #
 # WARN -> non-blocking advisory on stderr (exit 0)
-# BLOCK -> deny decision JSON
+# BLOCK -> deny decision JSON + exit 2 (hard block)
 # Fail-safe: any internal error exits 0 (never bricks the session).
 
 set -euo pipefail
@@ -20,34 +20,30 @@ DETECT="${LEADV2_LOOP_DETECT:-1}"
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
-TOOL_NAME="$(printf -- '%s' "$INPUT" | python3 -c "
+# Parse all needed fields in a single python3 call to reduce subprocess overhead
+PARSED="$(printf -- '%s' "$INPUT" | python3 -c "
 import sys, json
 try:
     r = json.loads(sys.stdin.read())
-    print(r.get('tool_name', ''))
+    tool_name = r.get('tool_name', '')
+    session_id = r.get('session_id', '')
+    args = json.dumps(r.get('tool_input', {}))
+    # NUL-separated to handle arbitrary content safely
+    sys.stdout.buffer.write((tool_name + '\x00' + session_id + '\x00' + args).encode())
 except Exception:
     pass
 " 2>/dev/null || true)"
+
+[[ -z "$PARSED" ]] && exit 0
+
+# Split on NUL bytes
+TOOL_NAME="$(printf -- '%s' "$PARSED" | cut -d $'\x00' -f1)"
+SESSION_ID="$(printf -- '%s' "$PARSED" | cut -d $'\x00' -f2)"
+ARGS_JSON="$(printf -- '%s' "$PARSED" | cut -d $'\x00' -f3)"
+
 [[ -z "$TOOL_NAME" ]] && exit 0
-
-SESSION_ID="$(printf -- '%s' "$INPUT" | python3 -c "
-import sys, json
-try:
-    r = json.loads(sys.stdin.read())
-    print(r.get('session_id', ''))
-except Exception:
-    pass
-" 2>/dev/null || true)"
 [[ -z "$SESSION_ID" ]] && exit 0
-
-ARGS_JSON="$(printf -- '%s' "$INPUT" | python3 -c "
-import sys, json
-try:
-    r = json.loads(sys.stdin.read())
-    print(json.dumps(r.get('tool_input', {})))
-except Exception:
-    print('{}')
-" 2>/dev/null || true)"
+[[ -z "$ARGS_JSON" ]] && ARGS_JSON="{}"
 
 TASK_ID="${LEADV2_TASK_ID:-default}"
 
@@ -77,7 +73,6 @@ payload = json.dumps({
     'session_id': session_id,
     'task_id': task_id,
 })
-import subprocess
 result = subprocess.run(['python3', detect_script], input=payload, capture_output=True, text=True, timeout=10)
 print(result.stdout.strip() or 'CLEAR')
 " -- "$TOOL_NAME" "$ARGS_JSON" "$SESSION_ID" "$TASK_ID" "$DETECT_SCRIPT" 2>/dev/null || echo "CLEAR")"
@@ -89,12 +84,15 @@ case "$VERDICT" in
     exit 0
     ;;
   BLOCK*)
+    # Emit deny JSON to stdout for SDK permit-decision; then hard-block via exit 2.
+    # Disable ERR trap first so the intentional exit 2 is not swallowed.
+    trap - ERR
     python3 -c "
 import sys, json
 reason = sys.argv[1]
 print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':f'TOOL_CAP: {reason}. Override: export LEADV2_TOOL_HARD_LIMIT=<n> or LEADV2_LOOP_DETECT=0'}}))
 " -- "$VERDICT"
-    exit 0
+    exit 2
     ;;
   *) exit 0 ;;
 esac

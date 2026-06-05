@@ -42,12 +42,14 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-pulse-enforcer.sh\"",
             "timeout": 8,
+            "continueOnBlock": true,
             "statusMessage": "Pulse-mode enforcer..."
           },
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-compact-warn.sh\"",
             "timeout": 5,
+            "continueOnBlock": true,
             "statusMessage": "Turn-count compact warner..."
           }
         ]

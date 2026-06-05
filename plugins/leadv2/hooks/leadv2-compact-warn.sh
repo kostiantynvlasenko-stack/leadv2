@@ -34,8 +34,7 @@ PREV="$(cat "$STATE_FILE" 2>/dev/null || echo '0')"
 PREV="${PREV// /}"
 [[ ! "$PREV" =~ ^[0-9]+$ ]] && PREV=0
 NEW_COUNT=$(( PREV + 1 ))
-printf '%d
-' "$NEW_COUNT" > "$STATE_FILE"
+printf '%d\n' "$NEW_COUNT" > "$STATE_FILE"
 
 # Check if we should warn
 if [[ "$NEW_COUNT" -ge "$THRESHOLD" ]]; then

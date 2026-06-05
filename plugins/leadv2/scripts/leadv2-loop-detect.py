@@ -7,7 +7,7 @@ stdin:  JSON line {"tool_name": str, "args_canonical_json": str,
 stdout: exactly one line — CLEAR | WARN <reason> | BLOCK <reason>
 
 Environment:
-  LEADV2_LOOP_DETECT   shadow | 1 | 0  (default: off)
+  LEADV2_LOOP_DETECT   shadow | 1 | 0  (default: on — matches hook wrapper default)
   LEADV2_LOOP_WARN_AT  int (default 3)
   LEADV2_LOOP_HARD_AT  int (default 5)
   LEADV2_TOOL_FREQ_WARN  int (default 30)
@@ -24,13 +24,14 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-LOOP_DETECT = os.environ.get("LEADV2_LOOP_DETECT", "0")
+LOOP_DETECT = os.environ.get("LEADV2_LOOP_DETECT", "1")
 WARN_AT = int(os.environ.get("LEADV2_LOOP_WARN_AT", "3"))
 HARD_AT = int(os.environ.get("LEADV2_LOOP_HARD_AT", "5"))
 TOOL_FREQ_WARN = int(os.environ.get("LEADV2_TOOL_FREQ_WARN", "30"))
@@ -145,10 +146,22 @@ def _load_state(path: Path) -> dict:
 
 
 def _save_state(path: Path, state: dict) -> None:
-    path.write_text(json.dumps(state))
+    # Atomic write: write to a sibling .tmp file then rename to avoid partial reads
+    # from concurrent parallel subagent invocations.
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as fh:
+            fh.write(json.dumps(state))
+        os.replace(tmp_name, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
-def _locked_update(session_id: str, tool_name: str, h: str) -> dict:
+def _locked_update(session_id: str, tool_name: str, h: str, file_path: str = "") -> dict:
     """Read state, update, write back — all under flock -x."""
     path = _state_path(session_id)
     # Open or create
@@ -179,6 +192,13 @@ def _locked_update(session_id: str, tool_name: str, h: str) -> dict:
         tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
         state["tool_counts"] = tool_counts
 
+        # Track seen Read file_paths to narrow paging exemption (L2 fix):
+        # a file_path is only "paging" if it was seen before with a different offset.
+        if tool_name == "Read" and file_path:
+            read_paths: dict = state.get("read_paths", {})
+            read_paths[file_path] = read_paths.get(file_path, 0) + 1
+            state["read_paths"] = read_paths
+
         _save_state(path, state)
         return state
     finally:
@@ -190,7 +210,7 @@ def _locked_update(session_id: str, tool_name: str, h: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def decide(tool_name: str, h: str, state: dict) -> tuple[str, str]:
+def decide(tool_name: str, h: str, state: dict, file_path: str = "") -> tuple[str, str]:
     """Return (verdict, reason). verdict in {CLEAR, WARN, BLOCK}."""
     hash_counts: dict = state.get("hash_counts", {})
     tool_counts: dict = state.get("tool_counts", {})
@@ -204,10 +224,17 @@ def decide(tool_name: str, h: str, state: dict) -> tuple[str, str]:
     if count >= WARN_AT:
         return "WARN", f"{tool_name} identical call repeated {count}x (warn threshold {WARN_AT})"
 
-    # Per-tool-type frequency checks
-    # Skip the per-tool hard limit for Read calls that are paging (unique hash, count == 1).
-    # Paging = same file_path with distinct (offset, limit) pairs — each call has hash_count == 1.
-    is_paging_read = tool_name == "Read" and count == 1
+    # Per-tool-type frequency checks.
+    # Paging exemption (narrow, L2 fix): exempt only when the SAME file_path was seen
+    # before (i.e. it is a genuine incremental read of one large file, not 200 distinct
+    # files each read once). A novel file_path with count==1 is NOT a paging read.
+    read_paths: dict = state.get("read_paths", {})
+    is_paging_read = (
+        tool_name == "Read"
+        and count == 1
+        and file_path != ""
+        and read_paths.get(file_path, 0) > 1  # >1 means this path was visited before
+    )
     if not is_paging_read:
         if tool_count >= TOOL_HARD_LIMIT:
             return "BLOCK", f"{tool_name} called {tool_count}x total (limit {TOOL_HARD_LIMIT})"
@@ -241,11 +268,19 @@ def main() -> None:
         print("CLEAR")
         return
 
+    # Extract file_path for the narrow paging exemption (Read tool only)
+    file_path = ""
+    if tool_name == "Read":
+        try:
+            file_path = json.loads(args_canonical_json).get("file_path", "")
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
     try:
         canon = canonicalize(tool_name, args_canonical_json, task_id)
         h = make_hash(canon)
-        state = _locked_update(session_id, tool_name, h)
-        verdict, reason = decide(tool_name, h, state)
+        state = _locked_update(session_id, tool_name, h, file_path=file_path)
+        verdict, reason = decide(tool_name, h, state, file_path=file_path)
     except Exception as exc:  # noqa: BLE001
         print(f"[LOOP-DETECT] unhandled exception: {exc}", file=sys.stderr)
         print("CLEAR")
