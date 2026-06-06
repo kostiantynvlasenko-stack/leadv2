@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # PreToolUse:Read guard — block lead from reading code files outside handoff during active /leadv2.
-# Only fires when LEADV2_LEAD_GUARD=1 in env (opt-in), to avoid breaking subagent reads.
+# Advisory by default (warn-only). When LEADV2_LEAD_GUARD=1, the LEAD (main session) is
+# hard-blocked from reading code; subagents are NEVER blocked (they need raw reads for byte-exact Edit targets + non-graph files). Lead vs subagent is detected via the input's agent_type field.
 # Lead's whitelist:
 #   docs/handoff/**, docs/leadv2/**, docs/BOARD.md, docs/LEAD_V2_STATE.md,
 #   .claude/ref/**, .claude/leadv2-tasks/**, *.yaml in handoff dirs
@@ -17,6 +18,16 @@ LEAD_GUARD_MODE="${LEADV2_LEAD_GUARD:-advisory}"
 
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
+# Lead (main session) has no agent_type in hook input; subagents carry a non-empty
+# agent_type. Verified empirically 2026-06-06. Only the lead is a router that must
+# route discovery through codebase-memory-mcp — so only the lead gets hard-blocked.
+_LV2_AGENT_TYPE="$(printf '%s' "$INPUT" | python3 -c "
+import sys, json
+try:
+    print(json.loads(sys.stdin.read()).get('agent_type','') or '')
+except Exception:
+    pass
+" 2>/dev/null || true)"
 
 FILE_PATH="$(printf '%s' "$INPUT" | python3 -c "
 import sys, json
@@ -87,11 +98,17 @@ esac
 # Code file extensions — block when leadv2 active
 case "$FILE_PATH" in
   *.py|*.ts|*.tsx|*.js|*.jsx|*.sql|*.json|*.go|*.rs|*.swift|*.kt|*.cs|*.sh|*.bash|*.zsh|*.fish|*.rb|*.java|*.c|*.cc|*.cpp|*.h|*.hpp|*.m|*.mm|*.lua|*.pl|*.php)
+    if [[ -n "$_LV2_AGENT_TYPE" ]]; then
+      # Subagent: advisory nudge only, NEVER block. Discovery should go through
+      # codebase-memory-mcp; raw read is legit only for byte-exact Edit targets + non-graph files.
+      printf '[leadv2-lead-read-guard] note: subagent(%s) raw-reading %s — prefer codebase-memory-mcp for discovery; raw read OK for edit-target / non-graph files.\n' "$_LV2_AGENT_TYPE" "$FILE_PATH" >&2
+      exit 0
+    fi
     printf '[leadv2-lead-read-guard] WARN: lead reading code file %s directly.\n' "$FILE_PATH" >&2
     printf '  Prefer: Agent(Explore,haiku) | get_code_snippet | search_graph\n' >&2
     printf '  Disable warn: export LEADV2_LEAD_GUARD=0  Hard-block: =1\n' >&2
     [[ "$LEAD_GUARD_MODE" == "1" ]] && python3 -c \
-      "import sys,json; f=sys.argv[1]; print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':'[leadv2-lead-read-guard] BLOCKED: '+f+'. Set LEADV2_LEAD_GUARD=0 to allow.'}}))" -- "$FILE_PATH"
+      "import sys,json; f=sys.argv[1]; print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':'[leadv2-lead-read-guard] BLOCKED (lead is a router — use codebase-memory-mcp / delegate to a subagent): '+f+'. Set LEADV2_LEAD_GUARD=0 to allow.'}}))" -- "$FILE_PATH"
     exit 0
     ;;
 esac
