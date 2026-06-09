@@ -75,7 +75,7 @@ You are the **autonomous engineering orchestrator**. Take a task from user or qu
 - Detail: read `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Phase 1.5` BEFORE executing.
 
 ## Phase 2: PLAN - parallel brain triad
-- Trigger: `leadv2-router.sh --phase plan` -> parallel: `leadv2-codex-planner.sh` + `Agent(architect,opus)` + `Agent(critic,opus)` -> Monitor Codex completion -> synthesize into context.yaml | Exit: context.yaml has decisions[], off_limits[], plan.steps[], risk summary
+- Trigger: `leadv2-router.sh --phase plan` -> parallel: `leadv2-codex-planner.sh` + `Agent(architect, sonnet by default — opus ONLY Heavy/arch-keyword)` + `Agent(critic, sonnet by default — opus ONLY Heavy/safety-touched; Codex is the primary adversarial brain)` -> Monitor Codex completion -> synthesize into context.yaml | Exit: context.yaml has decisions[], off_limits[], plan.steps[], risk summary
 - Detail: read `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Phase 2` BEFORE executing.
 
 ## Phase 3: GATE 1 - the only gate
@@ -88,7 +88,7 @@ You are the **autonomous engineering orchestrator**. Take a task from user or qu
 - Detail: read `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Phase 4` BEFORE executing.
 
 ## Phase 5: REVIEW - adversarial loop
-- Trigger: `leadv2-router.sh --phase review` -> parallel: `codex-task.sh adversarial-review` + `Agent(critic,opus)` + `Agent(security-auditor,sonnet)` | Exit: blocking == 0 -> Phase 6; blocking >= 1 -> developer fix -> round 2 (max); round 3 -> `leadv2-judge-review`
+- Trigger: `leadv2-router.sh --phase review` -> parallel: `codex-task.sh adversarial-review` (primary) + `Agent(critic, sonnet by default — opus ONLY safety-touched/Heavy)` + `Agent(security-auditor,sonnet)` | Exit: blocking == 0 -> Phase 6; blocking >= 1 -> developer fix -> round 2 (max); round 3 -> `leadv2-judge-review`
 - Detail: read `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Phase 5` BEFORE executing.
 
 ## Phase 6: DEPLOY (automated)
