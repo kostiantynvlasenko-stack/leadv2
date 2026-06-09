@@ -204,7 +204,17 @@ the full review lands in the Bash output file and `cx-tail.sh` reads it directly
 
 > **If `LEADV2_WORKFLOW_ENABLED=1` (and `Workflow` tool is available):**
 >
-> Issue ONE `Workflow` call instead of manual parallel `Agent`/`Bash(codex)` calls + `Monitor`. Script shape:
+> **PREFERRED — invoke the saved workflow (ships at `~/.claude/workflows/leadv2-review.js`, all repos):**
+> ```
+> Workflow({ name: "leadv2-review", args: { taskId: "<id>", base: "main",
+>            safetyTouched: <bool>, codexEnabled: <bool>, missionPath: "docs/handoff/<id>/review-mission.md" } })
+> ```
+> It returns ONE synthesized verdict `{verdict, blocking_count, blocking[], followups[]}` — lead context stays clean.
+> blocking_count==0 → ACCEPT → Phase 6. blocking_count>=1 → developer fix → re-run (max 2 rounds) → judge.
+> The workflow is **model-pinned** (critic sonnet / opus-on-safety, hack+codex haiku, verify sonnet) — never Opus-by-inheritance.
+> `m3-market`: set `codexEnabled:false` if managed settings disable Codex/workflows; fall back to manual Cases A/B/C.
+>
+> The inline draft below is the REFERENCE SHAPE only (the saved .js is canonical). Do NOT hand-inline a fresh script:
 >
 > ```js
 > // Workflow script — review fan-out
