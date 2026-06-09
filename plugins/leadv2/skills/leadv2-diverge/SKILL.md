@@ -100,6 +100,12 @@ Total spawns = `frames_per_run + 1 + top_k` must be `≤ 14`; if a repo override
 exceeds it, clamp down and log `diverge: selection clamped (<requested> → <used>)`
 to STATE.md. The default 5+1+3 = 9 is the recommended point.
 
+> **PREFERRED — saved workflow (offload, model-pinned, 2026-06-09):** when the `Workflow` tool is available, issue
+> `Workflow({name:"leadv2-diverge", args:{taskId, problem, n}})` instead of the manual Phase 1/2/3 below.
+> It runs N deterministic frame-shifted generators (sonnet) in parallel + a judge (critic, sonnet) that scores/
+> clusters/flags-traps and writes divergence.md, returning `{candidate_count, recommended, top[]}`. Honors the
+> pre-flight gate above (run it FIRST). The manual phases below are the FALLBACK when `Workflow` is unavailable.
+
 ## Phase 1 — DIVERGE (no critic)
 
 1. **Pick frames** (lead picks — no RNG needed). Take `selection.frames_per_run`

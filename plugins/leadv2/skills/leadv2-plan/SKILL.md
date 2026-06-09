@@ -16,6 +16,13 @@ allowed-tools:
 
 ## Protocol
 
+> **PREFERRED — saved workflow (offload, model-pinned, 2026-06-09):** when the `Workflow` tool is available, issue
+> `Workflow({name:"leadv2-plan", args:{taskId, taskBrief, heavy, archKeyword, codexEnabled, missionPath}})`.
+> It runs architect + critic + Codex-via-agent in parallel, synthesizes context.yaml to disk, and returns
+> `{decisions_count, steps_count, blocking_concerns, context_path, needs_founder_decision}`. Retires the manual
+> triad + Codex Monitor-polling; lead context stays clean. architect=opus only on Heavy/arch, else sonnet.
+> The manual protocol below is the FALLBACK when the `Workflow` tool is unavailable.
+
 ### 1a. Graph discovery — lead pre-populates (recommended)
 
 **Only lead (main session) has MCP access.** Subagents in `claude -p` cannot call `search_graph` / `trace_path` / `get_code_snippet`. If they try, they fall back to Grep (slow, expensive, incomplete).
