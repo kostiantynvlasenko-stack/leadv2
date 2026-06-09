@@ -16,6 +16,10 @@ trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
+# Subagents are always exempt — only the lead router is blocked from direct edits.
+_LV2_AGENT_TYPE="$(printf '%s' "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null || true)"
+[[ -n "$_LV2_AGENT_TYPE" ]] && exit 0
+
 FILE_PATH="$(printf '%s' "$INPUT" | python3 -c "
 import sys, json
 try:

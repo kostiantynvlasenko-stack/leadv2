@@ -298,6 +298,7 @@ price_son_in, price_son_out   = float(sys.argv[8]), float(sys.argv[9])
 total_in = total_out = 0
 cache_read_tokens = 0   # tokens served from Anthropic prompt cache (input_tokens_cache_read)
 cache_create_tokens = 0  # tokens written to cache (input_tokens_cache_write)
+refusal_detected = False
 try:
     with open(stream_file) as f:
         for line in f:
@@ -308,6 +309,11 @@ try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            # Detect stop_reason='refusal' (Fable 5 / new model refusal signal).
+            # stop_reason appears at top level in message_stop events, or nested under 'message'.
+            sr = obj.get("stop_reason") or (obj.get("message", {}) or {}).get("stop_reason")
+            if sr == "refusal":
+                refusal_detected = True
             usage = obj.get("usage") or (obj.get("message", {}) or {}).get("usage") or {}
             if not usage:
                 if "input_tokens" in obj:
@@ -340,7 +346,8 @@ denominator = cache_read_tokens + cache_create_tokens + total_in
 cache_hit_rate = round(cache_read_tokens / denominator, 4) if denominator > 0 and cache_read_tokens > 0 else None
 cache_hit_str = str(cache_hit_rate) if cache_hit_rate is not None else "null"
 
-print(f"OK {total_in} {total_out} {cost:.6f} {duration} {ts} {cache_hit_str}")
+status = "REFUSAL" if refusal_detected else "OK"
+print(f"{status} {total_in} {total_out} {cost:.6f} {duration} {ts} {cache_hit_str}")
 PYEOF
 
   local result
@@ -352,6 +359,13 @@ PYEOF
   if [[ "$result" == "PARSE_ERROR"* ]] || [[ -z "$result" ]]; then
     echo "[claude-subsession] WARN: cost parse failed for $role/$model, skipping" >&2
     return 0
+  fi
+
+  # Detect hard refusal from model (stop_reason='refusal').
+  # Export flag so the DELIVERABLE_COMPLETE check section can act on it.
+  if [[ "$result" == "REFUSAL "* ]]; then
+    echo "[claude-subsession] HARD FAILURE: model returned stop_reason=refusal for role=${role} model=${model} — treating as hard failure, not empty-success" >&2
+    export _SUBSESSION_REFUSAL_DETECTED=1
   fi
 
   read -r _ok input_tokens output_tokens cost_usd duration_sec timestamp cache_hit_rate_val <<< "$result"
@@ -698,6 +712,12 @@ if [[ "$WAIT" == "1" ]]; then
         printf '\n\nDELIVERABLE_COMPLETE\n# auto-marker added by SOFT_FINISH fallback\n' >> "$FULL_FILE"
         [[ -f "$SUMMARY_FILE" ]] && return 0
       fi
+    fi
+    # Check if this failure was due to a model refusal (stop_reason='refusal').
+    # Refusal exit code 2 lets callers distinguish refusal from ordinary missing-marker failures.
+    if [[ "${_SUBSESSION_REFUSAL_DETECTED:-0}" == "1" ]]; then
+      echo "[claude-subsession] HARD FAILURE: stop_reason=refusal detected — role=${ROLE} model=${MODEL} — no DELIVERABLE_COMPLETE written" >&2
+      exit 2
     fi
     echo "[claude-subsession] no DELIVERABLE_COMPLETE in ${ROLE}.full.md (or missing .summary.md)" >&2
     exit 1

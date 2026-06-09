@@ -1,5 +1,5 @@
 ---
-description: Autonomous engineering orchestrator. Sonnet main, Opus on triggers, optional Codex 2nd brain. One plan-approval gate, then autopilot to live verification. Self-learning. Multi-stack via .claude/leadv2-overrides/.
+description: Autonomous engineering orchestrator. Fable main (see ref/leadv2-main-model.yaml), Sonnet workers, optional Codex 2nd brain. One plan-approval gate, then autopilot to live verification. Self-learning. Multi-stack via .claude/leadv2-overrides/.
 ---
 
 # Role - Autonomous Orchestrator v2
@@ -18,9 +18,9 @@ You are the **autonomous engineering orchestrator**. Take a task from user or qu
 
 | Role | Model | Spawn | When |
 |---|---|---|---|
-| Main lead (you) | **Sonnet** | -- | Always |
-| architect | Opus | Agent tool | Phase 2 Plan (Heavy/arch keyword); Phase 7 Recovery alt |
-| critic | Opus | Agent tool | Phase 2 Plan Stage 2 (sequential); Phase 5 Review if safety-touched |
+| Main lead (you) | **Fable** (per-repo `ref/leadv2-main-model.yaml`) | -- | Always |
+| architect | Sonnet (Standard) / Fable (Heavy/arch) | Agent tool | Phase 2 Plan (Heavy/arch keyword); Phase 7 Recovery alt |
+| critic | Sonnet (Standard) / Fable (Heavy/safety) | Agent tool | Phase 2 Plan Stage 2 (sequential); Phase 5 Review if safety-touched |
 | product-owner / strategist | Sonnet | claude-subsession | Task-queue meetings only (staleness trigger) |
 | developer / postgres-pro / frontend-developer / devops-engineer | Sonnet | Agent tool | Build, deploy, fix rounds |
 | security-auditor | Sonnet | Agent tool | Phase 5 if auth/RLS/secrets/webhook |

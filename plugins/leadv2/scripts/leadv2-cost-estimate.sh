@@ -74,10 +74,12 @@ routing_yaml_path, state_md_path, prior_art_path, main_model_yaml_path, \
 # Pricing (USD per 1M tokens)
 # ---------------------------------------------------------------------------
 PRICE = {
-    "opus":   {"input": 15.0,  "output": 75.0},
-    "sonnet": {"input": 3.0,   "output": 15.0},
-    "haiku":  {"input": 0.25,  "output": 1.25},
+    "opus":   {"input": 15.0,  "output": 75.0,  "cache_read": 1.50, "cache_write": 18.75},
+    "fable":  {"input": 10.0,  "output": 50.0,  "cache_read": 1.00, "cache_write": 12.50},
+    "sonnet": {"input": 3.0,   "output": 15.0,  "cache_read": 0.30, "cache_write": 3.75},
+    "haiku":  {"input": 0.25,  "output": 1.25,  "cache_read": 0.03, "cache_write": 0.30},
 }
+PRICE_KEYS = ["opus", "fable", "sonnet", "haiku"]
 
 # ---------------------------------------------------------------------------
 # Load routing YAML
@@ -168,7 +170,11 @@ expected_phases = list(dict.fromkeys(expected_phases))  # dedupe, preserve order
 CACHED_FRACTION = 0.35
 CACHE_DISCOUNT  = 0.10  # cached tokens cost 10% of full input price
 
-main_model_key = "opus" if "opus" in main_model.lower() else "sonnet"
+main_model_lower = main_model.lower()
+main_model_key = next((k for k in PRICE_KEYS if k in main_model_lower), None)
+if main_model_key is None:
+    print(f"WARNING: unknown model '{main_model}' — falling back to sonnet pricing", file=sys.stderr)
+    main_model_key = "sonnet"
 prices = PRICE[main_model_key]
 
 def calc_cost(inp: int, out: int, cached_frac: float) -> float:

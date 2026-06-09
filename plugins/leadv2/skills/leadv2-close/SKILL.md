@@ -49,6 +49,18 @@ Capture the returned `graph_footprint:` block. Store as `$GRAPH_FOOTPRINT` for i
 
 If skill fails or MCP is unavailable: set `$GRAPH_FOOTPRINT = null` and continue — do not block Close.
 
+### Step 1c. Learning aggregation (P1-9, 2026-06-09)
+
+If `LEADV2_LEARN_ON_CLOSE=1` AND (task class >= Standard OR tasks closed since last learn-run > 5):
+
+```
+Workflow({name:"leadv2-learn", args:{label: LEADV2_TASK_ID}})
+```
+
+Write the returned `proposal_path` to `docs/leadv2/last-learn.txt`. Default is `LEADV2_LEARN_ON_CLOSE=0`
+(opt-in — adds latency/cost to every close). If the Workflow tool is unavailable or errors: skip silently,
+log one pulse line `learn: skipped (<reason>)`. Never block Close on learn.
+
 ### Step 2. Lead-reflect entry
 
 Append to `docs/LEAD_V2_STATE.md` under `history:` (rotate entries >20 to `docs/ops/LEAD_HISTORY.md`):

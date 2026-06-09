@@ -27,9 +27,12 @@ This is **operational discipline**, not model switching.
 
 ## Hard rules
 
-### 1. Lead is Opus, but ≤10 turns per task
+### 1. Lead is Fable (or Opus), but ≤10 turns per task
 
-`LEADV2_MAIN_MODEL=opus` (default). Phase budget:
+`LEADV2_MAIN_MODEL=fable` (default since 2026-06-09; `opus` legacy). Same turn budget applies to ANY
+top-tier lead — fable input is ~3x sonnet, output 50 USD/MTok. Burn ladder on cost-ceiling breach:
+routing.yaml `downgrade_chain` (fable → sonnet → haiku); 24h burn watch via `LEADV2_OPUS_BUDGET_24H`
+applies to the lead model regardless of name. Phase budget:
 
 | Phase pair | Turns |
 |---|---|

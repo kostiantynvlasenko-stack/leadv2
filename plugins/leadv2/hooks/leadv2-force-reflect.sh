@@ -35,8 +35,15 @@ CWD="$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
 STOP_ACTIVE="$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null || echo "false")"
 [[ "$STOP_ACTIVE" == "true" ]] && exit 0
 
-ACTIVE_YAML="$CWD/docs/leadv2/active.yaml"
-[[ -f "$ACTIVE_YAML" ]] || exit 0
+# Try primary path then fallback; first existing wins. If neither exists, exit 0.
+ACTIVE_YAML=""
+for _candidate in "$CWD/docs/leadv2/active.yaml" "$CWD/.claude/leadv2-tasks/active.yaml"; do
+  if [[ -f "$_candidate" ]]; then
+    ACTIVE_YAML="$_candidate"
+    break
+  fi
+done
+[[ -n "$ACTIVE_YAML" ]] || exit 0
 
 # Parse active.yaml with python3 (pyyaml is a project dependency).
 # For each session whose phase is in the trigger set, check flags and emit block if needed.

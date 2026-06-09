@@ -142,6 +142,11 @@ MSG
 # Only fires when LEADV2_LEAD_GUARD=1 (opt-in).
 # =============================================================================
 _check_lead_read_guard() {
+  # Subagents always exempt — they need raw reads for byte-exact Edit targets.
+  local _agent_type
+  _agent_type="$(printf '%s' "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null || true)"
+  [[ -n "$_agent_type" ]] && return 0
+
   [[ "${LEADV2_LEAD_GUARD:-0}" == "1" ]] || return 0
 
   case "$FPATH" in
@@ -171,6 +176,11 @@ _check_lead_read_guard() {
     */package.json) return 0 ;;
     */tsconfig.json) return 0 ;;
     */.env*) return 0 ;;
+  esac
+
+  # Whitelist plugin's own source and cache paths (lead must read its own tooling)
+  case "$FPATH" in
+    */leadv2/*/hooks/*|*/leadv2/*/scripts/*) return 0 ;;
   esac
 
   case "$FPATH" in

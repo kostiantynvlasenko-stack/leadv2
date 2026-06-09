@@ -1,5 +1,5 @@
 {
-  "description": "leadv2 autonomous orchestrator hooks \u2014 guards, counters, delegations, lifecycle",
+  "description": "leadv2 autonomous orchestrator hooks — guards, counters, delegations, lifecycle",
   "hooks": {
     "SessionStart": [
       {
@@ -106,22 +106,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-force-read-limit.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-read-dedup-hard.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-read-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "leadv2 lead-read guard..."
-          },
-          {
-            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-read-gate.sh\"",
             "timeout": 5
           }
@@ -157,6 +141,12 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-thinking-audit-gate.sh\"",
             "timeout": 8,
             "statusMessage": "Thinking-directive gate..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-workflow-bypass-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Workflow-first guard..."
           }
         ]
       },
@@ -288,6 +278,16 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-active-cache.sh\"",
             "timeout": 5,
             "continueOnBlock": true
+          }
+        ]
+      },
+      {
+        "matcher": "Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-workflow-sentinel-touch.sh\"",
+            "timeout": 5
           }
         ]
       }

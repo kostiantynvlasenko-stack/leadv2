@@ -95,6 +95,11 @@ case "$FILE_PATH" in
   */.env*) exit 0 ;;
 esac
 
+# Whitelist plugin's own source and cache paths (lead must read its own tooling)
+case "$FILE_PATH" in
+  */leadv2/*/hooks/*|*/leadv2/*/scripts/*) exit 0 ;;
+esac
+
 # Code file extensions — block when leadv2 active
 case "$FILE_PATH" in
   *.py|*.ts|*.tsx|*.js|*.jsx|*.sql|*.json|*.go|*.rs|*.swift|*.kt|*.cs|*.sh|*.bash|*.zsh|*.fish|*.rb|*.java|*.c|*.cc|*.cpp|*.h|*.hpp|*.m|*.mm|*.lua|*.pl|*.php)

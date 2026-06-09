@@ -11,24 +11,17 @@ INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
 # Extract mission file path from Agent tool input
-# Common field names: mission_file, task_file, prompt_file, or inline 'prompt' path reference
+# Honored field names: mission_file, task_file, prompt_file (explicit only; no regex scan over prompt text)
 MISSION_FILE="$(printf '%s' "$INPUT" | python3 -c "
-import sys, json, re
+import sys, json
 try:
     data = json.loads(sys.stdin.read())
     inp = data.get('tool_input', data)
-    # Direct field
+    # Only honor explicit mission_file/task_file/prompt_file fields -- no regex scan
     for key in ('mission_file', 'task_file', 'prompt_file'):
         v = inp.get(key, '')
         if v and isinstance(v, str):
             print(v); sys.exit(0)
-    # Scan prompt/task string for a file path pattern ending in .md
-    for key in ('prompt', 'task', 'description'):
-        v = inp.get(key, '')
-        if not v or not isinstance(v, str): continue
-        m = re.search(r'([^\s\"\']+\.md)', v)
-        if m:
-            print(m.group(1)); sys.exit(0)
 except Exception:
     pass
 " 2>/dev/null || true)"

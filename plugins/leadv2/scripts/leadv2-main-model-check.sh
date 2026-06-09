@@ -60,7 +60,7 @@ if [[ "$MAIN_MODEL" != "opus" ]]; then
   fi
 fi
 
-log_info "main_model=opus — verifying guardrails..."
+log_info "main_model=$MAIN_MODEL — verifying guardrails..."
 
 # ---------------------------------------------------------------------------
 # 2. Load guardrail config
@@ -136,8 +136,8 @@ fi
 # ---------------------------------------------------------------------------
 log_info "All guardrails satisfied"
 if [[ "${LEADV2_FORCE_OPUS_LEAD:-0}" == "1" ]]; then
-  log_info "LEADV2_FORCE_OPUS_LEAD=1 — Opus main mode enabled"
-  printf 'opus\n'
+  log_info "LEADV2_FORCE_OPUS_LEAD=1 — main model: $MAIN_MODEL"
+  printf '%s\n' "$MAIN_MODEL"
 else
   log_info "LEADV2_FORCE_OPUS_LEAD not set — defaulting to sonnet"
   printf 'sonnet\n'
