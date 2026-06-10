@@ -130,4 +130,9 @@ if [[ -d "${_WRAPPERS_DIR}" ]]; then
   export LEADV2_WRAPPER_DEPTH=0
 fi
 
+# D5 dry-run chokepoint: call site 1 of 4 — block subsession spawn under DRY_RUN.
+if leadv2_dry_run_guard "claude subsession spawn: $*"; then
+  exit 0
+fi
+
 "${REAL_SUBSESSION}" "$@"

@@ -676,6 +676,172 @@ leadv2_maybe_dry_run_echo() {
   fi
   return 1
 }
+# leadv2_dry_run_guard — D5 single chokepoint for all side-effect entrypoints.
+#
+# Usage (at the TOP of any side-effect function/script):
+#   leadv2_dry_run_guard "description of side effect" || return 0
+#
+# When LEADV2_DRY_RUN=1:
+#   - Prints "[DRY_RUN] <description>" to stderr.
+#   - Returns 0 so the caller can || return 0 / || exit 0 to skip the
+#     side effect cleanly.
+# When LEADV2_DRY_RUN is absent or 0:
+#   - Prints nothing, returns 1 so || return 0 does NOT short-circuit.
+#
+# Exactly 4 call sites per D5:
+#   1. claude-subsession.sh — subsession spawn (sources this file; guard before run_subsession)
+#   2. leadv2_git_op wrapper (below)
+#   3. sb_* Supabase call sites (guard at top of any sb_* wrapper that performs writes)
+#   4. deploy entrypoints (leadv2_deploy_via_override — uses leadv2_dry_run_guard directly)
+#
+# Absent LEADV2_DRY_RUN leaves the flow byte-identical (D6).
+leadv2_dry_run_guard() {
+  if [[ "${LEADV2_DRY_RUN:-0}" == "1" ]]; then
+    printf -- '[DRY_RUN] %s\n' "${*:-side-effect blocked}" >&2
+    return 0
+  fi
+  return 1
+}
+
+# leadv2_git_op — wrapper around git commands that respects LEADV2_DRY_RUN.
+# Call site 2 of 4 for leadv2_dry_run_guard (per D5).
+#
+# Usage:
+#   leadv2_git_op commit -m "message"
+#   leadv2_git_op push origin main
+#
+# Under LEADV2_DRY_RUN=1: logs the command, does not execute it.
+leadv2_git_op() {
+  if leadv2_dry_run_guard "git $*"; then
+    return 0
+  fi
+  git "$@"
+}
+
+# ── Supabase write wrappers (call site 3 of 4 for leadv2_dry_run_guard, per D5) ──
+#
+# sb_write — thin wrapper around Supabase REST writes that respects LEADV2_DRY_RUN.
+# Any code performing a Supabase mutation (INSERT / UPSERT / UPDATE / DELETE)
+# should call this wrapper so LEADV2_DRY_RUN=1 blocks the write at a single
+# chokepoint.
+#
+# Usage:
+#   sb_write <table> <json_payload>
+#   sb_write_rpc <function_name> <json_payload>
+#
+# Under LEADV2_DRY_RUN=1: logs "[DRY_RUN] supabase write: <table>" and returns 0
+# without any network call.  When LEADV2_DRY_RUN is absent or 0: executes write.
+#
+# Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in environment.
+# Python callers using supabase-py directly should guard inline:
+#   leadv2_dry_run_guard "supabase write: <table>" || return 0
+sb_write() {
+  local table="${1:?sb_write requires table name as first arg}"
+  local payload="${2:?sb_write requires JSON payload as second arg}"
+  if leadv2_dry_run_guard "supabase write: ${table}"; then
+    return 0
+  fi
+  if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
+    printf -- '[sb_write] ERROR: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set\n' >&2
+    return 1
+  fi
+  curl --silent --show-error --fail \
+    -X POST \
+    -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Prefer: return=minimal" \
+    -d "${payload}" \
+    "${SUPABASE_URL}/rest/v1/${table}"
+}
+
+# ── Named Supabase write wrappers (D5: every write routes through guard) ──────
+# sb_upsert / sb_insert / sb_patch / sb_delete — named-method aliases.
+# New code MUST call one of these (never raw curl). LEADV2_DRY_RUN=1 blocks all.
+#
+# sb_upsert <table> <json>              — POST with merge-duplicates resolution
+# sb_insert <table> <json>             — POST (plain insert, fails on conflict)
+# sb_patch  <table> <json> <qs>        — PATCH with ?<qs> row filter
+# sb_delete <table> <qs>               — DELETE with ?<qs> row filter
+sb_upsert() {
+  local table="${1:?sb_upsert requires table}" payload="${2:?sb_upsert requires payload}"
+  if leadv2_dry_run_guard "supabase upsert: ${table}"; then return 0; fi
+  if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
+    printf -- '[sb_upsert] ERROR: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set\n' >&2; return 1
+  fi
+  curl --silent --show-error --fail \
+    -X POST \
+    -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Prefer: resolution=merge-duplicates,return=minimal" \
+    -d "${payload}" \
+    "${SUPABASE_URL}/rest/v1/${table}"
+}
+
+sb_insert() {
+  local table="${1:?sb_insert requires table}" payload="${2:?sb_insert requires payload}"
+  if leadv2_dry_run_guard "supabase insert: ${table}"; then return 0; fi
+  if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
+    printf -- '[sb_insert] ERROR: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set\n' >&2; return 1
+  fi
+  curl --silent --show-error --fail \
+    -X POST \
+    -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Prefer: return=minimal" \
+    -d "${payload}" \
+    "${SUPABASE_URL}/rest/v1/${table}"
+}
+
+sb_patch() {
+  local table="${1:?sb_patch requires table}" payload="${2:?sb_patch requires payload}" qs="${3:?sb_patch requires query_string filter}"
+  if leadv2_dry_run_guard "supabase patch: ${table}?${qs}"; then return 0; fi
+  if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
+    printf -- '[sb_patch] ERROR: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set\n' >&2; return 1
+  fi
+  curl --silent --show-error --fail \
+    -X PATCH \
+    -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Prefer: return=minimal" \
+    -d "${payload}" \
+    "${SUPABASE_URL}/rest/v1/${table}?${qs}"
+}
+
+sb_delete() {
+  local table="${1:?sb_delete requires table}" qs="${2:?sb_delete requires query_string filter}"
+  if leadv2_dry_run_guard "supabase delete: ${table}?${qs}"; then return 0; fi
+  if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
+    printf -- '[sb_delete] ERROR: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set\n' >&2; return 1
+  fi
+  curl --silent --show-error --fail \
+    -X DELETE \
+    -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+    "${SUPABASE_URL}/rest/v1/${table}?${qs}"
+}
+
+sb_write_rpc() {
+  local fn_name="${1:?sb_write_rpc requires function name as first arg}"
+  local payload="${2:-{}}"
+  if leadv2_dry_run_guard "supabase rpc: ${fn_name}"; then
+    return 0
+  fi
+  if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
+    printf -- '[sb_write_rpc] ERROR: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set\n' >&2
+    return 1
+  fi
+  curl --silent --show-error --fail \
+    -X POST \
+    -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "${payload}" \
+    "${SUPABASE_URL}/rest/v1/rpc/${fn_name}"
+}
 
 # ── LIVE state updater ────────────────────────────────────────────────────
 leadv2_live_update() {
@@ -777,7 +943,8 @@ leadv2_deploy_via_override() {
   project_root="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
   override="$project_root/.claude/leadv2-overrides/deploy.sh"
 
-  if leadv2_maybe_dry_run_echo "deploy via $override"; then
+  # Call site 4 of 4 for leadv2_dry_run_guard (D5 single chokepoint).
+  if leadv2_dry_run_guard "deploy via $override"; then
     return 0
   fi
 
