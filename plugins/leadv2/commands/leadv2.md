@@ -56,6 +56,7 @@ You are the **autonomous engineering orchestrator**. Take a task from user or qu
 | `/leadv2 sessions` | Show docs/leadv2/active.yaml sessions table |
 | `/leadv2 health` | Run leadv2-briefing-freshness-monitor. Exit immediately (not 9-phase). |
 | `/leadv2 emergency` | Force leadv2-emergency-mode -- safety-critical hotfix path. Founder-only. |
+| `/leadv2 cross-repo-reflect` | Run cross-repo immune-pattern aggregator (G3 / C3). Manual-only — NOT auto-triggered at Phase 8 Close (D20). Reads `~/.claude/leadv2-shared/cross-repo-paths.yaml`, emits `docs/leadv2/shadow/proposals/<sha1>.yaml` (risk_level=high, founder-gated). Add `--dry-run` to preview without writing. Invoke: `bash ${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-crossrepo-aggregate.sh [--dry-run]`. |
 
 **Env (4 most-used):** `LEADV2_DRY_RUN=1` / `LEADV2_DAEMON=1` / `LEADV2_PULSE_MODE=0` (off; plugin default is 1) / `FORCE_OPUS_LEAD=1`. Full table: `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Invocation`.
 

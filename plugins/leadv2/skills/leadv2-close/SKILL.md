@@ -39,7 +39,22 @@ Read docs/handoff/<task-id>/costs.yaml
 
 If file exists: sum all `cost_usd` fields → `total_cost_usd`. If file missing or unreadable: `total_cost_usd = null` (log warn, continue).
 
-### Step 1b. Graph-reflect footprint (after commit, before lead-reflect)
+### Step 1b. Scorecard write (FLYWHEEL-01 / G1d — opt-in behind LEADV2_SCORECARD_ON_CLOSE)
+
+```bash
+# Guard: absent LEADV2_SCORECARD_ON_CLOSE leaves existing flow byte-identical (D6)
+if [ "${LEADV2_SCORECARD_ON_CLOSE:-0}" = "1" ]; then
+  bash "$(bash .claude/scripts/lv2 --path leadv2-scorecard-write.sh)" \
+    --task-id "$LEADV2_TASK_ID" \
+  || true  # non-blocking: scorecard failure never gates Close
+fi
+```
+
+Called after `docs/leadv2/closed/<task_id>.yaml` is written (Step 1) and costs.yaml is flushed.
+Appends one JSONL row to `docs/leadv2/scorecard.jsonl`. Idempotent: safe to call multiple times.
+Schema validated against `contracts/leadv2-scorecard.schema.json`; exit 4 on unknown key.
+
+### Step 1c. Graph-reflect footprint (after commit, before lead-reflect)
 
 Invoke `leadv2-graph-reflect` skill:
 - Pass `start_sha` from `docs/handoff/<task-id>/context.yaml` (`git.start_sha`)
@@ -49,7 +64,7 @@ Capture the returned `graph_footprint:` block. Store as `$GRAPH_FOOTPRINT` for i
 
 If skill fails or MCP is unavailable: set `$GRAPH_FOOTPRINT = null` and continue — do not block Close.
 
-### Step 1c. Learning aggregation (P1-9, 2026-06-09)
+### Step 1d. Learning aggregation (P1-9, 2026-06-09)
 
 If `LEADV2_LEARN_ON_CLOSE=1` AND (task class >= Standard OR tasks closed since last learn-run > 5):
 
@@ -195,29 +210,44 @@ Immune entry schema: `id` (sha1[:12]), `task_origin`, `keywords`, `summary`, `ac
 
 Pattern reference: `skills/leadv2-correction-detect/SKILL.md` (immune routing updated 2026-06-05).
 
-### Step 6. For Heavy tasks (or any task that touched runtime) — schedule outcome-watch at +48h
+### Step 6. Schedule outcome-watch at close (Heavy always; Standard+Light via LEADV2_SOAK_EVERY_DEPLOY)
 
 Check `classification.class` from `docs/handoff/<task-id>/context.yaml`.
 
-If class is `Heavy` or `Standard` (touched runtime files):
+**Rule (C2.3/D1/D5):**
+- `Heavy` class: always schedule outcome-watch (existing behavior — no flag required).
+- `Standard` class: schedule ONLY when `LEADV2_SOAK_EVERY_DEPLOY=1` is set.
+- `Light` class: never schedule (soak-class-delays.yaml has skip: true for Light).
 
 **Run this concrete shell command** — do not use CronCreate (session-scoped, unreliable):
 
 ```bash
-bash .claude/scripts/lv2 leadv2-outcome-watch.sh \
-  --schedule \
-  --task-id "<task-id>" \
-  --delay-hours 48
+TASK_CLASS=$(python3 -c "
+import yaml, sys
+ctx = yaml.safe_load(open('docs/handoff/${LEADV2_TASK_ID}/context.yaml')) or {}
+cls = ctx.get('class') or (ctx.get('classification') or {}).get('class', 'Standard')
+print(cls)
+" 2>/dev/null || echo "Standard")
+
+# Heavy always schedules; Standard only if LEADV2_SOAK_EVERY_DEPLOY=1
+if [[ "$TASK_CLASS" == "Heavy" ]] || { [[ "$TASK_CLASS" == "Standard" ]] && [[ "${LEADV2_SOAK_EVERY_DEPLOY:-0}" == "1" ]]; }; then
+  bash .claude/scripts/lv2 leadv2-outcome-watch.sh \
+    --schedule \
+    --task-id "${LEADV2_TASK_ID}" \
+    --deploy-class "${TASK_CLASS}"
+fi
 ```
 
-This writes `docs/leadv2/watches/<task-id>.yaml` with `status: pending` and `due_at: <now+48h>`.
+This writes `docs/leadv2/watches/<task-id>.yaml` with `status: pending`, `due_at`, `deploy_class`,
+`delay_hours`, and `min_hours_before_check` populated from `config/soak-class-delays.yaml` (D22).
 The sweep runs automatically at every SessionStart via `leadv2-stale-sweeper.sh`, which calls
 `leadv2-outcome-watch.sh --sweep`. When due, the sweep executes `.claude/leadv2-overrides/outcome-watch.sh`
-(if present) and flips `outcome_watch: pending` → `stable|regression` in `LEAD_V2_STATE.md` history.
+(if present) and flips `outcome_watch: pending` → `stable|regression|inconclusive` in `LEAD_V2_STATE.md`.
+
+**Flag-absent invariant (D1):** LEADV2_SOAK_EVERY_DEPLOY unset → Heavy-only (existing behavior).
 
 Note: `leadv2-phase8-close.sh` (the shell executor for Phase 8) already calls this automatically for
-Heavy/Standard tasks. This step is for lead-driven (interactive) close paths that invoke the skill
-directly without going through the shell script.
+Heavy tasks. This step covers the interactive close path and extends it for Standard tasks.
 
 ### Step 7. Session-hygiene suggestion (cost discipline)
 

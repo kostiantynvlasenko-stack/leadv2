@@ -5,8 +5,12 @@
 # Syncs to:
 #   (a) ~/.claude/plugins/cache/leadv2-local/leadv2/0.1.0/  (full plugin cache)
 #   (b) ~/.claude/leadv2-shared/                            (scripts + contracts only)
-#   (c) <project>/.claude/scripts/                          (persona-engine runtime)
-#   (d) <project>/.claude/contracts/                        (schema files for runtime)
+#   (c) <project>/.claude/scripts/                          (per-repo runtimes from cross-repo-paths.yaml)
+#   (d) <project>/.claude/contracts/                        (schema files per-repo)
+#
+# (c)/(d): reads project roots from ~/.claude/leadv2-shared/cross-repo-paths.yaml.
+# Missing root on disk → WARN + skip (never silent).
+# --project-root overrides to a single root (bypasses yaml iteration).
 #
 # Also calls leadv2-workflows-sync.sh to sync JS workflow files to ~/.claude/workflows/.
 #
@@ -14,7 +18,7 @@
 #   bash leadv2-plugin-sync.sh [--dry-run] [--project-root <path>]
 #
 # --dry-run      Print what would change; no writes.
-# --project-root Override project root for (c)/(d) targets (default: auto-detect).
+# --project-root Sync (c)/(d) to this single root only (skips yaml iteration).
 #
 # Idempotent: safe to re-run after any plugin edit.
 
@@ -35,39 +39,98 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-log()    { printf -- '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
-log_ok() { printf -- '[%s] OK: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
-
-# ── Resolve project root for (c)/(d) targets ─────────────────────────────────
-if [[ -n "${PROJECT_ROOT_OVERRIDE}" ]]; then
-  LEADV2_PROJECT_ROOT="${PROJECT_ROOT_OVERRIDE}"
-elif [[ -n "${LEADV2_PROJECT_ROOT:-}" ]]; then
-  : # already set
-elif [[ -n "${PROJECT_ROOT:-}" ]]; then
-  LEADV2_PROJECT_ROOT="${PROJECT_ROOT}"
-else
-  LEADV2_PROJECT_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null || true)"
-  if [[ -z "${LEADV2_PROJECT_ROOT}" ]]; then
-    log "WARN: cannot resolve project root; skipping (c)/(d) targets"
-  fi
-fi
+log()      { printf -- '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
+log_ok()   { printf -- '[%s] OK: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
+log_warn() { printf -- '[%s] WARN: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 
 # ── Target directories ────────────────────────────────────────────────────────
 CACHE_TARGET="${HOME}/.claude/plugins/cache/leadv2-local/leadv2/0.1.0"
 SHARED_TARGET="${HOME}/.claude/leadv2-shared"
-PROJ_SCRIPTS_TARGET="${LEADV2_PROJECT_ROOT:-}/.claude/scripts"
-PROJ_CONTRACTS_TARGET="${LEADV2_PROJECT_ROOT:-}/.claude/contracts"
+CROSS_REPO_CONFIG="${HOME}/.claude/leadv2-shared/cross-repo-paths.yaml"
 
+# --checksum only (no -u): mtime skew must never cause silent content divergence.
 _rsync_or_dry() {
   local label="$1" src="$2" dst="$3"
   shift 3
   local extra_flags=("$@")
   if [[ "${DRY_RUN}" == "true" ]]; then
-    log "DRY_RUN [${label}]: rsync -u --checksum ${extra_flags[*]} ${src} ${dst}"
-    rsync -u --checksum --dry-run "${extra_flags[@]}" "${src}" "${dst}" 2>&1 | grep -E '^>' | head -20 || true
+    log "DRY_RUN [${label}]: rsync --checksum ${extra_flags[*]} ${src} ${dst}"
+    rsync --checksum --dry-run "${extra_flags[@]}" "${src}" "${dst}" 2>&1 | python3 -c "
+import sys
+for l in sys.stdin:
+    if l.startswith('>') or l.startswith('<') or l.startswith('*'):
+        print(l, end='')
+" | head -20 || true
   else
     mkdir -p "${dst}"
-    rsync -u --checksum "${extra_flags[@]}" "${src}" "${dst}" && log_ok "[${label}] synced ${src} -> ${dst}"
+    rsync --checksum "${extra_flags[@]}" "${src}" "${dst}" && log_ok "[${label}] synced ${src} -> ${dst}"
+  fi
+}
+
+# ── Resolve list of (c)/(d) project roots ────────────────────────────────────
+_resolve_project_roots() {
+  if [[ -n "${PROJECT_ROOT_OVERRIDE}" ]]; then
+    printf -- '%s\n' "${PROJECT_ROOT_OVERRIDE}"
+    return
+  fi
+  if [[ -n "${LEADV2_PROJECT_ROOT:-}" ]]; then
+    printf -- '%s\n' "${LEADV2_PROJECT_ROOT}"
+    return
+  fi
+  if [[ ! -f "${CROSS_REPO_CONFIG}" ]]; then
+    log_warn "(c)/(d): cross-repo-paths.yaml not found at ${CROSS_REPO_CONFIG}; skipping project sync"
+    return
+  fi
+  # Parse path values from YAML with python3 (no yq dependency).
+  python3 - "${CROSS_REPO_CONFIG}" <<'PYEOF'
+import sys, yaml, os
+config = yaml.safe_load(open(sys.argv[1])) or {}
+repos = config.get("repos") or {}
+for name, entry in repos.items():
+    raw = (entry or {}).get("path", "")
+    expanded = os.path.expanduser(raw)
+    if expanded:
+        print(expanded)
+PYEOF
+}
+
+# ── Helper: sync (c)/(d) for a single project root ───────────────────────────
+_sync_project_root() {
+  local root="$1"
+  if [[ ! -d "${root}" ]]; then
+    log_warn "(c)/(d): project root not found on disk, skipping: ${root}"
+    return 0
+  fi
+  local proj_scripts="${root}/.claude/scripts"
+  local proj_contracts="${root}/.claude/contracts"
+
+  log "Syncing -> project scripts (c): ${proj_scripts}"
+  local src="${PLUGIN_ROOT}/scripts/"
+  if [[ -d "${src}" ]]; then
+    _rsync_or_dry "project/scripts[${root##*/}]" "${src}" "${proj_scripts}" --recursive
+  fi
+
+  log "Syncing -> project contracts (d): ${proj_contracts}"
+  for schema_file in leadv2-scorecard.schema.json leadv2-shadow-proposal.schema.json; do
+    local schema_src="${PLUGIN_ROOT}/contracts/${schema_file}"
+    if [[ -f "${schema_src}" ]]; then
+      if [[ "${DRY_RUN}" == "true" ]]; then
+        log "DRY_RUN [project/contracts]: cp ${schema_src} ${proj_contracts}/${schema_file}"
+      else
+        mkdir -p "${proj_contracts}"
+        cp -p "${schema_src}" "${proj_contracts}/${schema_file}"
+        log_ok "[project/contracts] copied ${schema_file} -> ${root##*/}"
+      fi
+    else
+      log_warn "source not found, skipping: ${schema_src}"
+    fi
+  done
+
+  # Ensure eval-harness is present (also covered by scripts/ rsync above, explicit for clarity)
+  local harness_src="${PLUGIN_ROOT}/scripts/leadv2-eval-harness.sh"
+  if [[ -f "${harness_src}" ]] && [[ ! "${DRY_RUN}" == "true" ]]; then
+    mkdir -p "${proj_scripts}"
+    cp -p "${harness_src}" "${proj_scripts}/leadv2-eval-harness.sh"
   fi
 }
 
@@ -75,7 +138,7 @@ changed_summary=()
 
 # ── (a) Plugin cache ──────────────────────────────────────────────────────────
 log "Syncing -> plugin cache (a): ${CACHE_TARGET}"
-for subdir in scripts contracts workflows hooks; do
+for subdir in scripts contracts workflows hooks config; do
   src="${PLUGIN_ROOT}/${subdir}/"
   dst="${CACHE_TARGET}/${subdir}"
   if [[ -d "${src}" ]]; then
@@ -95,47 +158,13 @@ for subdir in scripts contracts; do
   fi
 done
 
-# ── (c) Project .claude/scripts (persona-engine runtime) ─────────────────────
-if [[ -n "${LEADV2_PROJECT_ROOT:-}" ]]; then
-  log "Syncing -> project scripts (c): ${PROJ_SCRIPTS_TARGET}"
-  src="${PLUGIN_ROOT}/scripts/"
-  if [[ -d "${src}" ]]; then
-    _rsync_or_dry "project/scripts" "${src}" "${PROJ_SCRIPTS_TARGET}" --recursive
-    changed_summary+=("project/scripts")
-  fi
-
-  # ── (d) Project .claude/contracts (schema files) ─────────────────────────
-  log "Syncing -> project contracts (d): ${PROJ_CONTRACTS_TARGET}"
-  for schema_file in leadv2-scorecard.schema.json leadv2-shadow-proposal.schema.json; do
-    schema_src="${PLUGIN_ROOT}/contracts/${schema_file}"
-    if [[ -f "${schema_src}" ]]; then
-      if [[ "${DRY_RUN}" == "true" ]]; then
-        log "DRY_RUN [project/contracts]: cp ${schema_src} ${PROJ_CONTRACTS_TARGET}/${schema_file}"
-      else
-        mkdir -p "${PROJ_CONTRACTS_TARGET}"
-        cp -p "${schema_src}" "${PROJ_CONTRACTS_TARGET}/${schema_file}"
-        log_ok "[project/contracts] copied ${schema_file}"
-      fi
-      changed_summary+=("project/contracts/${schema_file}")
-    else
-      log "WARN: source not found, skipping: ${schema_src}"
-    fi
-  done
-
-  # eval-harness lives in scripts/ — also copy to .claude/scripts (already done above via rsync)
-  # but explicitly ensure it is present:
-  harness_src="${PLUGIN_ROOT}/scripts/leadv2-eval-harness.sh"
-  if [[ -f "${harness_src}" ]]; then
-    if [[ "${DRY_RUN}" == "true" ]]; then
-      log "DRY_RUN [project/scripts]: ensure leadv2-eval-harness.sh present"
-    else
-      mkdir -p "${PROJ_SCRIPTS_TARGET}"
-      cp -p "${harness_src}" "${PROJ_SCRIPTS_TARGET}/leadv2-eval-harness.sh"
-      log_ok "[project/scripts] ensured leadv2-eval-harness.sh"
-    fi
-    changed_summary+=("project/scripts/leadv2-eval-harness.sh")
-  fi
-fi
+# ── (c)/(d) Per-project .claude/scripts + .claude/contracts ──────────────────
+# Iterate all roots from cross-repo-paths.yaml (or single --project-root override).
+while IFS= read -r proj_root; do
+  [[ -z "${proj_root}" ]] && continue
+  _sync_project_root "${proj_root}"
+  changed_summary+=("project[${proj_root##*/}]")
+done < <(_resolve_project_roots)
 
 # ── Subsume: sync workflow JS files ──────────────────────────────────────────
 WORKFLOWS_SYNC="${SCRIPT_DIR}/leadv2-workflows-sync.sh"

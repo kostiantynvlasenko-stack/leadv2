@@ -111,15 +111,19 @@ export LEADV2_PARENT_SESSION_ID="$CHILD_SID"
 
 # ── Build spawn command array (safe quoting via printf %q) ────────────────────
 # Base flags — always present
+# Budget: LEADV2_SPAWN_BUDGET may be set by parallel dispatch (D17) per class.
+# Default = 5 (Standard). Light = 3, Heavy = 12 (set by caller).
+_spawn_budget="${LEADV2_SPAWN_BUDGET:-5}"
 _spawn_cmd=(
   claude -p "/leadv2 next"
   --output-format text
   --max-turns 50
-  --max-budget-usd 5
+  --max-budget-usd "$_spawn_budget"
 )
 
-# Permission mode: use env override if set, else fall back to acceptEdits
-_perm_mode="${LEADV2_SPAWN_PERMISSION_MODE:-acceptEdits}"
+# Permission mode: use env override if set, else fall back to bypassPermissions (D8)
+# bypassPermissions ensures unattended children never stall on a permission prompt.
+_perm_mode="${LEADV2_SPAWN_PERMISSION_MODE:-bypassPermissions}"
 _spawn_cmd+=(--permission-mode "$_perm_mode")
 
 # Optional flags — appended only when the corresponding env var is non-empty

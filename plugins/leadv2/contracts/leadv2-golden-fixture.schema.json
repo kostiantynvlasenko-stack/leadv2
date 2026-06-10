@@ -1,0 +1,136 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "leadv2-golden-fixture.schema.json",
+  "title": "LeadV2 Golden Fixture",
+  "description": "Schema for golden regression fixture files used by leadv2-eval-harness.sh. All nested objects use additionalProperties:false to prevent fixture drift.",
+  "type": "object",
+  "required": [
+    "task_id",
+    "task_class",
+    "input_context",
+    "expected_phase_outputs",
+    "must_not_side_effect",
+    "is_canary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique fixture identifier \u2014 used as the join key in harness output and stub lookup."
+    },
+    "task_class": {
+      "type": "string",
+      "enum": [
+        "Light",
+        "Standard",
+        "Heavy"
+      ],
+      "description": "Task class that this fixture exercises."
+    },
+    "input_context": {
+      "type": "object",
+      "description": "Simulated context.yaml-like input fed to the harness. Free-form keys are permitted here only \u2014 this is the input side.",
+      "additionalProperties": true
+    },
+    "expected_phase_outputs": {
+      "type": "array",
+      "description": "Ordered list of per-phase assertions to evaluate.",
+      "items": {
+        "type": "object",
+        "required": [
+          "phase",
+          "assertions"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "phase": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8,
+            "description": "LeadV2 phase number (1-8)."
+          },
+          "assertions": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Closed-vocab assertions for this phase.",
+            "items": {
+              "type": "object",
+              "required": [
+                "field",
+                "op",
+                "value"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Dotted-path field in the phase output."
+                },
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "eq",
+                    "neq",
+                    "gt",
+                    "lt",
+                    "gte",
+                    "lte",
+                    "contains",
+                    "not_contains",
+                    "exists",
+                    "not_exists",
+                    "regex"
+                  ],
+                  "description": "Closed-vocab comparison operator."
+                },
+                "value": {
+                  "description": "Expected value for the assertion.",
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "must_not_side_effect": {
+      "type": "boolean",
+      "description": "When true, harness asserts no file write lands outside docs/leadv2/ during replay."
+    },
+    "is_canary": {
+      "type": "boolean",
+      "description": "When true, this fixture is a canary that must pass before any other fixture runs."
+    },
+    "stub_dir": {
+      "type": "string",
+      "description": "Optional relative path to pre-recorded agent response stubs. Defaults to golden/stubs/<task_id>/.",
+      "default": ""
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of what this fixture tests."
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Optional tags for fixture categorization."
+    }
+  }
+}

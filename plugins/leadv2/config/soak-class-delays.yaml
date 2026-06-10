@@ -1,0 +1,19 @@
+# soak-class-delays.yaml — canonical soak watch timing per task class.
+# D22: named constants only; no inline literals in scripts.
+# Fields per class:
+#   delay_hours           — hours after close before watch is "due" for eval
+#   min_hours_before_check — minimum elapsed hours before sweep will evaluate the watch
+#   skip                  — if true, no soak watch is scheduled for this class
+
+Standard:
+  delay_hours: 6
+  min_hours_before_check: 6
+
+Heavy:
+  delay_hours: 48
+  min_hours_before_check: 24
+
+Light:
+  delay_hours: 0
+  min_hours_before_check: 0
+  skip: true

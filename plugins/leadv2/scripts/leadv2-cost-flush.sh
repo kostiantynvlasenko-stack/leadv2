@@ -19,6 +19,12 @@ readonly PRICE_OPUS_INPUT=15
 readonly PRICE_OPUS_OUTPUT=75
 readonly PRICE_SONNET_INPUT=3
 readonly PRICE_SONNET_OUTPUT=15
+# G1c: Haiku and Fable pricing tiers (resolves D8 / C-low-1)
+readonly PRICE_HAIKU_INPUT=0.80
+readonly PRICE_HAIKU_OUTPUT=4.00
+# Fable 5 (claude-fable-5) — priced at Sonnet tier until official pricing confirmed
+readonly PRICE_FABLE_INPUT=3
+readonly PRICE_FABLE_OUTPUT=15
 
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
@@ -59,8 +65,10 @@ import sys, json, math
 from datetime import datetime, timezone
 
 stream_file, model, role, session_id, start_epoch = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], float(sys.argv[5])
-price_opus_in, price_opus_out = float(sys.argv[6]), float(sys.argv[7])
-price_son_in,  price_son_out  = float(sys.argv[8]), float(sys.argv[9])
+price_opus_in,  price_opus_out  = float(sys.argv[6]),  float(sys.argv[7])
+price_son_in,   price_son_out   = float(sys.argv[8]),  float(sys.argv[9])
+price_haiku_in, price_haiku_out = float(sys.argv[10]), float(sys.argv[11])
+price_fable_in, price_fable_out = float(sys.argv[12]), float(sys.argv[13])
 
 total_in = total_out = 0
 try:
@@ -85,7 +93,14 @@ except Exception as e:
     sys.exit(1)
 
 m = model.lower()
-p_in, p_out = (price_opus_in, price_opus_out) if "opus" in m else (price_son_in, price_son_out)
+if "opus" in m:
+    p_in, p_out = price_opus_in, price_opus_out
+elif "haiku" in m:
+    p_in, p_out = price_haiku_in, price_haiku_out
+elif "fable" in m:
+    p_in, p_out = price_fable_in, price_fable_out
+else:
+    p_in, p_out = price_son_in, price_son_out
 cost = (total_in * p_in + total_out * p_out) / 1_000_000
 duration = int(math.floor(datetime.now(timezone.utc).timestamp() - start_epoch))
 ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -95,8 +110,10 @@ PYEOF
   local result
   result=$(python3 "$py_helper" \
     "$stream_file" "$model" "$role" "$session_id" "$start_epoch" \
-    "$PRICE_OPUS_INPUT" "$PRICE_OPUS_OUTPUT" \
-    "$PRICE_SONNET_INPUT" "$PRICE_SONNET_OUTPUT" 2>/dev/null) || result="PARSE_ERROR"
+    "$PRICE_OPUS_INPUT"   "$PRICE_OPUS_OUTPUT" \
+    "$PRICE_SONNET_INPUT" "$PRICE_SONNET_OUTPUT" \
+    "$PRICE_HAIKU_INPUT"  "$PRICE_HAIKU_OUTPUT" \
+    "$PRICE_FABLE_INPUT"  "$PRICE_FABLE_OUTPUT" 2>/dev/null) || result="PARSE_ERROR"
 
   if [[ "$result" == "PARSE_ERROR"* ]] || [[ -z "$result" ]]; then
     log "WARN: cost parse failed for $role — marker kept for retry"
@@ -170,6 +187,22 @@ if [[ $# -ge 1 ]]; then
   TASK_ID="$(basename "$TARGET_DIR")"
 
   # Sum actual_usd from costs.yaml (or 0 if missing/empty)
+  # G1c: read cost_estimate.usd from context.yaml for error_usd computation (D8)
+  CONTEXT_YAML_PATH="${LEADV2_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/docs/handoff/${TASK_ID}/context.yaml"
+  ESTIMATE_USD="null"
+  ERROR_USD="null"
+  if [[ -f "$CONTEXT_YAML_PATH" ]]; then
+    ESTIMATE_USD=$(python3 -c "
+import sys, yaml
+try:
+    d = yaml.safe_load(open(sys.argv[1])) or {}
+    est = (d.get('cost_estimate') or {}).get('usd')
+    print(float(est) if est is not None else 'null')
+except Exception:
+    print('null')
+" "$CONTEXT_YAML_PATH" 2>/dev/null || printf -- 'null')
+  fi
+
   ACTUAL_USD="0.0"
   NOTE_FIELD=""
   if [[ -f "$COSTS_FILE" ]]; then
@@ -199,8 +232,12 @@ PYEOF
       {
         printf -- '\n- task_id: %s\n' "$TASK_ID"
         printf -- '  actual_usd: %s\n' "$ACTUAL_USD"
-        printf -- '  estimated_usd: null\n'
-        printf -- '  error_usd: null\n'
+        # G1c: use real estimate + compute error_usd (D8)
+        printf -- '  estimated_usd: %s\n' "$ESTIMATE_USD"
+        if [[ "$ESTIMATE_USD" != "null" && "$ACTUAL_USD" != "0.0" ]]; then
+          ERROR_USD=$(python3 -c "print(round(${ACTUAL_USD} - ${ESTIMATE_USD}, 6))" 2>/dev/null || printf -- 'null')
+        fi
+        printf -- '  error_usd: %s\n' "$ERROR_USD"
         printf -- '  timestamp: '"'"'%s'"'"'\n' "$TS"
         printf -- '  source: cost_aggregator\n'
         if [[ -n "${NOTE_FIELD:-}" ]]; then

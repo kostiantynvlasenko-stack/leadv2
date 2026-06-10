@@ -94,10 +94,17 @@ def write_closed_sentinel(iid, outcome):
         os.replace(tmp, p)
 
 def deps_done(item, by_id):
-    """Return True if all depends_on items are in a terminal state or absent."""
+    """Return True if all depends_on items are in a terminal state.
+    C1.5/D10: dep_id not found in by_id is treated as dep_missing (not satisfied).
+    Returns False when any dep is missing or not terminal, preventing phantom claim.
+    """
     for d in (item.get("context") or {}).get("depends_on") or []:
         dep = by_id.get(str(d))
-        if dep is not None and dep.get("status") not in TERMINAL:
+        if dep is None:
+            # dep_id not found => dep_missing; block claim (D10)
+            item.setdefault("_dep_missing", []).append(str(d))
+            return False
+        if dep.get("status") not in TERMINAL:
             return False
     return True
 
@@ -126,7 +133,12 @@ if op == "top_n":
             if lane == "human-needed": continue
             if str(it.get("status","")) != "pending": continue
             if (it.get("claim") or {}).get("by") is not None: continue
-            if not deps_done(it, by_id): continue
+            if not deps_done(it, by_id):
+                # C1.5/D10: surface dep_missing in dry-run top-N output
+                missing = it.pop("_dep_missing", [])
+                if missing:
+                    print(f"[dep_missing] {it.get('id','')} blocked: dep(s) not found: {','.join(missing)}", file=sys.stderr)
+                continue
             candidates.append((LANE_RANK.get(lane,99),
                                PRIORITY_RANK.get(str(it.get("priority","medium")),4),
                                parse_dt(it.get("created_at","")), str(it.get("id","")), lane, it))
@@ -176,6 +188,23 @@ elif op == "claim":
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN); fd.close()
 
+elif op == "unclaim":
+    # C1.4: release a collision-blocked task back to pending without incrementing attempts.
+    # Atomically clears claim field and resets status to pending.
+    iid = args[0]
+    fd = acquire_lock()
+    try:
+        items = load_tasks()
+        for it in items:
+            if str(it.get("id","")) != iid: continue
+            it["status"] = "pending"
+            it["claim"]  = {"by": None, "lease_expires": None}
+            it["last_error"] = None
+            save_tasks(items); sys.exit(0)
+        print(f"[tasks-lib] {iid} not found for unclaim", file=sys.stderr); sys.exit(1)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN); fd.close()
+
 elif op == "release":
     iid, outcome, error_msg = args[0], args[1], args[2]
     fd = acquire_lock()
@@ -209,8 +238,13 @@ elif op == "release":
         fcntl.flock(fd, fcntl.LOCK_UN); fd.close()
 
 elif op == "add":
+    # args: iid lane priority title origin note max_att [files_hint_json] [depends_on_json] [conflicts_with_json]
     iid, lane, priority, title, origin, note, max_att = (
         args[0], args[1], args[2], args[3], args[4], args[5], int(args[6]))
+    import json as _json
+    files_hint     = _json.loads(args[7]) if len(args) > 7 and args[7] else []
+    depends_on     = _json.loads(args[8]) if len(args) > 8 and args[8] else []
+    conflicts_with = _json.loads(args[9]) if len(args) > 9 and args[9] else []
     fd = acquire_lock()
     try:
         items = load_tasks()
@@ -221,7 +255,17 @@ elif op == "add":
                       "created_at":now_iso(),"closed_at":None,"origin":origin or None,
                       "claim":{"by":None,"lease_expires":None},"attempts":0,"max_attempts":max_att,
                       "last_error":None,"reject_reason":None,"summary_one_line":None,
-                      "context":{"files":[],"depends_on":[],"note":note or None},"notes":None})
+                      "context":{
+                          # files: legacy list of file paths (not globs) — kept for backward compat
+                          "files":[],
+                          # files_hint: list of repo-relative glob patterns for collision detection (C1.1/D14)
+                          "files_hint": files_hint or [],
+                          # depends_on: list of task IDs that must be in terminal state before this task claims (completion dependency)
+                          "depends_on": depends_on or [],
+                          # conflicts_with: list of task IDs that must NOT be active simultaneously (active-session mutex)
+                          "conflicts_with": conflicts_with or [],
+                          "note":note or None
+                      },"notes":None})
         save_tasks(items)
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN); fd.close()
@@ -304,6 +348,13 @@ leadv2_tasks_list_status() {
   _tasks_dispatch list_status "$status"
 }
 
+leadv2_tasks_unclaim() {
+  # C1.4: Atomically release a collision-blocked task back to pending.
+  # Does not increment attempt counter -- task is eligible for re-claim next cycle.
+  local item_id="${1:?leadv2_tasks_unclaim requires ID}"
+  _tasks_dispatch unclaim "$item_id"
+}
+
 leadv2_tasks_claim() {
   local item_id="${1:?leadv2_tasks_claim requires ID}"
   local session=""
@@ -337,13 +388,19 @@ leadv2_tasks_add() {
   local item_id="${1:?leadv2_tasks_add requires ID}"
   local lane="${2:?leadv2_tasks_add requires LANE}"
   local priority="${3:?leadv2_tasks_add requires PRIORITY}"
-  local title="" origin="" note=""
+  # C1.1: new optional fields -- files_hint (JSON array of glob patterns),
+  # depends_on (JSON array of task IDs), conflicts_with (JSON array of task IDs).
+  # Absent = empty list (backward-compat).
+  local title="" origin="" note="" files_hint="" depends_on="" conflicts_with=""
   shift 3
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --title)  title="$2";  shift 2 ;;
-      --origin) origin="$2"; shift 2 ;;
-      --note)   note="$2";   shift 2 ;;
+      --title)          title="$2";          shift 2 ;;
+      --origin)         origin="$2";         shift 2 ;;
+      --note)           note="$2";           shift 2 ;;
+      --files-hint)     files_hint="$2";     shift 2 ;;
+      --depends-on)     depends_on="$2";     shift 2 ;;
+      --conflicts-with) conflicts_with="$2"; shift 2 ;;
       *) echo "[tasks-lib] unknown arg: $1" >&2; return 1 ;;
     esac
   done
@@ -356,7 +413,7 @@ leadv2_tasks_add() {
     human-needed)  max_att=1 ;;
     *)             max_att=3 ;;
   esac
-  _tasks_dispatch add "$item_id" "$lane" "$priority" "$title" "${origin:-}" "${note:-}" "$max_att"
+  _tasks_dispatch add "$item_id" "$lane" "$priority" "$title" "${origin:-}" "${note:-}" "$max_att"     "${files_hint:-}" "${depends_on:-}" "${conflicts_with:-}"
 }
 
 leadv2_tasks_update() {

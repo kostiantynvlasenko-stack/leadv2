@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# leadv2-scorecard-write.sh — append or patch a scorecard row to docs/leadv2/scorecard.jsonl.
+#
+# MODES:
+#   (default) — build and append a new row from context.yaml + costs.yaml + closed YAML.
+#   --dry-run — print JSON to stdout without appending (unit-test friendly).
+#   --patch    — merge patch fields by task_id (append-only patch record, flock protected).
+#
+# USAGE:
+#   bash leadv2-scorecard-write.sh --task-id PO-042
+#   bash leadv2-scorecard-write.sh --task-id PO-042 --dry-run
+#   bash leadv2-scorecard-write.sh --task-id PO-042 --patch --post-deploy-regression 1
+#
+# EXIT CODES:
+#   0  success
+#   1  required args missing, file not found, or I/O error
+#   4  schema violation — unknown key or enum value mismatch
+#
+# ENV:
+#   LEADV2_PROJECT_ROOT       — required; repo root
+#   LEADV2_SCORECARD_ON_CLOSE — must be "1" to enable append; absent = skip (D6)
+#   LEADV2_FOUNDER_INTERVENTIONS — integer override for founder_interventions_count (D9)
+#
+# DECISIONS: D1 D2 D4 D6 D8 D9; R4 flock
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+log()       { printf -- '[%s] leadv2-scorecard-write: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
+log_error() { log "ERROR: $*"; }
+
+: "${LEADV2_PROJECT_ROOT:=$(git -C "$(dirname "$SCRIPT_DIR")" rev-parse --show-toplevel 2>/dev/null || pwd)}"
+
+MODE="append"
+TASK_ID=""
+DRY_RUN=0
+PATCH_POST_DEPLOY_REGRESSION=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task-id)                TASK_ID="$2"; shift 2 ;;
+    --dry-run)                DRY_RUN=1; MODE="append"; shift ;;
+    --patch)                  MODE="patch"; shift ;;
+    --post-deploy-regression) PATCH_POST_DEPLOY_REGRESSION="$2"; shift 2 ;;
+    -h|--help)
+      printf -- 'Usage: %s --task-id <id> [--dry-run]\n' "$(basename "$0")" >&2
+      printf -- '       %s --task-id <id> --patch --post-deploy-regression 0|1\n' "$(basename "$0")" >&2
+      exit 0 ;;
+    *) log_error "unknown arg: $1"; exit 1 ;;
+  esac
+done
+
+[[ -z "$TASK_ID" ]] && { log_error "--task-id is required"; exit 1; }
+
+# D6 guard: absent LEADV2_SCORECARD_ON_CLOSE leaves existing flow byte-identical
+if [[ "$MODE" == "append" && "${LEADV2_SCORECARD_ON_CLOSE:-0}" != "1" && "$DRY_RUN" != "1" ]]; then
+  log "LEADV2_SCORECARD_ON_CLOSE not set — skipping scorecard write (D6)"
+  exit 0
+fi
+
+SCORECARD_FILE="${LEADV2_PROJECT_ROOT}/docs/leadv2/scorecard.jsonl"
+SCORECARD_LOCK="${LEADV2_PROJECT_ROOT}/docs/leadv2/.scorecard.lock"
+SCHEMA_FILE="${SCRIPT_DIR}/../contracts/leadv2-scorecard.schema.json"
+HANDOFF_DIR="${LEADV2_PROJECT_ROOT}/docs/handoff/${TASK_ID}"
+CONTEXT_YAML="${HANDOFF_DIR}/context.yaml"
+COSTS_YAML="${HANDOFF_DIR}/costs.yaml"
+CLOSED_YAML="${LEADV2_PROJECT_ROOT}/docs/leadv2/closed/${TASK_ID}.yaml"
+
+# ── PATCH mode ────────────────────────────────────────────────────────────────
+if [[ "$MODE" == "patch" ]]; then
+  [[ -z "$PATCH_POST_DEPLOY_REGRESSION" ]] && { log_error "--patch requires --post-deploy-regression 0|1"; exit 1; }
+  if [[ "$PATCH_POST_DEPLOY_REGRESSION" != "0" && "$PATCH_POST_DEPLOY_REGRESSION" != "1" ]]; then
+    log_error "--post-deploy-regression must be 0 or 1, got: ${PATCH_POST_DEPLOY_REGRESSION}"; exit 4
+  fi
+  PATCH_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  PATCH_JSON="{\"task_id\":\"${TASK_ID}\",\"post_deploy_regression\":${PATCH_POST_DEPLOY_REGRESSION},\"patch_at\":\"${PATCH_AT}\"}"
+  mkdir -p "$(dirname "$SCORECARD_FILE")"
+  (
+    flock -x 9 || { log_error "could not acquire scorecard lock — aborting patch"; exit 1; }
+    printf -- '%s\n' "$PATCH_JSON" >> "$SCORECARD_FILE"
+    log "patch record appended: task_id=${TASK_ID} post_deploy_regression=${PATCH_POST_DEPLOY_REGRESSION}"
+  ) 9>"$SCORECARD_LOCK"
+  exit 0
+fi
+
+# ── APPEND mode ───────────────────────────────────────────────────────────────
+[[ ! -f "$SCHEMA_FILE" ]] && { log_error "schema file not found: ${SCHEMA_FILE}"; exit 1; }
+
+# Build JSON row via Python; exits 4 on schema violation (D2)
+_py_build_row() {
+  local _task_id="$1" _project_root="$2" _context="$3" _costs="$4" _closed="$5" _schema="$6"
+  local _founder_int="${LEADV2_FOUNDER_INTERVENTIONS:-}"
+  python3 -c "
+import sys, json, yaml, hashlib, os, re
+from pathlib import Path
+from datetime import datetime, timezone
+
+task_id      = sys.argv[1]
+project_root = sys.argv[2]
+context_path = sys.argv[3]
+costs_path   = sys.argv[4]
+closed_path  = sys.argv[5]
+schema_path  = sys.argv[6]
+env_fi       = sys.argv[7]
+
+errors = []
+repo = Path(project_root).name
+
+schema        = json.loads(Path(schema_path).read_text())
+allowed_keys  = set(schema['properties'].keys())
+required_keys = set(schema.get('required', []))
+
+def enum_values(n):
+    return schema['properties'].get(n, {}).get('enum')
+
+ctx = {}
+if Path(context_path).exists():
+    try:
+        ctx = yaml.safe_load(Path(context_path).read_text()) or {}
+    except Exception as e:
+        errors.append(f'context.yaml: {e}')
+
+task_class = ctx.get('task_class') or ctx.get('class') or 'Standard'
+if isinstance(ctx.get('classification'), dict):
+    task_class = ctx['classification'].get('class', task_class)
+
+arm = ctx.get('arm', None)
+if arm not in ('A', 'B', None):
+    arm = None
+
+founder_int = 0
+if ctx.get('decision_override'):
+    founder_int += 1
+if env_fi.isdigit():
+    founder_int = int(env_fi)
+
+cost_est_usd = None
+est_block = ctx.get('cost_estimate') or {}
+if isinstance(est_block, dict) and est_block.get('usd') is not None:
+    try:
+        cost_est_usd = float(est_block['usd'])
+    except (TypeError, ValueError):
+        pass
+
+cost_actual = 0.0
+if Path(costs_path).exists():
+    try:
+        rows = yaml.safe_load(Path(costs_path).read_text()) or []
+        if isinstance(rows, list):
+            cost_actual = sum(float(r.get('cost_usd', 0)) for r in rows if isinstance(r, dict))
+    except Exception as e:
+        errors.append(f'costs.yaml: {e}')
+
+closed = {}
+if Path(closed_path).exists():
+    try:
+        closed = yaml.safe_load(Path(closed_path).read_text()) or {}
+    except Exception as e:
+        errors.append(f'closed yaml: {e}')
+
+outcome = closed.get('outcome', '')
+verify_pass = 1 if 'success' in str(outcome).lower() else 0
+
+closed_at = closed.get('closed_at') or datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+if isinstance(closed_at, str) and not closed_at.endswith('Z'):
+    closed_at = closed_at[:19] + 'Z'
+
+error_usd = round(cost_actual - cost_est_usd, 6) if cost_est_usd is not None else None
+
+h = int(hashlib.sha1(task_id.encode()).hexdigest(), 16)
+shadow_arm = 'A' if h % 2 == 0 else 'B'
+
+row = {
+    'task_id': task_id, 'repo': repo, 'task_class': task_class,
+    'arm': arm, 'verify_pass': verify_pass, 'post_deploy_regression': 0,
+    'cost_actual_usd': round(cost_actual, 6), 'cost_estimate_usd': cost_est_usd,
+    'error_usd': error_usd, 'founder_interventions_count': founder_int,
+    'shadow_arm': shadow_arm, 'closed_at': closed_at,
+}
+
+unknown = set(row.keys()) - allowed_keys
+if unknown:
+    print(f'SCHEMA_ERROR:unknown_keys:{chr(44).join(sorted(unknown))}', file=sys.stderr)
+    sys.exit(4)
+
+missing = required_keys - set(row.keys())
+if missing:
+    print(f'SCHEMA_ERROR:missing_required:{chr(44).join(sorted(missing))}', file=sys.stderr)
+    sys.exit(4)
+
+for fn, val in row.items():
+    ev = enum_values(fn)
+    if ev is not None and val not in ev:
+        print(f'SCHEMA_ERROR:enum:{fn}={val!r}', file=sys.stderr)
+        sys.exit(4)
+
+if not re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$', str(closed_at)):
+    print(f'SCHEMA_ERROR:closed_at_fmt:{closed_at!r}', file=sys.stderr)
+    sys.exit(4)
+
+for e in errors:
+    print(f'WARN: {e}', file=sys.stderr)
+
+print(json.dumps(row, separators=(',', ':')))
+" "$_task_id" "$_project_root" "$_context" "$_costs" "$_closed" "$_schema" "$_founder_int"
+}
+
+ROW_JSON=$(_py_build_row \
+  "$TASK_ID" "$LEADV2_PROJECT_ROOT" \
+  "$CONTEXT_YAML" "$COSTS_YAML" "$CLOSED_YAML" "$SCHEMA_FILE" \
+) || {
+  rc=$?
+  [[ $rc -eq 4 ]] && { log_error "Schema violation (exit 4) — row not appended"; exit 4; }
+  log_error "Row build failed (exit ${rc})"; exit 1
+}
+
+# Dry-run: print and exit
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  printf -- '%s\n' "$ROW_JSON"
+  log "dry-run: JSON printed (not appended)"
+  exit 0
+fi
+
+# Idempotency + flock-protected append (D7, R4)
+mkdir -p "$(dirname "$SCORECARD_FILE")"
+
+(
+  flock -x 9 || { log_error "could not acquire scorecard lock — aborting"; exit 1; }
+
+  if [[ -f "$SCORECARD_FILE" ]]; then
+    if python3 -c "
+import sys, json
+tid = sys.argv[1]
+with open(sys.argv[2]) as f:
+    for line in f:
+        line = line.strip()
+        if not line: continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get('task_id') == tid and 'closed_at' in obj:
+            sys.exit(0)
+sys.exit(1)
+" "$TASK_ID" "$SCORECARD_FILE" 2>/dev/null; then
+      log "task_id=${TASK_ID} already in scorecard.jsonl — skipping (idempotent)"
+      exit 0
+    fi
+  fi
+
+  printf -- '%s\n' "$ROW_JSON" >> "$SCORECARD_FILE"
+  log "row appended: task_id=${TASK_ID}"
+) 9>"$SCORECARD_LOCK"

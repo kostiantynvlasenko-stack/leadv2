@@ -1,0 +1,122 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "leadv2-shadow-proposal",
+  "title": "leadv2 Shadow Proposal",
+  "description": "A shadow A/B proposal emitted by leadv2-learn.js and applied by leadv2-shadow-apply.sh. risk_level is REQUIRED and written at proposal-emit time (not derived at apply time). Proposal is in exactly one status state at all times (D10).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "task_id",
+    "kind",
+    "risk_level",
+    "target_file",
+    "before_snapshot",
+    "diff_patch",
+    "arm",
+    "status",
+    "proposed_at",
+    "min_n_per_arm"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable sha1 of (task_id + kind + target_file). Used as flock target and idempotency key.",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "task_id": {
+      "type": "string",
+      "description": "Task that generated this proposal. Always a value, never a key.",
+      "minLength": 1
+    },
+    "kind": {
+      "type": "string",
+      "description": "Proposal type from leadv2-learn.js kind enum.",
+      "enum": [
+        "prompt-tweak",
+        "routing-change",
+        "skill-promote",
+        "negative-memory",
+        "cross-repo-pattern",
+        "other"
+      ]
+    },
+    "risk_level": {
+      "type": "string",
+      "description": "Risk classification encoded at proposal-emit time by learn.js classification rules (not derived at apply time). low = auto shadow-apply eligible; high = founder-gated. Resolves C-critical-2 / D3.",
+      "enum": [
+        "low",
+        "high"
+      ]
+    },
+    "target_file": {
+      "type": "string",
+      "description": "Repo-relative path to the file this proposal modifies.",
+      "minLength": 1
+    },
+    "before_snapshot": {
+      "type": "string",
+      "description": "Path to the .bak snapshot file written before any mutation (docs/leadv2/shadow/snapshots/<sha1>.bak). Written by shadow-apply.sh at promote time. Resolves C-critical-1 / D7.",
+      "minLength": 1
+    },
+    "diff_patch": {
+      "type": "string",
+      "description": "Unified diff string to apply with patch -p1. Written by learn.js at proposal time.",
+      "minLength": 1
+    },
+    "arm": {
+      "type": "string",
+      "description": "Shadow A/B arm this proposal is applied to. Determined by hash(task_id)%2.",
+      "enum": [
+        "A",
+        "B"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "description": "Proposal state machine state. Exactly one state at a time (D10).",
+      "enum": [
+        "pending",
+        "shadow_active",
+        "shadow_complete",
+        "promoted",
+        "reverted",
+        "founder_gated",
+        "blocked_by_eval"
+      ]
+    },
+    "proposed_at": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp when learn.js emitted the proposal.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "min_n_per_arm": {
+      "type": "integer",
+      "description": "Minimum number of tasks per A/B arm required before any promotion decision. Inconclusive (< min_n) = extend, never auto-promote (D4).",
+      "minimum": 1
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable title surfacing cross-repo origin and pattern summary (cross-repo-pattern kind only, D21)."
+    },
+    "repos": {
+      "type": "array",
+      "description": "Source repo names where the cross-repo pattern was detected (cross-repo-pattern kind only, D21).",
+      "items": { "type": "string" }
+    },
+    "keywords": {
+      "type": "array",
+      "description": "Keyword stems matched across repos (cross-repo-pattern kind only, D16).",
+      "items": { "type": "string" }
+    },
+    "representative_summary": {
+      "type": "string",
+      "description": "Representative pattern summary from the highest seen_count member (cross-repo-pattern kind only)."
+    },
+    "members_count": {
+      "type": "integer",
+      "description": "Total number of pattern instances grouped into this cross-repo proposal.",
+      "minimum": 2
+    }
+  }
+}

@@ -6,3 +6,7 @@
 .idea/
 node_modules/
 /tmp/
+# Plugin sync writes canonical scripts here — not source, not committed.
+.claude/scripts/
+.claude/contracts/
+__pycache__/

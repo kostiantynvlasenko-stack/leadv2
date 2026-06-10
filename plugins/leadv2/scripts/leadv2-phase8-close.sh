@@ -241,13 +241,25 @@ fi
 # Writes docs/leadv2/watches/<TASK_ID>.yaml; swept at every SessionStart by stale-sweeper.
 OUTCOME_WATCH_SCRIPT="${SCRIPTS_DIR}/leadv2-outcome-watch.sh"
 if [[ -x "$OUTCOME_WATCH_SCRIPT" ]]; then
+  # C2.3/D1/D5: Heavy always; Standard only when LEADV2_SOAK_EVERY_DEPLOY=1.
+  # --deploy-class drives delay_hours from soak-class-delays.yaml (D22) — no inline literal.
   case "${CLASS}" in
-    Heavy|Standard)
-      log_info "Scheduling outcome-watch for ${TASK_ID} (+48h)"
-      bash "$OUTCOME_WATCH_SCRIPT" --schedule --task-id "$TASK_ID" --delay-hours 48 &
+    Heavy)
+      log_info "Scheduling outcome-watch for ${TASK_ID} class=Heavy (soak-class-delays.yaml delay)"
+      LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" bash "$OUTCOME_WATCH_SCRIPT" \
+        --schedule --task-id "$TASK_ID" --deploy-class Heavy &
+      ;;
+    Standard)
+      if [[ "${LEADV2_SOAK_EVERY_DEPLOY:-0}" == "1" ]]; then
+        log_info "Scheduling outcome-watch for ${TASK_ID} class=Standard (LEADV2_SOAK_EVERY_DEPLOY=1)"
+        LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" bash "$OUTCOME_WATCH_SCRIPT" \
+          --schedule --task-id "$TASK_ID" --deploy-class Standard &
+      else
+        log_info "[skip] outcome-watch not scheduled for class=Standard (LEADV2_SOAK_EVERY_DEPLOY not set)"
+      fi
       ;;
     *)
-      log_info "[skip] outcome-watch not scheduled for class=${CLASS} (Heavy|Standard only)"
+      log_info "[skip] outcome-watch not scheduled for class=${CLASS} (Heavy/Standard only)"
       ;;
   esac
 else

@@ -27,6 +27,18 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# Source leadv2-helpers.sh — provides leadv2_dry_run_guard() (D5 call site 1).
+# Sourced early so the guard is available before any spawn infrastructure runs.
+# Non-fatal if helpers not found (e.g., standalone invocation outside plugin).
+# ---------------------------------------------------------------------------
+_SUBSESSION_HELPERS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-helpers.sh"
+if [[ -f "$_SUBSESSION_HELPERS" ]]; then
+  # shellcheck source=leadv2-helpers.sh
+  source "$_SUBSESSION_HELPERS" 2>/dev/null || true
+fi
+unset _SUBSESSION_HELPERS
+
+# ---------------------------------------------------------------------------
 # Cost telemetry — approximate $ per model (USD per 1M tokens)
 # ---------------------------------------------------------------------------
 readonly PRICE_OPUS_INPUT=15
@@ -679,6 +691,18 @@ _detect_empty_session() {
     } >> "$costs_file" 2>/dev/null || true
   fi
 }
+
+# ---------------------------------------------------------------------------
+# D5 DRY_RUN chokepoint — call site 1 of 4 (claude-subsession.sh spawn).
+# leadv2_dry_run_guard() is sourced from leadv2-helpers.sh above.
+# When LEADV2_DRY_RUN=1: logs "[DRY_RUN] subsession spawn ..." and exits 0
+# without launching any claude CLI process (byte-identical when flag absent, D6).
+# ---------------------------------------------------------------------------
+if declare -f leadv2_dry_run_guard >/dev/null 2>&1; then
+  if leadv2_dry_run_guard "subsession spawn: role=${ROLE} model=${MODEL} task=${TASK_ID}"; then
+    exit 0
+  fi
+fi
 
 if [[ "$WAIT" == "1" ]]; then
   _start_epoch=$(date +%s)
