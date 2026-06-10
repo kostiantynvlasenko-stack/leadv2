@@ -26,6 +26,13 @@ allowed-tools:
 
 # Lead v2 PO Feedback Loop
 
+> **WORKFLOW-FIRST (2026-06-10):** if the `Workflow` tool is available AND `LEADV2_WORKFLOW_ENABLED=1`, run this
+> loop as `Workflow({name:"leadv2-po-feedback-loop", args:{taskId, featureName, preprodUrl, repoDir, taskDir,
+> designBaseline, benchmarks}})` — NOT the hand-rolled phases below. It encodes all 4 phases + LOCAL-9 lessons
+> (baseline-for-comparisons P0 rule, screenshot-required verify for numeric/format, 2-round cap). The manual
+> protocol below is FALLBACK and stays the spec of record. Lead-side regardless of mode: the ≤5-line
+> single-file direct-verify rule (lesson 3) and founder comms between phases.
+
 Closes the loop between "feature deployed" and "feature is great". Codifies the workflow proven on LOCAL-9-collections-sidebar (2026-05-23): one Audit → parallel Build → auto-Verify → optional Iterate produced 27 UX improvements in one session.
 
 ## The 4 phases

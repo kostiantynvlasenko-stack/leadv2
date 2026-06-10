@@ -13,6 +13,11 @@ allowed-tools:
 
 # Audit Cluster
 
+> **WORKFLOW-FIRST (2026-06-10):** if the `Workflow` tool is available AND `LEADV2_WORKFLOW_ENABLED=1`, run as
+> `Workflow({name:"leadv2-audit", args:{mode:"pages", pages:[...], reportDir:"docs/handoff/<task_id>/screenshots"}})`
+> — 3 role-agents per page in parallel, merged punch list, vision-report.md written by the workflow.
+> The manual protocol below is FALLBACK + spec of record.
+
 ## When
 Auditing a set of pages against quality criteria — visual, functional, copy, and state coverage.
 
