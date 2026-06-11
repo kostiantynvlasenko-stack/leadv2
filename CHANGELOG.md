@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unrecognized-entity rule (UE, §6.5)** — subagent protocol now requires a
+  one-probe existence check for any table / column / env flag / script path /
+  library method / API endpoint not present in `context.yaml`, the mission
+  file, or the Graph context block, BEFORE writing code or plans that depend
+  on it. Missing entity → `DELIVERABLE_BLOCKED`, never a near-name substitute.
+  New self-check MD-05. Inspired by the "unrecognized entity → search" trigger
+  in Anthropic's Fable 5 system prompt; targets the recurring
+  UUID-vs-slug-query, library-method-drift, and phantom-table incident classes.
+- **Mid-session hard-bans re-injection** — new PostToolUse hook
+  `leadv2-hardbans-reinject.sh`: every `LEADV2_REINJECT_EVERY` (default 25)
+  lead tool-calls, injects a 5-line digest of the hard bans (no code by lead,
+  silence protocol, background spawns, bounded reads) plus the active
+  task/phase. Lead-only (skips when `agent_type` present), fail-open,
+  `LEADV2_REINJECT_EVERY=0` disables. Counters long-context drift between
+  /compact runs.
+- **Workflow-first orchestration** — Plan / Review / Diverge / Learn /
+  Diagnose / Audit / PO-feedback-loop ship as deterministic `Workflow` scripts
+  (`workflows/leadv2-*.js`) with pinned per-agent models; gated by
+  `LEADV2_WORKFLOW_ENABLED=1`.
+- **Route bandit (BANDIT-01)** — Thompson-sampling model router
+  (`LEADV2_ROUTE_BANDIT=1`) picks within the heuristic allowed-set per
+  phase/step; flag-off is byte-identical to heuristic routing.
+- **Nested-spawn policy + escalation budgets** — subagents may spawn cheap
+  discovery probes (Explore / general-purpose, haiku/sonnet, explicit
+  `model=`); anything stronger requires a lead-issued
+  `escalation-budget.yaml` token, enforced by `leadv2-routing-guard.sh`.
+
 - **Phase 1.5 DIVERGE** — optional divergent-ideation phase before Plan. Spawns
   N isolated frame-shifted generator agents (zero cross-talk), then a separate
   critic scores / clusters / flags traps / deepens top-K, surfacing a

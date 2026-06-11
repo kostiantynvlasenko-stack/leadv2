@@ -2,17 +2,20 @@
 
 > **Autonomous engineering orchestrator for Claude Code.** One plan-approval gate, then autopilot to live verification — across any stack.
 
-`leadv2` turns Claude Code into a self-driving engineer. You give it a task, it plans (Opus architect + Codex 2nd brain optional), builds (Sonnet specialists), reviews (adversarial critic + security auditor), deploys, verifies on live production, and reflects. You step in at exactly one gate — the initial plan — then everything else runs without asking.
+`leadv2` turns Claude Code into a self-driving engineer. You give it a task, it plans (architect + adversarial critic + Codex 2nd brain optional), builds (Sonnet specialists), reviews (critic + security auditor), deploys, verifies on live production, and reflects. You step in at exactly one gate — the initial plan — then everything else runs without asking.
 
 ## Features
 
 - **Phased orchestration** — `intake → classify → plan → build → review → deploy → verify → reflect → close`.
-- **Multi-model routing** — Sonnet for chat/build, Opus for architect/critic via Agent tool, Haiku for discovery via Explore, optional Codex GPT-5.5 as 2nd-brain reviewer.
+- **Multi-model routing** — thin lead brain (Fable 5 / Opus) that decides and dispatches; Sonnet specialists for build/review, Haiku for discovery via Explore, optional Codex GPT-5.5 as 2nd-brain reviewer. A Thompson-sampling route bandit (`LEADV2_ROUTE_BANDIT=1`) learns the best model per phase within a guardrailed allowed-set.
+- **Workflow-first heavy phases** — Plan, Review, Diverge, Learn, Diagnose, Audit, and PO-feedback-loop run as deterministic multi-agent `Workflow` scripts with pinned cheap models; the lead stays a router, not a thinker.
 - **One gate, then autopilot** — only the initial plan needs your approval. Every later step is gated by automated checks (tests, review verdict, security audit, verify-probe) with a circuit breaker on failure.
 - **Self-learning** — captures corrections and successful patterns into `immune memory`, pre-filters future approaches against past failures.
+- **Hallucination guards** — unrecognized-entity rule (any table/flag/script/method name not in the task context must be existence-verified before use, subagent protocol §6.5) + source trust tiers (ground truth vs claim-needs-probe vs noise) so self-reports never override `git diff`.
+- **Anti-drift re-injection** — a PostToolUse hook re-injects the hard-bans digest into the lead every N tool calls, so long sessions don't forget silence protocol and delegation rules.
 - **Multi-stack** — works on any project (Python/Go/TS/Swift) via `.claude/leadv2-overrides/` config files that describe your deploy/verify pipeline.
-- **35+ guard hooks** — bash linting, env audit, schema audit, read deduplication, output capping, token discipline, loop detection, edit guards.
-- **20+ skills** — judge, recovery, iterative recovery, emergency mode, founder-question router, subagent protocol, token discipline.
+- **40+ guard hooks** — bash linting, env audit, schema audit, read deduplication, output capping, token discipline, loop detection, edit guards, nested-spawn routing guard, hard-bans re-inject.
+- **25+ skills** — judge, recovery, iterative recovery, emergency mode, diverge, founder-question router, subagent protocol, token discipline.
 
 ## Quickstart
 
