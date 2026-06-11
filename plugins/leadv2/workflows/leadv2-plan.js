@@ -61,6 +61,17 @@ const concerns = res.flatMap(r => (r && r.concerns) || [])
 const blocking = concerns.filter(c => c.severity === 'critical' || c.severity === 'high')
 log(`Plan: ${arch.decisions.length} decisions, ${arch.plan_steps.length} steps, ${concerns.length} concerns (${blocking.length} blocking)`)
 
+if (architectFailed) {
+  return {
+    task_id: TASK_ID, context_path: CTX,
+    decisions_count: 0, steps_count: 0,
+    blocking_concerns: blocking.length,
+    risk_summary: [],
+    needs_founder_decision: true,
+    architect_failed: true,
+  }
+}
+
 phase('Synthesize')
 await agent(
   `Write a leadv2 context.yaml to ${CTX} merging this plan. ` +
@@ -91,7 +102,7 @@ return {
   decisions_count: arch.decisions.length, steps_count: arch.plan_steps.length,
   blocking_concerns: blocking.length,
   risk_summary: (arch.risks || []).slice(0, 3),
-  needs_founder_decision: blocking.length > 0 || architectFailed,
-  architect_failed: architectFailed || undefined,
+  needs_founder_decision: blocking.length > 0,
+  architect_failed: undefined,
   validation_error: validationError || undefined,
 }
