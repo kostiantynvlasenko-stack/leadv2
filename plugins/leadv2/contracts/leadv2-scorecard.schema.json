@@ -111,6 +111,16 @@
       "type": "string",
       "description": "ISO 8601 UTC timestamp of Phase 8 Close completion.",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "nested_spawns": {
+      "type": "integer",
+      "description": "Count of allow-verdict lines in the task's nested-spawns.log. 0 when log absent. Optional field.",
+      "minimum": 0
+    },
+    "escalations_used": {
+      "type": "integer",
+      "description": "Value of `used` from the task's escalation-budget.yaml at close time. 0 when budget file absent. Optional field.",
+      "minimum": 0
     }
   }
 }

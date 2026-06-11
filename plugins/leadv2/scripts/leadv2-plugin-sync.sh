@@ -138,7 +138,7 @@ changed_summary=()
 
 # ── (a) Plugin cache ──────────────────────────────────────────────────────────
 log "Syncing -> plugin cache (a): ${CACHE_TARGET}"
-for subdir in scripts contracts workflows hooks config; do
+for subdir in scripts contracts workflows hooks config skills commands; do
   src="${PLUGIN_ROOT}/${subdir}/"
   dst="${CACHE_TARGET}/${subdir}"
   if [[ -d "${src}" ]]; then

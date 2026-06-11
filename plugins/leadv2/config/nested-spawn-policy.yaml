@@ -1,0 +1,29 @@
+# nested-spawn-policy.yaml — default nested spawn allowlist for leadv2-routing-guard.sh
+#
+# Structure:
+#   base_allowlist: always-permitted entries regardless of caller_type
+#   per_caller:     optional per-caller overrides (merged on top of base_allowlist)
+#
+# Per-repo override path: <project>/.claude/leadv2-overrides/nested-spawn-policy.yaml
+# If that file exists it wins entirely (per-caller entries are NOT merged with this default).
+# Hook falls back to this file when the per-repo override is absent/unreadable.
+# If BOTH files are absent/unreadable the built-in conservative defaults apply
+# (Explore|general-purpose with haiku|sonnet, max_per_task: 3).
+
+base_allowlist:
+  - subagent_type: explore
+    models: [haiku, sonnet]
+    max_per_task: 3
+  - subagent_type: general-purpose
+    models: [haiku, sonnet]
+    max_per_task: 3
+
+per_caller:
+  developer:
+    - subagent_type: explore
+      models: [haiku]
+      max_per_task: 3
+  architect:
+    - subagent_type: general-purpose
+      models: [sonnet]
+      max_per_task: 2

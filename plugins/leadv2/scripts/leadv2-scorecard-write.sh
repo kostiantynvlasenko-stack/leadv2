@@ -186,12 +186,39 @@ error_usd = round(cost_actual - cost_est_usd, 6) if (cost_actual is not None and
 h = int(hashlib.sha1(task_id.encode()).hexdigest(), 16)
 shadow_arm = 'A' if h % 2 == 0 else 'B'
 
+# Optional: nested_spawns from nested-spawns.log allow-count
+nested_spawns = 0
+ns_log = Path(project_root) / 'docs' / 'leadv2' / 'tasks' / task_id / 'nested-spawns.log'
+if ns_log.exists():
+    try:
+        nested_spawns = sum(1 for ln in ns_log.read_text().splitlines() if 'verdict=allow' in ln)
+    except Exception:
+        nested_spawns = 0
+
+# Optional: escalations_used from escalation-budget.yaml
+escalations_used = 0
+budget_path = Path(project_root) / 'docs' / 'handoff' / task_id / 'escalation-budget.yaml'
+if budget_path.exists():
+    try:
+        import yaml as _yaml
+        bd = _yaml.safe_load(budget_path.read_text()) or {}
+        escalations_used = int(bd.get('used', 0))
+    except Exception:
+        try:
+            import re as _re
+            src = budget_path.read_text()
+            m = _re.search(r'used\s*:\s*(\d+)', src)
+            escalations_used = int(m.group(1)) if m else 0
+        except Exception:
+            escalations_used = 0
+
 row = {
     'task_id': task_id, 'repo': repo, 'task_class': task_class,
     'arm': arm, 'verify_pass': verify_pass, 'post_deploy_regression': 0,
     'cost_actual_usd': cost_actual, 'cost_estimate_usd': cost_est_usd,
     'error_usd': error_usd, 'founder_interventions_count': founder_int,
     'shadow_arm': shadow_arm, 'closed_at': closed_at,
+    'nested_spawns': nested_spawns, 'escalations_used': escalations_used,
 }
 
 unknown = set(row.keys()) - allowed_keys
