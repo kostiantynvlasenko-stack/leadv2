@@ -121,6 +121,23 @@
       "type": "integer",
       "description": "Value of `used` from the task's escalation-budget.yaml at close time. 0 when budget file absent. Optional field.",
       "minimum": 0
+    },
+    "route_phases_captured": {
+      "type": "integer",
+      "description": "Count of phases with a route-decisions.yaml entry for this task. 0 when file absent. Optional field.",
+      "minimum": 0
+    },
+    "bandit_deviations": {
+      "type": "integer",
+      "description": "Count of phases where bandit_deviation=true in route-decisions.yaml. 0 when no deviations or file absent. Optional field.",
+      "minimum": 0
+    },
+    "bandit_reward_composite": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Composite reward value (0.0-1.0) written by leadv2-route-bandit.sh update at close time. Null when bandit was not active or update has not run. Optional field."
     }
   }
 }

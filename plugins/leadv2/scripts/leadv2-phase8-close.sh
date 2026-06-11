@@ -321,5 +321,17 @@ else
   log_info "[skip] scorecard write skipped (LEADV2_SCORECARD_ON_CLOSE not set)"
 fi
 
+# ── [BANDIT-01] Non-blocking route-bandit update ─────────────────────────────
+# Runs after scorecard step; failures never gate close. File-exists guard per design §sync-point.
+BANDIT_UPDATE_SCRIPT="${SCRIPTS_DIR}/leadv2-route-bandit.sh"
+if [[ -x "$BANDIT_UPDATE_SCRIPT" ]]; then
+  log_info "Scheduling bandit reward update for ${TASK_ID}..."
+  LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" bash "$BANDIT_UPDATE_SCRIPT" update \
+    --task-id "$TASK_ID" &
+else
+  log_info "[skip] leadv2-route-bandit.sh not found — bandit update skipped (BANDIT-01 Group A pending)"
+fi
+# ── end bandit update ─────────────────────────────────────────────────────────
+
 log_info "Phase 8 close complete for ${TASK_ID} (YAML: ${YAML_PATH})"
 exit 0

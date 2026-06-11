@@ -348,6 +348,97 @@ fi
 # Extract ceiling_status to decide exit code
 ceiling_status=$(printf '%s\n' "$result" | grep '^ceiling_status=' | cut -d= -f2)
 
+# ── [BANDIT-01] Route bandit overlay ──────────────────────────────────────────
+BANDIT_ARM=""
+BANDIT_DEVIATION="false"
+BANDIT_CONTEXT_KEY=""
+# F2 fix: extract heuristic model unconditionally so route-decisions.yaml is
+# correct regardless of LEADV2_ROUTE_BANDIT state.
+_heuristic_model=$(printf '%s\n' "$result" | grep '^model=' | cut -d= -f2)
+
+if [[ "${LEADV2_ROUTE_BANDIT:-0}" == "1" ]] \
+   && [[ "$ceiling_status" != "hard_stop_95pct" ]]; then
+  # Derive safety bucket: true if risk==critical OR change_kind contains auth/security
+  _signals_risk=$(printf '%s\n' "$SIGNALS" | python3 -c "
+import sys,json
+s=json.loads(sys.stdin.read())
+ck=s.get('change_kind','')
+r=s.get('risk','')
+print('true' if r=='critical' or 'auth' in str(ck) or 'security' in str(ck) else 'false')
+" 2>/dev/null || printf 'false')
+  BANDIT_CONTEXT_KEY="${PHASE}:${TASK_CLASS}:${_signals_risk}"
+
+  # Build allowed arms: heuristic arm + any escalate_to arm from routing.yaml config
+  # Caller may override via LEADV2_BANDIT_ALLOWED_ARMS env (JSON array of strings)
+  if [[ -n "${LEADV2_BANDIT_ALLOWED_ARMS:-}" ]]; then
+    _allowed="${LEADV2_BANDIT_ALLOWED_ARMS}"
+  else
+    # Build from routing.yaml: extract escalate_to for this phase/step (best-effort)
+    _escalate_to=$(python3 -c "
+import sys, json
+try:
+    import yaml
+    cfg = yaml.safe_load(open(sys.argv[1]))
+    phase_cfg = cfg.get('phases', {}).get(sys.argv[2], {})
+    step_cfg = phase_cfg.get(sys.argv[3], {})
+    et = step_cfg.get('escalate_to', '')
+    # Extract primary model token (before +)
+    primary = et.split('+')[0].strip() if et else ''
+    # Also include default
+    default_m = step_cfg.get('default', '').split('+')[0].strip()
+    arms = [a for a in [default_m, primary] if a and a not in ('bash','bash+python','mcp-calls-only','skip','haiku','')]
+    # Deduplicate preserving order
+    seen = set(); uniq = []
+    for a in arms:
+        if a not in seen: seen.add(a); uniq.append(a)
+    print(json.dumps(uniq))
+except Exception:
+    print('[]')
+" "$ROUTING_YAML" "$PHASE" "$STEP" 2>/dev/null || printf '[]')
+    _heuristic_primary=$(printf '%s' "$_heuristic_model" | cut -d+ -f1)
+    if [[ "$_escalate_to" == "[]" || -z "$_escalate_to" ]]; then
+      _allowed="["${_heuristic_primary}"]"
+    else
+      _allowed="$_escalate_to"
+    fi
+  fi
+
+  # Only invoke bandit if route-bandit.sh exists; else fall through to heuristic
+  _bandit_script="${SCRIPT_DIR}/leadv2-route-bandit.sh"
+  if [[ -f "$_bandit_script" ]]; then
+    _bandit_out=$(bash "$_bandit_script" sample \
+      --context-key "$BANDIT_CONTEXT_KEY" \
+      --allowed "$_allowed" \
+      --heuristic "$(printf '%s' "$_heuristic_model" | cut -d+ -f1)" 2>/dev/null) || true
+
+    if [[ -n "$_bandit_out" ]]; then
+      _chosen=$(printf '%s\n' "$_bandit_out" | grep '^chosen_arm=' | cut -d= -f2)
+      _heuristic_primary=$(printf '%s' "$_heuristic_model" | cut -d+ -f1)
+      if [[ -n "$_chosen" && "$_chosen" != "$_heuristic_primary" ]]; then
+        BANDIT_ARM="$_chosen"
+        BANDIT_DEVIATION="true"
+        # Patch model= line: replace primary model token with bandit arm
+        result=$(printf '%s\n' "$result" | python3 -c "
+import sys
+heuristic='$_heuristic_primary'
+bandit='$_chosen'
+for line in sys.stdin:
+    if line.startswith('model='):
+        line = 'model=' + line[len('model='):].rstrip().replace(heuristic, bandit, 1) + '\n'
+    sys.stdout.write(line)
+")
+      else
+        BANDIT_ARM="${_chosen:-}"
+      fi
+    fi
+  else
+    # Stub path: bandit script not yet present (Group A deliverable pending)
+    # Use heuristic arm unchanged — emit empty bandit_arm
+    : # no-op, heuristic arm unchanged
+  fi
+fi
+# ── end bandit overlay ─────────────────────────────────────────────────────────
+
 if [[ "$ceiling_status" == "hard_stop_95pct" ]]; then
   log_error "HARD STOP: task burn >= 95% of ceiling — refusing spawn for $PHASE/$STEP"
   printf '%s\n' "$result"
@@ -358,5 +449,49 @@ if [[ "$ceiling_status" == "warn_60pct" ]]; then
   log_warn "burn >= 60% of ceiling — model may have been downgraded for $PHASE/$STEP"
 fi
 
+# ── [BANDIT-01] Append route-decisions.yaml entry (router owns this per §9) ──────
+if [[ -n "${TASK_ID:-}" ]]; then
+  _handoff_dir="${PROJECT_ROOT}/docs/handoff/${TASK_ID}"
+  _route_decisions="${_handoff_dir}/route-decisions.yaml"
+  _decided_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  _signals_risk_val=$(printf '%s\n' "$SIGNALS" | python3 -c "
+import sys,json
+s=json.loads(sys.stdin.read())
+ck=s.get('change_kind','')
+r=s.get('risk','')
+print('true' if r=='critical' or 'auth' in str(ck) or 'security' in str(ck) else 'false')
+" 2>/dev/null || printf 'false')
+  # chosen_arm is the final model= from result (bandit may have patched it)
+  _final_chosen=$(printf '%s\n' "$result" | grep '^model=' | cut -d= -f2)
+  # heuristic_arm: _heuristic_model is always set unconditionally before bandit block (F2 fix).
+  # Fallback to _final_chosen is kept as defensive guard only.
+  _heuristic_arm="${_heuristic_model:-${_final_chosen}}"
+  _bandit_active="false"
+  [[ "${LEADV2_ROUTE_BANDIT:-0}" == "1" ]] && _bandit_active="true"
+  mkdir -p "$_handoff_dir"
+  _route_lock="${_handoff_dir}/.route-decisions.lock"
+  (
+    flock -x 200 || true
+    printf -- '- phase: %s\n' "${PHASE}" >> "$_route_decisions"
+    printf -- '  step: %s\n' "${STEP}" >> "$_route_decisions"
+    printf -- '  task_class: %s\n' "${TASK_CLASS}" >> "$_route_decisions"
+    printf -- '  safety_touched: %s\n' "${_signals_risk_val}" >> "$_route_decisions"
+    printf -- '  heuristic_arm: %s\n' "${_heuristic_arm}" >> "$_route_decisions"
+    printf -- '  allowed_arms: %s\n' "${_allowed:-[]}" >> "$_route_decisions"
+    printf -- '  chosen_arm: %s\n' "${_final_chosen}" >> "$_route_decisions"
+    printf -- '  bandit_active: %s\n' "${_bandit_active}" >> "$_route_decisions"
+    printf -- '  bandit_deviation: %s\n' "${BANDIT_DEVIATION}" >> "$_route_decisions"
+    printf -- '  context_key: %s\n' "${BANDIT_CONTEXT_KEY}" >> "$_route_decisions"
+    printf -- '  decided_at: "%s"\n' "${_decided_at}" >> "$_route_decisions"
+  ) 200>"$_route_lock"
+fi
+# ── end route-decisions append ────────────────────────────────────────────────
 printf '%s\n' "$result"
+# F1 fix: bandit keys emitted only when flag is on — flag-off stdout is
+# byte-identical to pre-BANDIT-01 baseline.
+if [[ "${LEADV2_ROUTE_BANDIT:-0}" == "1" ]]; then
+  printf 'bandit_arm=%s\n' "${BANDIT_ARM}"
+  printf 'bandit_deviation=%s\n' "${BANDIT_DEVIATION}"
+  printf 'bandit_context_key=%s\n' "${BANDIT_CONTEXT_KEY}"
+fi
 exit 0

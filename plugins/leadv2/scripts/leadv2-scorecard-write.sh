@@ -66,6 +66,7 @@ HANDOFF_DIR="${LEADV2_PROJECT_ROOT}/docs/handoff/${TASK_ID}"
 CONTEXT_YAML="${HANDOFF_DIR}/context.yaml"
 COSTS_YAML="${HANDOFF_DIR}/costs.yaml"
 CLOSED_YAML="${LEADV2_PROJECT_ROOT}/docs/leadv2/closed/${TASK_ID}.yaml"
+ROUTE_DECISIONS_YAML="${HANDOFF_DIR}/route-decisions.yaml"  # [BANDIT-01]
 
 # ── PATCH mode ────────────────────────────────────────────────────────────────
 if [[ "$MODE" == "patch" ]]; then
@@ -91,6 +92,7 @@ fi
 _py_build_row() {
   local _task_id="$1" _project_root="$2" _context="$3" _costs="$4" _closed="$5" _schema="$6"
   local _founder_int="${LEADV2_FOUNDER_INTERVENTIONS:-}"
+  local _route_decisions_path="${_route_decisions_path:-}"
   python3 -c "
 import sys, json, yaml, hashlib, os, re
 from pathlib import Path
@@ -212,6 +214,24 @@ if budget_path.exists():
         except Exception:
             escalations_used = 0
 
+# [BANDIT-01] Read route-decisions.yaml for bandit route fields
+route_phases_captured = 0
+bandit_deviations = 0
+bandit_reward_composite = None
+route_decisions_path = sys.argv[8] if len(sys.argv) > 8 else ''
+if route_decisions_path and Path(route_decisions_path).exists():
+    try:
+        import yaml as _ry
+        entries = _ry.safe_load(Path(route_decisions_path).read_text()) or []
+        if isinstance(entries, list):
+            route_phases_captured = len(entries)
+            bandit_deviations = sum(
+                1 for e in entries
+                if isinstance(e, dict) and str(e.get('bandit_deviation', 'false')).lower() == 'true'
+            )
+    except Exception as e:
+        errors.append(f'route-decisions.yaml: {e}')
+
 row = {
     'task_id': task_id, 'repo': repo, 'task_class': task_class,
     'arm': arm, 'verify_pass': verify_pass, 'post_deploy_regression': 0,
@@ -219,6 +239,9 @@ row = {
     'error_usd': error_usd, 'founder_interventions_count': founder_int,
     'shadow_arm': shadow_arm, 'closed_at': closed_at,
     'nested_spawns': nested_spawns, 'escalations_used': escalations_used,
+    'route_phases_captured': route_phases_captured,
+    'bandit_deviations': bandit_deviations,
+    'bandit_reward_composite': bandit_reward_composite,
 }
 
 unknown = set(row.keys()) - allowed_keys
@@ -245,8 +268,11 @@ for e in errors:
     print(f'WARN: {e}', file=sys.stderr)
 
 print(json.dumps(row, separators=(',', ':')))
-" "$_task_id" "$_project_root" "$_context" "$_costs" "$_closed" "$_schema" "$_founder_int"
+" "$_task_id" "$_project_root" "$_context" "$_costs" "$_closed" "$_schema" "$_founder_int" "${_route_decisions_path:-}"
 }
+
+# [BANDIT-01] Pass route-decisions.yaml path (absent file → nulls in scorecard)
+_route_decisions_path="${ROUTE_DECISIONS_YAML}"
 
 ROW_JSON=$(_py_build_row \
   "$TASK_ID" "$LEADV2_PROJECT_ROOT" \
