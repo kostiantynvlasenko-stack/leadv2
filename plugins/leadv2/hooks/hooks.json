@@ -243,6 +243,13 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-task-budget-tracker.sh\"",
             "timeout": 3,
             "continueOnBlock": true
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-hardbans-reinject.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "Hard-bans anti-drift reinject..."
           }
         ]
       },

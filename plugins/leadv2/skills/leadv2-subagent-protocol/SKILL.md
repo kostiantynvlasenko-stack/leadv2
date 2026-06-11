@@ -163,8 +163,23 @@ Before claiming done, ask yourself:
 - **MD-02:** Does my deliverable reference the `decisions:` from context.yaml? If no — spec-drift risk, cite explicitly.
 - **MD-03:** Did I just paste lead's prompt back? That's not work.
 - **MD-04:** Does `git diff` (for code tasks) actually show the expected file changes? "Done" without diff = confabulation.
+- **MD-05:** Did I rely on any table/flag/script/method name I never verified exists? Unverified entity → verify now (§6.5) or mark blocked.
 
 Fail any self-check → fix before writing DELIVERABLE_COMPLETE.
+
+## 6.5. Unrecognized-entity rule — verify before you build on it
+
+Any identifier you are about to depend on that is NOT present in `context.yaml`, your mission file, or the `## Graph context` block — table name, column, env flag, script path, library method, API endpoint, persona slug — MUST be existence-verified BEFORE writing code or plans that use it. Partial recognition ("the concept is familiar") does NOT count as verification; versioned/renamed entities are exactly where memory is wrong.
+
+One probe, ≤1 tool call:
+
+- Code symbol / function → `graph: search_graph query="<name>"` (ask-lead proxy) or local Grep.
+- File / script path → Glob the exact path.
+- DB table / column → Grep migrations for `CREATE TABLE <name>` / the column name.
+- Library method → verify against the installed package (e.g. `python3 -c "import x; print(hasattr(x.Y, 'z'))"`), never from memory.
+- Env flag → Grep repo config / `.env.example`.
+
+If the entity does not exist → STOP. Report `decision conflict` to lead or write `DELIVERABLE_BLOCKED: entity <name> not found`. **Never substitute a near-name, assume a rename, or invent a plausible variant.** Repeat incidents this rule exists for: querying persona tables by UUID where slug is canonical, calling library methods that drifted between versions, shipping shell that references a table never created.
 
 ## 7. Off-limits as hard stop
 
