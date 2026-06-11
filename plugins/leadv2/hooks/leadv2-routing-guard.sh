@@ -1,32 +1,66 @@
 #!/usr/bin/env bash
-# PreToolUse:Agent — WARN-ONLY routing guard.
-# Fires when architect/critic/security-auditor is spawned on sonnet during plan/review phases.
-# Recommends Codex-first (or Opus-only on m3-market) per codex-policy.yaml.
-# NEVER blocks (always exits 0). Safe for all repos including m3-market.
+# PreToolUse:Agent — routing guard.
+# Two policies:
+#   1. LEAD path: WARN-ONLY when architect/critic/security-auditor spawned on sonnet.
+#      Recommends Codex-first (or Opus-only on m3-market) per codex-policy.yaml.
+#      NEVER blocks (exits 0). Safe for all repos including m3-market.
+#   2. SUBAGENT NESTED-SPAWN path (v2.1.172+): caller has agent_type in hook input.
+#      ALLOW only Explore|general-purpose with explicit model=haiku|sonnet.
+#      DENY all other nested spawns with actionable message (exits 2).
 set -euo pipefail
 trap 'exit 0' ERR
 
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
-# Parse subagent_type and model from hook input JSON
-PARSED="$(printf -- '%s' "$INPUT" | python3 - 2>/dev/null <<'PY' || true
+# Parse fields from hook input JSON: agent_type (present for subagents, absent for lead),
+# tool_input.subagent_type, tool_input.model
+# NOTE: use python3 -c passing INPUT via argv to avoid heredoc+pipe stdin conflict.
+PARSED="$(python3 -c "
 import sys, json
 try:
-    d = json.loads(sys.stdin.read())
-    inp = d.get("tool_input") or {}
-    stype = (inp.get("subagent_type") or "").strip().lower()
-    model = (inp.get("model") or "").strip().lower()
+    d = json.loads(sys.argv[1])
+    inp = d.get('tool_input') or {}
+    caller_agent_type = (d.get('agent_type') or '').strip().lower()
+    stype = (inp.get('subagent_type') or '').strip().lower()
+    model = (inp.get('model') or '').strip().lower()
+    print(caller_agent_type)
     print(stype)
     print(model)
 except Exception:
     pass
-PY
-)"
+" "$INPUT" 2>/dev/null || true)"
 
-SUBAGENT_TYPE="$(printf -- '%s' "$PARSED" | sed -n '1p')"
-MODEL="$(printf -- '%s' "$PARSED" | sed -n '2p')"
+CALLER_AGENT_TYPE="$(printf -- '%s' "$PARSED" | sed -n '1p')"
+SUBAGENT_TYPE="$(printf -- '%s' "$PARSED" | sed -n '2p')"
+MODEL="$(printf -- '%s' "$PARSED" | sed -n '3p')"
 
+# ── NESTED-SPAWN POLICY (caller is a subagent) ────────────────────────────────
+# agent_type is injected by Claude Code only for subagent callers; lead has no agent_type.
+if [[ -n "$CALLER_AGENT_TYPE" ]]; then
+  # Allow only: (Explore OR general-purpose) AND model explicitly haiku OR sonnet
+  STYPE_OK="false"
+  MODEL_OK="false"
+  case "$SUBAGENT_TYPE" in
+    explore|general-purpose) STYPE_OK="true" ;;
+  esac
+  case "$MODEL" in
+    *haiku*|*sonnet*) MODEL_OK="true" ;;
+  esac
+
+  if [[ "$STYPE_OK" == "true" && "$MODEL_OK" == "true" ]]; then
+    exit 0  # allowed nested discovery probe
+  fi
+
+  cat >&2 <<MSG
+[leadv2-routing-guard] DENIED nested spawn.
+nested spawns: Explore/general-purpose with explicit model=haiku|sonnet only.
+Got subagent_type="${SUBAGENT_TYPE}" model="${MODEL}". Use ask-lead.sh graph proxy for other discovery.
+MSG
+  exit 2
+fi
+
+# ── LEAD PATH (no agent_type → caller is lead) ────────────────────────────────
 # Only care about these review/plan-brain roles
 case "$SUBAGENT_TYPE" in
   architect|critic|security-auditor) ;;

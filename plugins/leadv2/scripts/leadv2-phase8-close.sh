@@ -300,5 +300,26 @@ else
   log_info "[skip] causal analysis not applicable (task_id=${TASK_ID} does not start with RECOVERY-)"
 fi
 
+# ── Scorecard: non-blocking write on close ────────────────────────────────────
+# Gated by LEADV2_SCORECARD_ON_CLOSE=1. Failures log to stderr but never abort close.
+if [[ "${LEADV2_SCORECARD_ON_CLOSE:-0}" == "1" ]]; then
+  SCORECARD_WRITE_SCRIPT="${SCRIPTS_DIR}/leadv2-scorecard-write.sh"
+  COST_FLUSH_SCRIPT="${SCRIPTS_DIR}/leadv2-cost-flush.sh"
+  if [[ -x "$COST_FLUSH_SCRIPT" ]]; then
+    log_info "Flushing cost markers for ${TASK_ID}..."
+    LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" bash "$COST_FLUSH_SCRIPT" "${HANDOFF_DIR}"       || log_error "[scorecard] cost-flush failed — continuing (non-blocking)"
+  else
+    log_info "[skip] leadv2-cost-flush.sh not found — skipping cost flush"
+  fi
+  if [[ -x "$SCORECARD_WRITE_SCRIPT" ]]; then
+    log_info "Writing scorecard row for ${TASK_ID}..."
+    LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" bash "$SCORECARD_WRITE_SCRIPT" --task-id "$TASK_ID"       || log_error "[scorecard] scorecard-write failed — continuing (non-blocking)"
+  else
+    log_info "[skip] leadv2-scorecard-write.sh not found — skipping scorecard write"
+  fi
+else
+  log_info "[skip] scorecard write skipped (LEADV2_SCORECARD_ON_CLOSE not set)"
+fi
+
 log_info "Phase 8 close complete for ${TASK_ID} (YAML: ${YAML_PATH})"
 exit 0

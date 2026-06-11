@@ -22,7 +22,7 @@
   "properties": {
     "task_id": {
       "type": "string",
-      "description": "Opaque task identifier (e.g. PO-042). Always a value — never used as a JSON key.",
+      "description": "Opaque task identifier (e.g. PO-042). Always a value \u2014 never used as a JSON key.",
       "minLength": 1
     },
     "repo": {
@@ -33,35 +33,61 @@
     "task_class": {
       "type": "string",
       "description": "Task classification from context.yaml.",
-      "enum": ["Light", "Standard", "Heavy", "Strategic"]
+      "enum": [
+        "Light",
+        "Standard",
+        "Heavy",
+        "Strategic"
+      ]
     },
     "arm": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "A/B arm assignment written to context.yaml at task-init by leadv2-shadow-apply.sh --assign. Null when shadow A/B is not active.",
-      "enum": ["A", "B", null]
+      "enum": [
+        "A",
+        "B",
+        null
+      ]
     },
     "verify_pass": {
       "type": "integer",
       "description": "1 if verify phase passed (all assertions green), 0 otherwise.",
-      "enum": [0, 1]
+      "enum": [
+        0,
+        1
+      ]
     },
     "post_deploy_regression": {
       "type": "integer",
       "description": "1 if a regression was detected by outcome-watch after deploy, 0 if stable. May be backfilled via patch record by leadv2-outcome-watch.sh --sweep.",
-      "enum": [0, 1]
+      "enum": [
+        0,
+        1
+      ]
     },
     "cost_actual_usd": {
-      "type": "number",
-      "description": "Actual total cost in USD from costs.yaml sum. Must be >= 0.",
-      "minimum": 0
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Actual total cost in USD from costs.yaml sum. Null when costs.yaml is absent or empty (missing vs zero are distinguishable). Must be >= 0 when not null."
     },
     "cost_estimate_usd": {
-      "type": ["number", "null"],
+      "type": [
+        "number",
+        "null"
+      ],
       "description": "Estimated cost in USD from context.yaml cost_estimate.usd, written at Plan phase. Null if no estimate was provided.",
       "minimum": 0
     },
     "error_usd": {
-      "type": ["number", "null"],
+      "type": [
+        "number",
+        "null"
+      ],
       "description": "Cost forecast error: cost_actual_usd - cost_estimate_usd. Null when cost_estimate_usd is null. Negative = under budget, positive = over budget."
     },
     "founder_interventions_count": {
@@ -70,9 +96,16 @@
       "minimum": 0
     },
     "shadow_arm": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Shadow A/B arm derived from hash(task_id)%2 at scorecard-write time. Provides the join key between 'task was in arm A/B' and its score. Null when shadow is not active.",
-      "enum": ["A", "B", null]
+      "enum": [
+        "A",
+        "B",
+        null
+      ]
     },
     "closed_at": {
       "type": "string",

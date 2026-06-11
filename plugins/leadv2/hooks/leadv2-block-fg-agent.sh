@@ -27,6 +27,14 @@ done
 # Cannot distinguish fg from bg agents here.
 # Strategy: only block during idle phases (async_wait) — active phases need agents.
 # bg-agent discipline enforced via orchestrator protocol, not this hook.
+#
+# NESTED-SPAWN EXEMPTION (v2.1.172+):
+# Subagent-initiated spawns always occur while the task is in an ACTIVE phase
+# (the subagent is running as part of Phase 4 build or similar), never in async_wait.
+# Therefore subagent nested spawns are inherently exempt from this block — the
+# async_wait guard below will find no idle session and exit 0 before blocking.
+# No caller-identity check is needed here; routing-guard.sh enforces the nested-spawn
+# allow-list (Explore/general-purpose + explicit model=haiku|sonnet).
 SHOULD_BLOCK="$(python3 - "$ACTIVE" 2>/dev/null <<'PY' || echo "false"
 import sys, yaml, pathlib
 try:

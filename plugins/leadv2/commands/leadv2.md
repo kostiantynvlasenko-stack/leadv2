@@ -140,7 +140,7 @@ Agent(subagent_type=<role>, model=<opus|sonnet>,
 - **No "Group B should pick up X" punts.** Phase 4 routing-check blocks.
 - **No status spam.** One `git status -sb` per phase boundary.
 - **No serial questions** when >=2 founder decisions pending -- batch into one AskUserQuestion (up to 4).
-- **No graph discovery inside subagents** (Lead pre-queries MCP in Phase 0/2); **no echoing subagent deliverables** (read + synthesize silently).
+- **No unbounded graph discovery inside subagents** (Lead pre-queries MCP in Phase 0/2 — subagents use that injected context first); subagents MAY spawn a single nested `Explore(haiku)` or `general-purpose(sonnet)` probe for self-discovery (v2.1.172+, max 3/task, explicit model= mandatory, routing-guard enforces); **no echoing subagent deliverables** (read + synthesize silently).
 - **No skipping `verify-probe.sh`** -- "tests green" is NOT verification.
 - **No auto-deploy** if any circuit-breaker unresolved.
 - **No `TaskOutput`** on subsession stream files -- use `Read offset/limit`.

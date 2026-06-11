@@ -143,12 +143,27 @@ if isinstance(est_block, dict) and est_block.get('usd') is not None:
     except (TypeError, ValueError):
         pass
 
-cost_actual = 0.0
+# Fallback: read cost-estimate.yaml when context.yaml lacks cost_estimate.usd
+if cost_est_usd is None:
+    ce_path = Path(project_root) / 'docs' / 'handoff' / task_id / 'cost-estimate.yaml'
+    if ce_path.exists():
+        try:
+            ce_data = yaml.safe_load(ce_path.read_text()) or {}
+            # cost-estimate.yaml structure: {estimate: {expected_total_usd: {mean: N}}}
+            est_inner = ce_data.get('estimate') or {}
+            mean_val = (est_inner.get('expected_total_usd') or {}).get('mean')
+            if mean_val is not None:
+                cost_est_usd = float(mean_val)
+        except Exception as e:
+            errors.append(f'cost-estimate.yaml: {e}')
+
+cost_actual = None
 if Path(costs_path).exists():
     try:
         rows = yaml.safe_load(Path(costs_path).read_text()) or []
-        if isinstance(rows, list):
-            cost_actual = sum(float(r.get('cost_usd', 0)) for r in rows if isinstance(r, dict))
+        if isinstance(rows, list) and len(rows) > 0:
+            cost_actual = round(sum(float(r.get('cost_usd', 0)) for r in rows if isinstance(r, dict)), 6)
+        # empty list → cost_actual remains None (no data, not zero)
     except Exception as e:
         errors.append(f'costs.yaml: {e}')
 
@@ -166,7 +181,7 @@ closed_at = closed.get('closed_at') or datetime.now(timezone.utc).strftime('%Y-%
 if isinstance(closed_at, str) and not closed_at.endswith('Z'):
     closed_at = closed_at[:19] + 'Z'
 
-error_usd = round(cost_actual - cost_est_usd, 6) if cost_est_usd is not None else None
+error_usd = round(cost_actual - cost_est_usd, 6) if (cost_actual is not None and cost_est_usd is not None) else None
 
 h = int(hashlib.sha1(task_id.encode()).hexdigest(), 16)
 shadow_arm = 'A' if h % 2 == 0 else 'B'
@@ -174,7 +189,7 @@ shadow_arm = 'A' if h % 2 == 0 else 'B'
 row = {
     'task_id': task_id, 'repo': repo, 'task_class': task_class,
     'arm': arm, 'verify_pass': verify_pass, 'post_deploy_regression': 0,
-    'cost_actual_usd': round(cost_actual, 6), 'cost_estimate_usd': cost_est_usd,
+    'cost_actual_usd': cost_actual, 'cost_estimate_usd': cost_est_usd,
     'error_usd': error_usd, 'founder_interventions_count': founder_int,
     'shadow_arm': shadow_arm, 'closed_at': closed_at,
 }

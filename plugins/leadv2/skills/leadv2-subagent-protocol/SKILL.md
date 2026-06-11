@@ -63,6 +63,41 @@ Use `graph:` queries freely — they cost Claude tokens on lead side only, and t
 
 Use regular (non-graph) questions sparingly — each one interrupts founder. Batch where possible.
 
+## 2.5. Nested spawns (v2.1.172+)
+
+Claude Code v2.1.172+ allows subagents to spawn sub-subagents (5 levels deep). This capability is **gated** — only cheap discovery probes are permitted.
+
+**Allowed nested spawns:**
+```
+Agent(subagent_type="Explore",          model="claude-haiku-4-5",   ...)  # graph/file discovery
+Agent(subagent_type="general-purpose",  model="claude-sonnet-4-5",  ...)  # light synthesis
+```
+
+**Rules:**
+- Max **1 nesting level** — your nested spawn must not itself spawn further agents.
+- Max **3 nested spawns per task** across your entire run.
+- `model=` is **mandatory and explicit** — never omit it (inherit-guard DENIES unrouted agents).
+- Allowed models: any `*haiku*` or `*sonnet*` variant. Never `*opus*` or `*fable*`.
+- Allowed subagent_type: `Explore` or `general-purpose` only.
+- **Never spawn** `developer`, `critic`, `architect`, `security-auditor`, or any build/review role.
+- `run_in_background=true` recommended for non-blocking probes.
+- If you need deeper graph queries, prefer the **ask-lead.sh graph proxy** (§3) — it costs lead tokens only and does not count against your nested-spawn budget.
+
+**Hook enforcement:** `leadv2-routing-guard.sh` (PreToolUse:Agent) enforces this allow-list and denies any nested spawn that violates these constraints with an actionable error message.
+
+**Example — allowed:**
+```
+Agent(subagent_type="Explore", model="claude-haiku-4-5",
+      prompt="Find all callers of upsert_snapshot in platform/. Return file paths only.",
+      run_in_background=true)
+```
+
+**Example — denied:**
+```
+Agent(subagent_type="developer", model="claude-sonnet-4-5", ...)  # build role not allowed nested
+Agent(subagent_type="Explore",   ...)                              # model= omitted → DENIED
+```
+
 ## 4. Chat output discipline — SILENT by default
 
 **DURING task (between tool calls): emit ZERO text.** No "Now I'll...", no "I found...", no "Let me check...". Call the tool, get the result, call the next tool. Every sentence you narrate mid-task compounds in lead's 200K context forever.
