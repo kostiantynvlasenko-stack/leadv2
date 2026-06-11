@@ -321,6 +321,26 @@ else
   log_info "[skip] scorecard write skipped (LEADV2_SCORECARD_ON_CLOSE not set)"
 fi
 
+# ── Memory GC: weekly report-only pass ───────────────────────────────────────
+# Runs in report-only mode; never blocks close. Fires at most once per 7 days.
+MEMORY_GC_SCRIPT="${SCRIPTS_DIR}/leadv2-memory-gc.sh"
+MEMORY_GC_STAMP="${PROJECT_ROOT}/docs/leadv2/.memory-gc-last"
+if [[ -x "$MEMORY_GC_SCRIPT" ]]; then
+  _gc_now=$(date +%s 2>/dev/null || echo 0)
+  _gc_last=$(cat "$MEMORY_GC_STAMP" 2>/dev/null || echo 0)
+  _gc_age=$(( _gc_now - _gc_last ))
+  if [[ $_gc_age -ge 604800 ]]; then
+    LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" bash "$MEMORY_GC_SCRIPT" \
+      --project-root "${PROJECT_ROOT}" || true
+    echo "memory-gc: report refreshed (weekly)"
+  else
+    log_info "[skip] memory-gc skipped (last run ${_gc_age}s ago, threshold 604800s)"
+  fi
+else
+  log_info "[skip] leadv2-memory-gc.sh not found — memory-gc skipped"
+fi
+# ── end memory GC ─────────────────────────────────────────────────────────────
+
 # ── [BANDIT-01] Non-blocking route-bandit update ─────────────────────────────
 # Runs after scorecard step; failures never gate close. File-exists guard per design §sync-point.
 BANDIT_UPDATE_SCRIPT="${SCRIPTS_DIR}/leadv2-route-bandit.sh"

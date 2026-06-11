@@ -52,4 +52,30 @@ printf -- '%s\n' "$LINE" >> "$PULSE_FILE" 2>/dev/null || {
 }
 
 printf -- '%s\n' "$LINE"
+
+# ── checkpoint.md: overwrite with latest phase state (soft-fail) ─────────────
+CHECKPOINT_FILE="$PULSE_DIR/checkpoint.md"
+{
+  CKPT_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "0000-00-00T00:00:00Z")"
+
+  # Last 3 lines of pulse.md
+  PULSE_TAIL="$(tail -3 "$PULSE_FILE" 2>/dev/null || true)"
+
+  # Newest file in docs/handoff/<task_id>/ if present
+  HANDOFF_DIR="${PROJECT_ROOT}/docs/handoff/${TASK_ID}"
+  NEWEST_HANDOFF=""
+  if [[ -d "$HANDOFF_DIR" ]]; then
+    NEWEST_HANDOFF="$(ls -t "$HANDOFF_DIR" 2>/dev/null | head -1 || true)"
+  fi
+
+  printf -- '# checkpoint: %s\n' "$TASK_ID"
+  printf -- 'written: %s\n' "$CKPT_TS"
+  printf -- 'task_id: %s\n' "$TASK_ID"
+  printf -- 'phase: %s\n' "$PHASE"
+  printf -- 'newest_handoff: %s\n' "${NEWEST_HANDOFF:-none}"
+  printf -- '---\n'
+  printf -- '## Last 3 pulse lines\n\n'
+  printf -- '%s\n' "$PULSE_TAIL"
+} > "$CHECKPOINT_FILE" 2>/dev/null || true
+
 exit 0

@@ -344,6 +344,13 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-precompact-log.sh\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-pre-compact-checkpoint.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "Writing pre-compact checkpoint..."
           }
         ]
       }
