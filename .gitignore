@@ -10,3 +10,4 @@ node_modules/
 .claude/scripts/
 .claude/contracts/
 __pycache__/
+.claude/anatomy.md
