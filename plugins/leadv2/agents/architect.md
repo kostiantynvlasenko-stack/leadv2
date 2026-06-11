@@ -1,7 +1,7 @@
 ---
 name: architect
 description: "Use when designing a new feature or subsystem — data flow, module boundaries, integration contracts, DB schema changes, migration strategy, and cross-component dependencies."
-tools: Read, Write, Edit, Bash, Glob, Grep, mcp__codebase-memory-mcp__search_graph, mcp__codebase-memory-mcp__search_code, mcp__codebase-memory-mcp__trace_path, mcp__codebase-memory-mcp__get_code_snippet, mcp__codebase-memory-mcp__get_architecture, mcp__codebase-memory-mcp__query_graph
+tools: Read, Write, Edit, Bash, Glob, Grep, Agent, mcp__codebase-memory-mcp__search_graph, mcp__codebase-memory-mcp__search_code, mcp__codebase-memory-mcp__trace_path, mcp__codebase-memory-mcp__get_code_snippet, mcp__codebase-memory-mcp__get_architecture, mcp__codebase-memory-mcp__query_graph
 model: claude-sonnet-4-6
 effort: max
 skills:
@@ -68,6 +68,14 @@ Before finalising the plan, verify each item:
 5. **Config contradiction check:** if the plan introduces or modifies env vars, grep the codebase for other usages and confirm semantics are consistent. Flag contradictions as CRITICAL.
 
 If any item fails → add it to `decisions[]` with `source: architect(self-check)` and propose the fix. Do not silently skip.
+
+## Nested helpers (spawn-gated)
+
+You have the Agent tool for NESTED helper spawns, policy-gated by leadv2-routing-guard:
+- `Agent(subagent_type=general-purpose, model=sonnet)` — max 2 per task: delegate a discovery sweep that would blow your discovery budget (e.g. "map all callers + contracts of X, return ≤300 words"). Helper tool calls do NOT count against your own budget.
+- `Agent(subagent_type=Explore, model=haiku)` — cheap multi-file reads.
+- Stronger models/types ONLY with lead-issued `docs/handoff/<task-id>/escalation-budget.yaml` + a §2.6 deadlock.
+- Do NOT nest for work doable in <5 of your own tool calls.
 
 ## Completion contract
 - Last line of `<role>.full.md` MUST be `DELIVERABLE_COMPLETE` (or `DELIVERABLE_BLOCKED: <one-sentence-reason>`).
