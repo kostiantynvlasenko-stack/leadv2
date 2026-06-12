@@ -165,6 +165,14 @@ $RESUME_SNIPPET"
     CTX_PARTS+=("$RESUME_INJECT")
   fi
 
+  # Knowledge archive lookup hint — one line, always visible when a task is active
+  KNOWLEDGE_DIR="$CWD/docs/leadv2/knowledge"
+  KNOWLEDGE_COUNT=0
+  [[ -d "$KNOWLEDGE_DIR" ]] && KNOWLEDGE_COUNT=$(ls "$KNOWLEDGE_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+  if [[ "$KNOWLEDGE_COUNT" -gt 0 ]]; then
+    CTX_PARTS+=("[KNOWLEDGE_ARCHIVE] ${KNOWLEDGE_COUNT} entries in docs/leadv2/knowledge/. Before re-deciding anything (architecture choice, schema approach, error strategy), run: grep -r '<keyword>' docs/leadv2/knowledge/ to surface prior decisions and gotchas.")
+  fi
+
   CTX_PARTS+=("[ORCHESTRATOR_ROLE] You are the LEADV2 ORCHESTRATOR for task $TID_ACTIVE.
 Rules that persist across /compact:
 - NEVER write .py/.sh/.ts/.tsx/.sql directly — delegate ALL code to developer/devops subagents.

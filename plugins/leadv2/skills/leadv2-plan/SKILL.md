@@ -16,6 +16,25 @@ allowed-tools:
 
 ## Protocol
 
+
+> **[BANDIT-WIRE-01] Route-bandit model selection (when `LEADV2_ROUTE_BANDIT=1`):**
+> Before calling `Workflow({name:"leadv2-plan", ...})`, run lead-side bandit selection:
+> ```bash
+> MODELS=$(bash .claude/scripts/lv2 leadv2-route-bandit.sh select-for-workflow \
+>   --phase plan \
+>   --class "${TASK_CLASS}" \
+>   --safety "${SAFETY_TOUCHED:-false}" \
+>   --task-id "${TASK_ID}")
+> ```
+> Pass the result as `args.models`:
+> ```
+> Workflow({name:"leadv2-plan", args:{taskId, taskBrief, heavy, ..., models: JSON.parse(MODELS)}})
+> ```
+> The workflow JS consumes `args.models.architect` / `args.models.critic` with fallback to pinned defaults.
+> Flag-off (`LEADV2_ROUTE_BANDIT != 1`) or absent `args.models`: byte-identical to pre-BANDIT-WIRE-01 behavior.
+> The bandit also writes `docs/handoff/<id>/route-decisions.yaml` entries consumed by scorecard-write.sh.
+>
+
 > **PREFERRED — saved workflow (offload, model-pinned, 2026-06-09):** when the `Workflow` tool is available, issue
 > `Workflow({name:"leadv2-plan", args:{taskId, taskBrief, heavy, archKeyword, codexEnabled, missionPath}})`.
 > It runs architect + critic + Codex-via-agent in parallel, synthesizes context.yaml to disk, and returns

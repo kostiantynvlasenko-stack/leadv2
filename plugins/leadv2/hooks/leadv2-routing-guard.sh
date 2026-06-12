@@ -67,21 +67,30 @@ if [[ -n "$CALLER_AGENT_TYPE" ]]; then
   done
   [[ -z "$_REPO_ROOT" ]] && _REPO_ROOT="${CWD_FROM_INPUT:-$PWD}"
 
+  # Sanitize LEADV2_TASK_ID for filesystem use (strip chars outside A-Za-z0-9._-)
+  SAFE_TASK_ID="$(printf -- '%s' "${LEADV2_TASK_ID:-}" | tr -cd 'A-Za-z0-9._-')"
+
   # ── Audit log helper ───────────────────────────────────────────────────────
+  # FIX-NESTED-COUNT-01: writes to GLOBAL log always; also writes to per-task
+  # log when LEADV2_TASK_ID is set so leadv2-scorecard-write.sh counts correctly.
   _audit_log() {
     local verdict="$1" reason="$2"
     local ts; ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    local log_dir log_file
-    if [[ -n "${LEADV2_TASK_ID:-}" ]]; then
-      log_dir="${_REPO_ROOT}/docs/leadv2/tasks/${LEADV2_TASK_ID}"
-    else
-      log_dir="${_REPO_ROOT}/docs/leadv2"
+    local line
+    line="$(printf -- '%s caller=%s target=%s model=%s verdict=%s reason=%s\n' \
+      "$ts" "$CALLER_AGENT_TYPE" "$SUBAGENT_TYPE" "$MODEL" "$verdict" "$reason")"
+
+    # Always write to global cross-task forensic log
+    local global_log_dir="${_REPO_ROOT}/docs/leadv2"
+    mkdir -p "$global_log_dir" 2>/dev/null || true
+    printf -- '%s\n' "$line" >> "${global_log_dir}/nested-spawns.log" 2>/dev/null || true
+
+    # Also write to per-task log when LEADV2_TASK_ID is set (sanitized — see SAFE_TASK_ID)
+    if [[ -n "$SAFE_TASK_ID" ]]; then
+      local task_log_dir="${_REPO_ROOT}/docs/leadv2/tasks/${SAFE_TASK_ID}"
+      mkdir -p "$task_log_dir" 2>/dev/null || true
+      printf -- '%s\n' "$line" >> "${task_log_dir}/nested-spawns.log" 2>/dev/null || true
     fi
-    log_file="${log_dir}/nested-spawns.log"
-    mkdir -p "$log_dir" 2>/dev/null || true
-    printf -- '%s caller=%s target=%s model=%s verdict=%s reason=%s\n' \
-      "$ts" "$CALLER_AGENT_TYPE" "$SUBAGENT_TYPE" "$MODEL" "$verdict" "$reason" \
-      >> "$log_file" 2>/dev/null || true
   }
 
   # ── Load policy ────────────────────────────────────────────────────────────
@@ -155,7 +164,8 @@ print('DENY')
 
   # ── ESCALATION path ────────────────────────────────────────────────────────
   # Request is outside base allowlist. Check escalation budget.
-  TASK_ID="${LEADV2_TASK_ID:-}"
+  # Use sanitized SAFE_TASK_ID (see above) for any filesystem path use.
+  TASK_ID="$SAFE_TASK_ID"
 
   if [[ -z "$TASK_ID" ]]; then
     _audit_log "deny" "escalation_no_task_id"

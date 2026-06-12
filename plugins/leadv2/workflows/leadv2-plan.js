@@ -14,6 +14,12 @@ const HEAVY = a.heavy === true || a.archKeyword === true
 const MISSION_PATH = a.missionPath || `docs/handoff/${TASK_ID}/plan-mission.md`
 const CTX = `docs/handoff/${TASK_ID}/context.yaml`
 const CODEX_ON = a.codexEnabled !== false
+// [BANDIT-WIRE-01] Consume bandit model selections from args.models (set by lead before Workflow call).
+// args.models absent (or LEADV2_ROUTE_BANDIT != 1) => falls back to existing pinned defaults.
+// Flag-off guarantee: if args.models is not provided, model values are identical to pre-BANDIT-WIRE-01.
+const _MODELS = (a.models && typeof a.models === 'object') ? a.models : {}
+const ARCH_MODEL = _MODELS.architect || (HEAVY ? 'opus' : 'sonnet')
+const CRITIC_MODEL = _MODELS.critic || 'sonnet'
 
 const ARCH_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -40,11 +46,11 @@ const spawns = [
   () => agent(
     `Architect the plan for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. Read ${MISSION_PATH} + the repo. ` +
     `Produce decisions[], plan_steps[] (minimal-diff oriented), off_limits[], risks[]. No code, no full-file rewrites.`,
-    { label: 'architect', phase: 'Plan', agentType: 'architect', model: HEAVY ? 'opus' : 'sonnet', schema: ARCH_SCHEMA }),
+    { label: 'architect', phase: 'Plan', agentType: 'architect', model: ARCH_MODEL, schema: ARCH_SCHEMA }),
   () => agent(
     `Adversarially critique the proposed approach for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. ` +
     `Surface concerns: hidden coupling, irreversible ops, unverifiable invariants, missing tests, scope creep. Severity-tag each.`,
-    { label: 'critic', phase: 'Plan', agentType: 'critic', model: 'sonnet', schema: CRITIC_SCHEMA }),
+    { label: 'critic', phase: 'Plan', agentType: 'critic', model: CRITIC_MODEL, schema: CRITIC_SCHEMA }),
 ]
 if (CODEX_ON) {
   spawns.push(() => agent(

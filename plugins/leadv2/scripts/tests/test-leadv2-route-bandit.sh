@@ -311,6 +311,183 @@ test_6_syntax() {
   fi
 }
 
+
+# ── Test 7: select-for-workflow flag-off → pinned defaults, no state write ────
+
+test_7_select_flag_off() {
+  log "Test 7: select-for-workflow LEADV2_ROUTE_BANDIT=0 → pinned JSON, no side-effects"
+
+  local state_file tmpdir
+  state_file="$(_tmp_state)"
+  tmpdir="$(_tmp_dir)"
+  printf 'version: 1\narms: {}\ncooldowns:\nmeta:\n  total_updates: 0\n' > "$state_file"
+
+  local out
+  out=$(LEADV2_ROUTE_BANDIT=0 LEADV2_PROJECT_ROOT="$tmpdir" \
+    bash "$BANDIT_SH" select-for-workflow \
+      --phase plan \
+      --class Standard \
+      --safety false \
+      --task-id "TEST-SELECT-01" \
+      --state-file "$state_file" 2>/dev/null)
+
+  # Must be valid JSON with expected keys
+  local keys_ok=0
+  python3 -c "
+import sys, json
+try:
+  d = json.loads(sys.stdin.read())
+  required = ['architect','critic','verify','safety']
+  if all(k in d for k in required):
+    sys.exit(0)
+except Exception:
+  pass
+sys.exit(1)
+" <<< "$out" 2>/dev/null && keys_ok=1 || keys_ok=0
+
+  # No handoff dir should have been created under tmpdir (flag-off must be no-op)
+  local no_side_effects=1
+  if [[ -d "${tmpdir}/docs/handoff/TEST-SELECT-01" ]]; then
+    no_side_effects=0
+  fi
+
+  rm -f "$state_file"
+  rm -rf "$tmpdir"
+
+  if [[ "$keys_ok" -eq 1 && "$no_side_effects" -eq 1 ]]; then
+    pass "Test 7: flag-off => valid JSON, no side-effects"
+  else
+    fail "Test 7: flag-off expected valid JSON+no-side-effects; json_ok=$keys_ok no_side_effects=$no_side_effects output=$out"
+  fi
+}
+
+# ── Test 8: select-for-workflow flag-on → models within allowed set ──────────
+
+test_8_select_flag_on_models() {
+  log "Test 8: select-for-workflow LEADV2_ROUTE_BANDIT=1 => chosen models within allowed set"
+
+  local state_file tmpdir
+  state_file="$(_tmp_state)"
+  tmpdir="$(_tmp_dir)"
+  # Empty state so bandit falls back to seeded priors; heuristic => sonnet
+  printf 'version: 1\narms: {}\ncooldowns:\nmeta:\n  total_updates: 0\n' > "$state_file"
+
+  local out
+  out=$(LEADV2_ROUTE_BANDIT=1 LEADV2_PROJECT_ROOT="$tmpdir" \
+    bash "$BANDIT_SH" select-for-workflow \
+      --phase plan \
+      --class Standard \
+      --safety false \
+      --task-id "TEST-SELECT-02" \
+      --state-file "$state_file" 2>/dev/null)
+
+  local models_valid=0
+  python3 -c "
+import sys, json
+try:
+  d = json.loads(sys.stdin.read())
+  allowed = {'sonnet','opus'}
+  ok = all(d.get(k,'') in allowed for k in ['architect','critic','verify'])
+  sys.exit(0 if ok else 1)
+except Exception:
+  pass
+sys.exit(1)
+" <<< "$out" 2>/dev/null && models_valid=1 || models_valid=0
+
+  rm -f "$state_file"
+  rm -rf "$tmpdir"
+
+  if [[ "$models_valid" -eq 1 ]]; then
+    pass "Test 8: flag-on => all models within allowed set (sonnet/opus)"
+  else
+    fail "Test 8: flag-on => model outside allowed set; output=$out"
+  fi
+}
+
+# ── Test 9: select-for-workflow writes route-decisions.yaml under LEADV2_PROJECT_ROOT ─
+
+test_9_select_route_decisions_path() {
+  log "Test 9: select-for-workflow flag-on => route-decisions.yaml written under LEADV2_PROJECT_ROOT/docs/handoff/<task-id>/"
+
+  local state_file tmpdir
+  state_file="$(_tmp_state)"
+  tmpdir="$(_tmp_dir)"
+  # Initialise fake git repo so git-toplevel fallback resolves to tmpdir
+  git -C "$tmpdir" init -q 2>/dev/null || true
+
+  printf 'version: 1\narms: {}\ncooldowns:\nmeta:\n  total_updates: 0\n' > "$state_file"
+
+  LEADV2_ROUTE_BANDIT=1 LEADV2_PROJECT_ROOT="$tmpdir" \
+    bash "$BANDIT_SH" select-for-workflow \
+      --phase plan \
+      --class Standard \
+      --safety false \
+      --task-id "TEST-SELECT-03" \
+      --state-file "$state_file" 2>/dev/null || true
+
+  local rd_file="${tmpdir}/docs/handoff/TEST-SELECT-03/route-decisions.yaml"
+  local rd_exists=0
+  [[ -f "$rd_file" ]] && rd_exists=1
+
+  # Must NOT have written inside the plugin scripts/ tree
+  local no_plugin_leak=1
+  if [[ -d "${SCRIPT_DIR}/../../docs/handoff" ]]; then
+    no_plugin_leak=0
+  fi
+
+  rm -f "$state_file"
+  rm -rf "$tmpdir"
+
+  if [[ "$rd_exists" -eq 1 && "$no_plugin_leak" -eq 1 ]]; then
+    pass "Test 9: route-decisions.yaml at consuming-repo path; no plugin-tree leak"
+  else
+    fail "Test 9: rd_exists=$rd_exists no_plugin_leak=$no_plugin_leak; expected file at $rd_file"
+  fi
+}
+
+# ── Test 10: --task-id with path-traversal => no directory escape ─────────────
+
+test_10_task_id_no_escape() {
+  log "Test 10: --task-id containing '../' must not create dirs outside the handoff tree"
+
+  local state_file tmpdir
+  state_file="$(_tmp_state)"
+  tmpdir="$(_tmp_dir)"
+  printf 'version: 1\narms: {}\ncooldowns:\nmeta:\n  total_updates: 0\n' > "$state_file"
+
+  # Attempt path traversal via --task-id
+  LEADV2_ROUTE_BANDIT=1 LEADV2_PROJECT_ROOT="$tmpdir" \
+    bash "$BANDIT_SH" select-for-workflow \
+      --phase plan \
+      --class Standard \
+      --safety false \
+      --task-id "../../tmp/pwned-select" \
+      --state-file "$state_file" 2>/dev/null || true
+
+  # The traversal target must NOT have been created
+  local no_escape=1
+  if [[ -d "/tmp/pwned-select" ]]; then
+    no_escape=0
+    rm -rf "/tmp/pwned-select"
+  fi
+  # Also check the parent-relative path
+  local parent_target
+  parent_target="$(cd "$tmpdir" && cd ../.. && pwd)/tmp/pwned-select"
+  if [[ -d "$parent_target" ]]; then
+    no_escape=0
+    rm -rf "$parent_target"
+  fi
+
+  rm -f "$state_file"
+  rm -rf "$tmpdir"
+
+  if [[ "$no_escape" -eq 1 ]]; then
+    pass "Test 10: path-traversal task_id sanitized -- no dir created outside handoff"
+  else
+    fail "Test 10: path-traversal --task-id escaped the handoff tree"
+  fi
+}
+
 # ── run all tests ─────────────────────────────────────────────────────────────
 
 main() {
@@ -325,6 +502,10 @@ main() {
   test_3_corrupt_state
   test_4_cooldown
   test_5_idempotent_update
+  test_7_select_flag_off
+  test_8_select_flag_on_models
+  test_9_select_route_decisions_path
+  test_10_task_id_no_escape
 
   echo ""
   log "=== Results: PASS=$PASS FAIL=$FAIL ==="

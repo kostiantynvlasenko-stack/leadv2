@@ -297,6 +297,30 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-ledger.sh\"",
+            "timeout": 3,
+            "continueOnBlock": true,
+            "statusMessage": "BG-ledger: recording agent spawn..."
+          }
+        ]
+      },
+      {
+        "matcher": "Monitor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-ledger.sh\"",
+            "timeout": 3,
+            "continueOnBlock": true,
+            "statusMessage": "BG-ledger: recording watchdog..."
+          }
+        ]
       }
     ],
     "Stop": [
@@ -322,6 +346,13 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-prose-guard.sh\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-stop-warn.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "BG-backstop: checking unwatched agents..."
           }
         ]
       }

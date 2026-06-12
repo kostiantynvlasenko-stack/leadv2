@@ -362,6 +362,158 @@ cmd_rebuild() {
   return 0
 }
 
+# ── SELECT-FOR-WORKFLOW subcommand ────────────────────────────────────────────
+# Lead-side bandit selection for Workflow JS dispatch.
+# Workflow JS is sandboxed (no shell/fs), so bandit must run here before Workflow().
+#
+# USAGE:
+#   leadv2-route-bandit.sh select-for-workflow \
+#     --phase plan|review \
+#     --class Standard|Heavy|Strategic \
+#     --safety false|true \
+#     --task-id <id> \
+#     [--state-file /path]
+#
+# STDOUT: JSON map of role->model, e.g.:
+#   {"architect":"sonnet","critic":"sonnet","verify":"sonnet","safety":false}
+#
+# Also appends route-decisions.yaml entries (same format as router.sh) so
+# leadv2-scorecard-write.sh can count route_phases_captured.
+#
+# EXIT: always 0 (fail-safe — flag-off or any error emits pinned defaults)
+#
+# ENV: LEADV2_ROUTE_BANDIT — must be "1" to enable; else emits pinned defaults.
+
+cmd_select_for_workflow() {
+  local phase="" task_class="Standard" safety="false" task_id="" state_file=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --phase)      phase="$2";      shift 2 ;;
+      --class)      task_class="$2"; shift 2 ;;
+      --safety)     safety="$2";     shift 2 ;;
+      --task-id)    task_id="$2";    shift 2 ;;
+      --state-file) state_file="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  # Normalise safety to lowercase boolean string
+  safety="${safety,,}"
+  [[ "$safety" != "true" ]] && safety="false"
+
+  if [[ -z "$state_file" ]]; then
+    state_file="${LEADV2_BANDIT_STATE_FILE:-$(_default_state_file)}"
+  fi
+
+  # Resolve project root the same way leadv2-scorecard-write.sh does:
+  # honor LEADV2_PROJECT_ROOT, then PROJECT_ROOT, then git toplevel of $PWD
+  # (the consuming repo, e.g. persona-engine), falling back to $PWD. This
+  # keeps route-decisions.yaml under the consuming repo's docs/handoff/,
+  # matching where scorecard-write.sh later reads it from.
+  local proj_root
+  proj_root="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+
+  # ── Pinned defaults (flag-off => byte-identical to current JS hardcodes) ──────
+  # Mirrors hardcoded models in leadv2-plan.js / leadv2-review.js.
+  local default_architect="sonnet"
+  local default_critic="sonnet"
+  local default_verify="sonnet"
+
+  if [[ "$phase" == "plan" ]]; then
+    if [[ "$task_class" == "Heavy" || "$task_class" == "Strategic" ]]; then
+      default_architect="opus"
+    fi
+    [[ "$safety" == "true" ]] && default_critic="opus"
+  fi
+
+  if [[ "$phase" == "review" ]]; then
+    [[ "$safety" == "true" ]] && default_critic="opus"
+  fi
+
+  # Flag-off guard — emit defaults without touching bandit state
+  if [[ "${LEADV2_ROUTE_BANDIT:-0}" != "1" ]]; then
+    printf '{"architect":"%s","critic":"%s","verify":"%s","safety":%s}\n' \
+      "$default_architect" "$default_critic" "$default_verify" "$safety"
+    return 0
+  fi
+
+  _ensure_py_helper || {
+    log_warn "select-for-workflow: py helper missing; returning defaults"
+    printf '{"architect":"%s","critic":"%s","verify":"%s","safety":%s}\n' \
+      "$default_architect" "$default_critic" "$default_verify" "$safety"
+    return 0
+  }
+
+  local ctx_key="${phase}:${task_class}:${safety}"
+
+  # Allowed arms per role (sonnet vs opus)
+  local two_arms='["sonnet","opus"]'
+
+  # Helper: run a single bandit sample for one role
+  _wf_sample_role() {
+    local role_ctx_key="$1" allowed="$2" heuristic="$3"
+    local out arm
+    out=$(bash "$SCRIPT_DIR/leadv2-route-bandit.sh" sample \
+      --context-key "$role_ctx_key" \
+      --allowed "$allowed" \
+      --heuristic "$heuristic" \
+      --state-file "$state_file" 2>/dev/null) || true
+    arm=$(printf '%s\n' "$out" | grep '^chosen_arm=' | cut -d= -f2 || true)
+    printf '%s' "${arm:-$heuristic}"
+  }
+
+  local sel_architect sel_critic sel_verify
+  sel_architect=$(_wf_sample_role "${ctx_key}:architect" "$two_arms" "$default_architect")
+  sel_critic=$(_wf_sample_role    "${ctx_key}:critic"    "$two_arms" "$default_critic")
+  sel_verify=$(_wf_sample_role    "${ctx_key}:verify"    "$two_arms" "$default_verify")
+
+  # ── Append route-decisions.yaml (one entry per role) ─────────────────────────
+  # Sanitize task_id before any filesystem-path use (defense-in-depth, mirrors
+  # SAFE_TASK_ID in leadv2-routing-guard.sh / SAFE_SID in leadv2-bg-ledger.sh).
+  # Empty after sanitize => skip the route-decisions.yaml write entirely.
+  local safe_task_id
+  safe_task_id="$(printf -- '%s' "$task_id" | tr -cd 'A-Za-z0-9._-')"
+
+  if [[ -n "$safe_task_id" ]]; then
+    local handoff_dir="${proj_root}/docs/handoff/${safe_task_id}"
+    local rd_file="${handoff_dir}/route-decisions.yaml"
+    local rd_lock="${handoff_dir}/.route-decisions.lock"
+    local decided_at
+    decided_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    mkdir -p "$handoff_dir"
+
+    _wf_write_rd_entry() {
+      local role="$1" heuristic="$2" chosen="$3"
+      local deviation="false"
+      [[ "$chosen" != "$heuristic" ]] && deviation="true"
+      (
+        flock -x 200 || true
+        printf -- '- phase: %s\n'            "${phase}"       >> "$rd_file"
+        printf -- '  step: %s\n'             "${role}"        >> "$rd_file"
+        printf -- '  task_class: %s\n'       "${task_class}"  >> "$rd_file"
+        printf -- '  safety_touched: %s\n'   "${safety}"      >> "$rd_file"
+        printf -- '  heuristic_arm: %s\n'    "${heuristic}"   >> "$rd_file"
+        printf -- '  allowed_arms: %s\n'     '["sonnet","opus"]' >> "$rd_file"
+        printf -- '  chosen_arm: %s\n'       "${chosen}"      >> "$rd_file"
+        printf -- '  bandit_active: true\n'                   >> "$rd_file"
+        printf -- '  bandit_deviation: %s\n' "${deviation}"   >> "$rd_file"
+        printf -- '  context_key: %s\n'      "${ctx_key}:${role}" >> "$rd_file"
+        printf -- '  decided_at: "%s"\n'     "${decided_at}"  >> "$rd_file"
+        printf -- '  source: workflow\n'                      >> "$rd_file"
+      ) 200>"$rd_lock"
+    }
+
+    _wf_write_rd_entry "architect" "$default_architect" "$sel_architect"
+    _wf_write_rd_entry "critic"    "$default_critic"    "$sel_critic"
+    _wf_write_rd_entry "verify"    "$default_verify"    "$sel_verify"
+  fi
+
+  printf '{"architect":"%s","critic":"%s","verify":"%s","safety":%s}\n' \
+    "$sel_architect" "$sel_critic" "$sel_verify" "$safety"
+  return 0
+}
+
 # ── main dispatch ─────────────────────────────────────────────────────────────
 
 main() {
@@ -369,11 +521,12 @@ main() {
   shift || true
 
   case "$subcmd" in
-    sample)  cmd_sample  "$@" ;;
-    update)  cmd_update  "$@" ;;
-    rebuild) cmd_rebuild "$@" ;;
+    sample)               cmd_sample               "$@" ;;
+    update)               cmd_update               "$@" ;;
+    rebuild)              cmd_rebuild              "$@" ;;
+    select-for-workflow)  cmd_select_for_workflow  "$@" ;;
     *)
-      log_err "Unknown subcommand: '$subcmd'. Use: sample | update | rebuild"
+      log_err "Unknown subcommand: '$subcmd'. Use: sample | update | rebuild | select-for-workflow"
       exit 1
       ;;
   esac

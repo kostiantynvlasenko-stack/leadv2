@@ -149,6 +149,70 @@ PYEOF
 
 Shell variable substitution applies — fill in the reflect field values from §3/§4 before running.
 
+### §5c. Write knowledge archive entry to `docs/leadv2/knowledge/<NN>_<task-slug>.md`
+
+One grep-able entry per completed task. Written ONCE at close — do not overwrite if already exists.
+
+```bash
+KNOWLEDGE_DIR="${CWD}/docs/leadv2/knowledge"
+mkdir -p "$KNOWLEDGE_DIR"
+
+python3 - <<PYEOF
+import os, re, datetime
+
+knowledge_dir = "${KNOWLEDGE_DIR}"
+task_id       = "${task_id}"
+
+# Derive slug from task_id (lower, alphanum+hyphen, max 40 chars)
+slug = re.sub(r'[^a-z0-9-]', '-', task_id.lower())[:40].strip('-')
+
+# Next sequence number (NN = max existing + 1, zero-padded to 2 digits)
+existing = [f for f in os.listdir(knowledge_dir) if re.match(r'^\d+_', f)]
+nn = max((int(re.match(r'^(\d+)_', f).group(1)) for f in existing), default=0) + 1
+filename = os.path.join(knowledge_dir, f"{nn:02d}_{slug}.md")
+
+if os.path.exists(filename):
+    print(f"[lead-reflect] knowledge entry already exists: {filename}")
+else:
+    # Pull decisions from context.yaml
+    import yaml
+    ctx = {}
+    ctx_path = f"docs/handoff/${task_id}/context.yaml"
+    try:
+        with open(ctx_path) as fh:
+            ctx = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        pass
+
+    decisions_raw = ctx.get("decisions") or []
+    decisions_md  = "\n".join(f"- {d}" for d in decisions_raw) if decisions_raw else "- (none recorded)"
+    title         = ctx.get("title") or task_id
+    closed_at     = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=2))).strftime("%Y-%m-%d")
+
+    content = f"""# {nn:02d} {slug}
+
+**Task:** {title}
+**Closed:** {closed_at}
+
+## Decisions
+{decisions_md}
+
+## Gotchas
+- {("${almost_missed}" or "(none)").strip()}
+
+## Pattern
+`{("${pattern_for_immune}" or "none").strip()}`
+"""
+    with open(filename, "w") as fh:
+        fh.write(content)
+    print(f"[lead-reflect] knowledge archive entry written: {filename}")
+PYEOF
+```
+
+Shell variable substitution applies — `${almost_missed}` and `${pattern_for_immune}` must be set from §3 before running.
+
+---
+
 ### §5b. Append human board line to `docs/LEAD_V2_STATE.md` under `history:` section
 
 ```yaml

@@ -15,6 +15,12 @@ const SAFETY = a.safetyTouched === true
 const MISSION = a.missionPath || `docs/handoff/${TASK_ID}/review-mission.md`
 const DIFF = a.diffPath || `/tmp/leadv2-review-${TASK_ID}.diff`
 const CODEX_ON = a.codexEnabled !== false
+// [BANDIT-WIRE-01] Consume bandit model selections from args.models (set by lead before Workflow call).
+// args.models absent (or LEADV2_ROUTE_BANDIT != 1) => falls back to existing pinned defaults.
+// Flag-off guarantee: if args.models is not provided, model values are identical to pre-BANDIT-WIRE-01.
+const _MODELS = (a.models && typeof a.models === 'object') ? a.models : {}
+const CRITIC_MODEL = _MODELS.critic || (SAFETY ? 'opus' : 'sonnet')
+const VERIFY_MODEL = _MODELS.verify || 'sonnet'
 const FINDINGS_SCHEMA = {
   type: 'object', additionalProperties: false,
   properties: {
@@ -39,7 +45,7 @@ phase('Review')
 const reviewers = [
   () => agent(
     `Adversarial code review of the diff at ${DIFF}. Brief: ${MISSION}. Read the diff yourself (git diff ${BASE}). Report findings: correctness bugs, type/RLS gaps, N+1, missing tests, design-system violations. Severity-tag each. Minimal-diff context only.`,
-    { label: 'critic', phase: 'Review', agentType: 'critic', model: SAFETY ? 'opus' : 'sonnet', schema: FINDINGS_SCHEMA }),
+    { label: 'critic', phase: 'Review', agentType: 'critic', model: CRITIC_MODEL, schema: FINDINGS_SCHEMA }),
   () => agent(
     `Run hack-detection on the diff at ${DIFF}: TODO/FIXME band-aids, magic numbers, broad except, hardcoded creds/secrets, silent fallbacks. Return each as a finding (dimension="hack").`,
     { label: 'hack-detect', phase: 'Review', model: 'haiku', schema: FINDINGS_SCHEMA }),
@@ -74,7 +80,7 @@ if (cappedBlocking.length > 0) {
   const verdicts = await parallel(cappedBlocking.map(f => () =>
     agent(
       `Try to REFUTE this finding. Default is_real=false if you cannot concretely confirm it against ${DIFF}. Finding [${f.severity}/${f.dimension}]: ${f.description}. Fix: ${f.suggested_fix || '(none)'}.`,
-      { label: `verify:${f.dimension}`, phase: 'Verify', model: 'sonnet', schema: VERDICT_SCHEMA }
+      { label: `verify:${f.dimension}`, phase: 'Verify', model: VERIFY_MODEL, schema: VERDICT_SCHEMA }
     ).then(v => ({ ...f, verdict: v }))))
   confirmedBlocking = verdicts.filter(Boolean).filter(f => f.verdict && f.verdict.is_real)
   log(`Verify: ${cappedBlocking.length} capped (${overflowFindings.length} overflow) -> ${confirmedBlocking.length} survived refutation`)
