@@ -128,6 +128,32 @@ Agent(subagent_type=<role>, model=<opus|sonnet>,
       run_in_background=true)   # MANDATORY
 # Wait for task-notification; Read(deliverable, limit=30); synthesize into context.yaml.
 ```
+
+## BG-agent liveness protocol (anti-silent-death, 2026-06-12)
+
+Background agents can die silently (org spend limit, crash) OR finish fine while their
+completion notification is lost/mislabeled (seen: notification attributed to a PREVIOUS
+agent's task-id as an apparent duplicate). `TaskOutput` on a completed bg agent returns
+"No task found" — that is NOT proof of death. The deliverable-trim hook may save the
+deliverable as `<name>.full.md` instead of `<name>.md`.
+
+1. **Pair every critical spawn with a deliverable watchdog Monitor** checking BOTH names:
+   ```
+   Monitor(command="for i in $(seq 1 N); do for f in <path>.md <path>.full.md; do
+     [ -f \"$f\" ] && echo DONE && exit 0; done; sleep 60; done; echo STALLED; exit 1", ...)
+   ```
+2. **Before declaring an agent dead:** (a) check its transcript tail
+   (`<session-dir>/subagents/agent-<id>.jsonl` — last record `stop_reason: end_turn` =
+   it finished; look for the deliverable under both names), (b) only then respawn with
+   "continue from existing edits, check git status first" framing.
+3. **A developer may keep working after its first completion notification** (second
+   notification, higher token count). Re-check file state before spawning a fix-round
+   agent for a finding that may already be fixed.
+4. **Repeated silent deaths in a row ≈ org spend limit** — tell the founder immediately
+   (/login or wait), do not respawn into the same wall.
+5. **Long pipeline sessions:** session cron heartbeat every ~20 min (off-minute) —
+   compare running agents vs appeared deliverables, respawn the dead.
+
 ---
 
 # Hard bans
