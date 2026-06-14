@@ -63,15 +63,74 @@ try:
 except: pass
 print(last)
 " 2>/dev/null || echo 0)
-BYTES=$(python3 -c "
-import os, sys
-with open('$JSONL') as fh:
-    lines = fh.readlines()
-start = int('$LAST_COMPACT_LINE') if '$LAST_COMPACT_LINE' else 0
-print(sum(len(l) for l in lines[start:]))
-" 2>/dev/null || wc -c < "$JSONL" | tr -d ' ')
+_TOKENS_RESULT=$(python3 -c "
+import json, sys
+
+def is_image(obj):
+    if not isinstance(obj, dict):
+        return False
+    t = obj.get('type','')
+    if t in ('image','image_url'):
+        return True
+    if 'source' in obj and isinstance(obj.get('source'), dict) and 'data' in obj['source']:
+        return True
+    return False
+
+def walk(obj):
+    text_chars = 0
+    image_count = 0
+    if isinstance(obj, dict):
+        if is_image(obj):
+            image_count += 1
+            src = obj.get('source', {})
+            for k, v in obj.items():
+                if k == 'source':
+                    for sk, sv in (src.items() if isinstance(src, dict) else []):
+                        if sk == 'data':
+                            continue
+                        tc, ic = walk(sv)
+                        text_chars += tc; image_count += ic
+                else:
+                    tc, ic = walk(v)
+                    text_chars += tc; image_count += ic
+        else:
+            for k, v in obj.items():
+                tc, ic = walk(v)
+                text_chars += tc; image_count += ic
+    elif isinstance(obj, list):
+        for item in obj:
+            tc, ic = walk(item)
+            text_chars += tc; image_count += ic
+    elif isinstance(obj, str):
+        text_chars += len(obj)
+    return text_chars, image_count
+
+try:
+    with open('$JSONL') as fh:
+        lines = fh.readlines()
+    start = int('$LAST_COMPACT_LINE') if '$LAST_COMPACT_LINE' else 0
+    raw_bytes = sum(len(l) for l in lines[start:])
+    text_chars = 0
+    image_count = 0
+    for line in lines[start:]:
+        try:
+            obj = json.loads(line)
+            tc, ic = walk(obj)
+            text_chars += tc; image_count += ic
+        except:
+            pass
+    est_tokens = int(text_chars / 4) + image_count * 1500
+    print(raw_bytes, est_tokens)
+except Exception:
+    import os
+    size = os.path.getsize('$JSONL')
+    print(size, size // 4)
+" 2>/dev/null || echo "0 0")
+_RAW_BYTES=$(echo "$_TOKENS_RESULT" | awk '{print $1}')
+_EST_TOKENS=$(echo "$_TOKENS_RESULT" | awk '{print $2}')
+BYTES=${_RAW_BYTES:-0}
 KB=$((BYTES / 1024))
-EST_TOKENS=$((BYTES / 4))
+EST_TOKENS=${_EST_TOKENS:-0}
 EST_K=$((EST_TOKENS / 1000))
 
 # Count founder typed turns (excludes tool_results)
@@ -120,17 +179,20 @@ if [[ -n "$ACTIVE" ]]; then
   [[ -n "$TID" ]] && TASK_NOTE=" task=$TID"
 fi
 
-# Thresholds — bytes-driven, not turn-count
-# 500KB ≈ 125K tokens of conversation prefix (each new turn re-sends this)
-# 1.5MB ≈ 375K tokens — every turn now eats serious cap
-# 3MB ≈ 750K tokens — emergency
+# Thresholds — token-driven, image-corrected (EST_TOKENS not raw bytes).
+# Override via env: LEADV2_COMPACT_WARN_TOKENS / HARD / EMERGENCY.
+# Defaults: 200K warn, 400K hard, 650K emergency.
+# Raw file KB is still shown for display; level decision uses EST_TOKENS.
+WARN_T="${LEADV2_COMPACT_WARN_TOKENS:-200000}"
+HARD_T="${LEADV2_COMPACT_HARD_TOKENS:-400000}"
+EMERG_T="${LEADV2_COMPACT_EMERGENCY_TOKENS:-650000}"
 
 # Throttle: write a marker so we don't re-emit on every Stop after threshold crossed
 MARKER="/tmp/.leadv2-compact-warned-${SESSION_ID}"
 LEVEL=""
-if [[ "$BYTES" -ge 3145728 ]]; then LEVEL="emergency"
-elif [[ "$BYTES" -ge 1572864 ]]; then LEVEL="hard"
-elif [[ "$BYTES" -ge 524288 ]]; then LEVEL="warn"
+if [[ "$EST_TOKENS" -ge "$EMERG_T" ]]; then LEVEL="emergency"
+elif [[ "$EST_TOKENS" -ge "$HARD_T" ]]; then LEVEL="hard"
+elif [[ "$EST_TOKENS" -ge "$WARN_T" ]]; then LEVEL="warn"
 elif [[ "$FOUNDER_TURNS" -ge 30 ]]; then LEVEL="long_chat"
 fi
 [[ -z "$LEVEL" ]] && exit 0
