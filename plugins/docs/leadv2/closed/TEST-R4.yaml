@@ -1,0 +1,20 @@
+also_closes: []
+board_prose: '- **TEST-R4 ✅ SHIPPED de46299.** TEST-R4 closed'
+class: Standard
+closed_at: '2026-06-14T15:55:26Z'
+commit: de46299
+dialogue_prose: 'task_id: TEST-R4 | outcome: completed_success | class: Standard
+
+  TEST-R4 closed'
+files_touched:
+- CHANGELOG.md
+- plugins/leadv2/hooks/leadv2-compact-trigger.sh
+- plugins/leadv2/hooks/leadv2-loop-detect-hook.sh
+- plugins/leadv2/scripts/leadv2-phase8-close.sh
+- plugins/leadv2/scripts/leadv2-scorecard-write.sh
+followups: []
+outcome: completed_success
+summary_one_line: TEST-R4 closed
+task_id: TEST-R4
+title: TEST-R4
+vps_deployed: []

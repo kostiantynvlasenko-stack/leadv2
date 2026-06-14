@@ -138,6 +138,11 @@
         "null"
       ],
       "description": "Composite reward value (0.0-1.0) written by leadv2-route-bandit.sh update at close time. Null when bandit was not active or update has not run. Optional field."
+    },
+    "security_auditor_fired": {
+      "type": "integer",
+      "description": "1 if the security-auditor agent was spawned during Phase 5 Review for this task, 0 otherwise. Observability signal for the safety gate. Optional field.",
+      "enum": [0, 1]
     }
   }
 }

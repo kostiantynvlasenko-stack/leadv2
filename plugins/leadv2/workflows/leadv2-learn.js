@@ -73,7 +73,9 @@ const patterns = await agent(
   `Aggregate the leadv2 learning signals. Steps:\n` +
   `1. Run: bash .claude/scripts/leadv2-signatures-aggregate.sh (if present) and read its output.\n` +
   `2. Read all docs/handoff/*/review-signature.md lines (verdict/blocking/dims).\n` +
-  `3. Read docs/leadv2/immune-patterns.yaml (or .claude immune store) if present.\n` +
+  `3. Read docs/leadv2/reflect-history.yaml (if present) — this contains per-close reflect entries (patterns, failure_classes, lessons). It is the PRIMARY accumulated signal source (680+ lines). Parse each entry\'s failure_class, pattern, and lesson fields.\n` +
+  `4. Read docs/leadv2/immune-patterns.yaml (or .claude immune store) if present.\n` +
+  `Combine signals from BOTH review-signature.md files AND reflect-history.yaml entries. ` +
   `Identify recurring failure signals: which review dimensions recur, REVISE rate, repeated failure_classes/phases. ` +
   `Return them as recurring[] with counts. Be factual — only what the data shows.`,
   { label: 'gather', phase: 'Gather', model: 'haiku', schema: PATTERNS_SCHEMA })

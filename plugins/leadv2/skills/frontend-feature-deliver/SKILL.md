@@ -1,6 +1,7 @@
 ---
 name: frontend-feature-deliver
-description: Full pipeline to implement a frontend feature — spec → code → tsc → visual before/after diff → critic → commit + deploy.
+description: >-
+  [DEPRECATED 2026-06-14: superseded by leadv2-po-feedback-loop] Full pipeline to implement a frontend feature — spec → code → tsc → visual before/after diff → critic → commit + deploy.
 triggers:
   - сделай фичу на фронте
   - реализуй UI

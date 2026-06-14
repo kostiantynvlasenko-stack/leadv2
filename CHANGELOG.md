@@ -34,6 +34,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **PLUGIN-EXPAND-20260614 — 3-pillar self-improvement program** (all flag-gated, default-off, flag-off byte-identical):
+  - *Routing/self-learning:* new PreToolUse:Workflow hook `leadv2-bandit-preflight.sh` auto-runs
+    `select-for-workflow` (writes route-decisions.yaml) when `LEADV2_ROUTE_BANDIT=1` and it's
+    absent — closes the gap that left the bandit frozen at seed (it was documented-not-enforced).
+    `select-for-workflow` also promoted to a mandatory numbered step in leadv2-plan/review SKILL.md.
+    Scorecard-write emits a WARN when bandit is active but `route_phases_captured=0`. `leadv2-learn`
+    auto-triggers every 10 closes (`LEADV2_LEARN_ON_CLOSE=1`) and now reads `reflect-history.yaml`.
+  - *Agent/skill selection:* `leadv2-plan.js` emits a deterministic `plan.steps[i].agent_hint`
+    (writes-path + keywords → agent type; zero extra LLM calls), consumed by the Build skill as the
+    default subagent_type — first agent-TYPE selection (the bandit only routes models). New scorecard
+    field `security_auditor_fired`. Three zero-signal skills deprecated (frontend-feature-deliver,
+    frontend-screenshot-audit, modern-web-guidance) — frontmatter-only, reversible.
+  - *Native primitives:* `LEADV2_GOAL_INTERACTIVE=1` (+60-turn cap) fires `/goal` in Phase 4 for
+    interactive Standard+/Heavy; `leadv2-router.sh` emits `USE_WORKFLOW=1` and phases.md §Phase-2/5
+    now describe workflow-dispatch with a schema-death inline fallback instead of the hand-rolled triad.
 - **Unrecognized-entity rule (UE, §6.5)** — subagent protocol now requires a
   one-probe existence check for any table / column / env flag / script path /
   library method / API endpoint not present in `context.yaml`, the mission

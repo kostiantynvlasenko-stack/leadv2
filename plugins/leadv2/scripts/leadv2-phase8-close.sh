@@ -358,5 +358,39 @@ else
 fi
 # ── end bandit update ─────────────────────────────────────────────────────────
 
+# ── [R4] Learn trigger: every N closes drop a signal for leadv2-learn ────────
+# Gated by LEADV2_LEARN_ON_CLOSE=1 (DEFAULT OFF).
+# Counts lines in scorecard.jsonl; when count % N == 0 writes a trigger file
+# that lead picks up at next session start. Non-blocking: never gates close.
+# LEADV2_LEARN_EVERY_N tunes the interval (default 10).
+if [[ "${LEADV2_LEARN_ON_CLOSE:-0}" == "1" ]]; then
+  _learn_n="${LEADV2_LEARN_EVERY_N:-10}"
+  # Use PROJECT_ROOT-relative path (phase8 always cd'd to PROJECT_ROOT above)
+  _sc_file="${PROJECT_ROOT}/docs/leadv2/scorecard.jsonl"
+  # Only trigger learn when scorecard is also enabled; stale line-counts from
+  # prior sessions cannot be isolated when scorecard is disabled, so guard both.
+  _close_count=0
+  if [[ "${LEADV2_SCORECARD_ON_CLOSE:-0}" == "1" && -f "$_sc_file" ]]; then
+    _close_count=$(wc -l < "$_sc_file" 2>/dev/null || echo 0)
+    _close_count=$(( _close_count + 0 ))   # strip whitespace
+  fi
+  if [[ $_learn_n -gt 0 && $(( _close_count % _learn_n )) -eq 0 && $_close_count -gt 0 ]]; then
+    _trigger_dir="${PROJECT_ROOT}/docs/leadv2"
+    mkdir -p "$_trigger_dir"
+    _trigger_file="${_trigger_dir}/.learn-trigger"
+    printf -- 'trigger_task_id: %s
+trigger_close_count: %d
+triggered_at: %s
+'       "$TASK_ID" "$_close_count" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$_trigger_file"
+    log_info "[learn-trigger] wrote ${_trigger_file} (close_count=${_close_count}, every_n=${_learn_n})"
+  else
+    log_info "[skip] learn-trigger not due (close_count=${_close_count} mod ${_learn_n} != 0, or LEADV2_LEARN_ON_CLOSE not triggering)"
+  fi
+else
+  log_info "[skip] learn-trigger skipped (LEADV2_LEARN_ON_CLOSE not set)"
+fi
+# ── end learn trigger ─────────────────────────────────────────────────────────
+
+
 log_info "Phase 8 close complete for ${TASK_ID} (YAML: ${YAML_PATH})"
 exit 0

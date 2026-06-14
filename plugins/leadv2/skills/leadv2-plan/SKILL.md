@@ -16,24 +16,28 @@ allowed-tools:
 
 ## Protocol
 
+### Step 0 — Bandit model selection (MANDATORY when `LEADV2_ROUTE_BANDIT=1`)
 
-> **[BANDIT-WIRE-01] Route-bandit model selection (when `LEADV2_ROUTE_BANDIT=1`):**
-> Before calling `Workflow({name:"leadv2-plan", ...})`, run lead-side bandit selection:
-> ```bash
-> MODELS=$(bash .claude/scripts/lv2 leadv2-route-bandit.sh select-for-workflow \
->   --phase plan \
->   --class "${TASK_CLASS}" \
->   --safety "${SAFETY_TOUCHED:-false}" \
->   --task-id "${TASK_ID}")
-> ```
-> Pass the result as `args.models`:
-> ```
-> Workflow({name:"leadv2-plan", args:{taskId, taskBrief, heavy, ..., models: JSON.parse(MODELS)}})
-> ```
-> The workflow JS consumes `args.models.architect` / `args.models.critic` with fallback to pinned defaults.
-> Flag-off (`LEADV2_ROUTE_BANDIT != 1`) or absent `args.models`: byte-identical to pre-BANDIT-WIRE-01 behavior.
-> The bandit also writes `docs/handoff/<id>/route-decisions.yaml` entries consumed by scorecard-write.sh.
->
+**Before invoking `Workflow()`, you MUST run `select-for-workflow` when the bandit is active.**
+Skipping this step freezes arm posteriors — the bandit never learns from this task.
+
+1. Check flag: `if [[ "${LEADV2_ROUTE_BANDIT:-0}" == "1" ]]`
+2. Run selection — writes `docs/handoff/${TASK_ID}/route-decisions.yaml`:
+   ```bash
+   MODELS=$(bash .claude/scripts/lv2 leadv2-route-bandit.sh select-for-workflow \
+     --phase plan \
+     --class "${TASK_CLASS}" \
+     --safety "${SAFETY_TOUCHED:-false}" \
+     --task-id "${TASK_ID}")
+   ```
+3. Pass result as `args.models` to the Workflow call:
+   ```
+   Workflow({name:"leadv2-plan", args:{taskId, taskBrief, heavy, ..., models: JSON.parse(MODELS)}})
+   ```
+
+The workflow JS consumes `args.models.architect` / `args.models.critic` with fallback to pinned defaults.
+**Flag-off (`LEADV2_ROUTE_BANDIT != 1`):** skip the shell call entirely — behavior is byte-identical to pre-BANDIT-WIRE-01.
+The bandit writes `docs/handoff/<id>/route-decisions.yaml`; scorecard-write.sh reads it at Phase 8 close.
 
 > **PREFERRED — saved workflow (offload, model-pinned, 2026-06-09):** when the `Workflow` tool is available, issue
 > `Workflow({name:"leadv2-plan", args:{taskId, taskBrief, heavy, archKeyword, codexEnabled, missionPath}})`.

@@ -74,6 +74,26 @@ If it exists, extract all lines matching CRITICAL or HIGH severity (grep for "C[
 
 Append this block to EVERY developer mission prompt in step 2. If no CRITICAL/HIGH findings → skip (no empty section).
 
+### 1d-hint. Agent-hint pre-spawn lookup (MANDATORY when context.yaml has agent_hint fields)
+
+**Before spawning each step**, read `plan.steps[i].agent_hint` from context.yaml. Map to `subagent_type`:
+
+| agent_hint | subagent_type | Auto-inject skill_hints |
+|---|---|---|
+| `postgres-pro` | `postgres-pro` | `supabase-ops,database-patterns` |
+| `frontend-developer` | `frontend-developer` | `modern-web-guidance` |
+| `security-auditor` | `security-auditor` | _(none extra)_ |
+| `devops-engineer` | `devops-engineer` | `bash-scripting,error-handling` |
+| `developer` | `developer` | _(context-dependent)_ |
+| _(absent)_ | `developer` | log WARN: `agent_hint missing for step N` |
+
+Append the `skill_hints` value to the developer mission's `Skills:` line, e.g.:
+```
+Skills: codebase-memory, supabase-ops, database-patterns
+```
+
+**Override rule:** lead may override `agent_hint` by writing `agent_hint_override: <type>` in the per-step mission file. Include a one-line justification comment. Never silently ignore hint — either use it or document the override.
+
 ### 1d. Cache warming before parallel developer spawns
 
 If `plan.parallel_groups` has >1 developer in the same group → pre-warm before spawning:

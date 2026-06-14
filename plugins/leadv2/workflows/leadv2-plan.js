@@ -78,12 +78,31 @@ if (architectFailed) {
   }
 }
 
+// [AGENT-HINT-01] Deterministic agent_hint per plan step — zero extra LLM calls.
+// Lookup order: SQL/migrations/RLS → postgres-pro; web/*.tsx → frontend-developer;
+// auth/cookie/webhook/session/token/secret → security-auditor;
+// *.sh/systemd/deploy/vps → devops-engineer; else → developer.
+// Build phase consumes step.agent_hint as default subagent_type (fallback: developer).
+function inferAgentHint(stepText) {
+  const s = (stepText || '').toLowerCase()
+  if (/\.sql$/.test(s) || /migrations\//.test(s) || /\brls\b|\bpolicy\b/.test(s)) return 'postgres-pro'
+  if (/web\/.*\.tsx?$/.test(s)) return 'frontend-developer'
+  if (/\b(auth|cookie|webhook|session|token|secret)\b/.test(s)) return 'security-auditor'
+  if (/\.sh$/.test(s) || /\b(systemd|deploy|vps|ops)\b/.test(s)) return 'devops-engineer'
+  return 'developer'
+}
+const annotatedSteps = arch.plan_steps.map((stepText, i) => ({
+  id: i + 1, mission: stepText, agent_hint: inferAgentHint(stepText),
+}))
+log(`Agent hints: ${annotatedSteps.map(s => `${s.id}:${s.agent_hint}`).join(', ')}`)
+
 phase('Synthesize')
 await agent(
   `Write a leadv2 context.yaml to ${CTX} merging this plan. ` +
-  `decisions: ${JSON.stringify(arch.decisions)}. steps: ${JSON.stringify(arch.plan_steps)}. ` +
+  `decisions: ${JSON.stringify(arch.decisions)}. steps (with agent_hint per step): ${JSON.stringify(annotatedSteps)}. ` +
   `off_limits: ${JSON.stringify(arch.off_limits || [])}. risks: ${JSON.stringify(arch.risks || [])}. ` +
   `concerns: ${JSON.stringify(concerns)}. Use the standard leadv2 context.yaml shape (decisions[], off_limits[], plan.steps[], risk summary). ` +
+  `Each plan.steps[i] MUST include the agent_hint field from the annotated steps above. ` +
   `Resolve any critic concern into either an off_limit or a plan step. Return "ok".`,
   { label: 'synthesize', phase: 'Synthesize', model: 'sonnet' })
 
@@ -97,15 +116,16 @@ if (validationResult && !validationResult.valid) {
   log(`Validation failed: ${validationError} — re-running Synthesize once`)
   await agent(
     `RETRY: context.yaml validation failed with: ${validationError}. Re-write ${CTX} ensuring required fields id, mission, reads, writes, acceptance are present. ` +
-    `decisions: ${JSON.stringify(arch.decisions)}. steps: ${JSON.stringify(arch.plan_steps)}. ` +
+    `decisions: ${JSON.stringify(arch.decisions)}. steps (with agent_hint per step): ${JSON.stringify(annotatedSteps)}. ` +
     `off_limits: ${JSON.stringify(arch.off_limits || [])}. risks: ${JSON.stringify(arch.risks || [])}. ` +
-    `concerns: ${JSON.stringify(concerns)}. Return "ok".`,
+    `concerns: ${JSON.stringify(concerns)}. Each plan.steps[i] MUST include the agent_hint field. Return "ok".`,
     { label: 'synthesize-retry', phase: 'Synthesize', model: 'sonnet' })
 }
 
 return {
   task_id: TASK_ID, context_path: CTX,
   decisions_count: arch.decisions.length, steps_count: arch.plan_steps.length,
+  agent_hints: annotatedSteps.map(s => ({ id: s.id, agent_hint: s.agent_hint })),
   blocking_concerns: blocking.length,
   risk_summary: (arch.risks || []).slice(0, 3),
   needs_founder_decision: blocking.length > 0,

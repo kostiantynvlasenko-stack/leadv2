@@ -207,12 +207,24 @@ shadow_arm = 'A' if h % 2 == 0 else 'B'
 
 # Optional: nested_spawns from nested-spawns.log allow-count
 nested_spawns = 0
+security_auditor_fired = 0
 ns_log = Path(project_root) / 'docs' / 'leadv2' / 'tasks' / task_id / 'nested-spawns.log'
 if ns_log.exists():
     try:
-        nested_spawns = sum(1 for ln in ns_log.read_text().splitlines() if 'verdict=allow' in ln)
+        lines = ns_log.read_text().splitlines()
+        nested_spawns = sum(1 for ln in lines if 'verdict=allow' in ln)
+        # T2-S4: detect security-auditor spawn (allow verdict lines referencing the role)
+        security_auditor_fired = 1 if any(
+            'verdict=allow' in ln and 'security-auditor' in ln for ln in lines
+        ) else 0
     except Exception:
         nested_spawns = 0
+        security_auditor_fired = 0
+# Fallback: check review-phase signal file written by leadv2-review when auditor fires
+if security_auditor_fired == 0:
+    sa_signal = Path(project_root) / 'docs' / 'handoff' / task_id / 'security-auditor-fired'
+    if sa_signal.exists():
+        security_auditor_fired = 1
 
 # Optional: escalations_used from escalation-budget.yaml
 escalations_used = 0
@@ -276,6 +288,7 @@ row = {
     'route_phases_captured': route_phases_captured,
     'bandit_deviations': bandit_deviations,
     'bandit_reward_composite': bandit_reward_composite,
+    'security_auditor_fired': security_auditor_fired,
 }
 
 unknown = set(row.keys()) - allowed_keys
@@ -316,6 +329,14 @@ ROW_JSON=$(_py_build_row \
   [[ $rc -eq 4 ]] && { log_error "Schema violation (exit 4) — row not appended"; exit 4; }
   log_error "Row build failed (exit ${rc})"; exit 1
 }
+
+# R3: WARN when bandit active but no route phases were captured (bandit got no pick)
+if [[ "${LEADV2_ROUTE_BANDIT:-0}" == "1" ]]; then
+  _captured=$(python3 -c "import sys,json; print(json.loads(sys.argv[1]).get('route_phases_captured',0))" "$ROW_JSON" 2>/dev/null || printf -- '0')
+  if [[ "$_captured" == "0" ]]; then
+    log "WARN [R3]: LEADV2_ROUTE_BANDIT=1 but route_phases_captured=0 for task_id=${TASK_ID} — route-decisions.yaml was missing; bandit arm was not updated. Run select-for-workflow before Workflow() dispatch."
+  fi
+fi
 
 # Dry-run: print and exit
 if [[ "$DRY_RUN" -eq 1 ]]; then

@@ -1,6 +1,7 @@
 ---
 name: frontend-screenshot-audit
-description: Capture screenshots of every route × theme × state and run designer-vision review. Produces PNG gallery + vision-report.md punch list.
+description: >-
+  [DEPRECATED 2026-06-14: visual verify built into leadv2-po-feedback-loop] Capture screenshots of every route × theme × state and run designer-vision review. Produces PNG gallery + vision-report.md punch list.
 triggers:
   - проверь UI
   - screenshot страницы

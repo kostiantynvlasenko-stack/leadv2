@@ -1,5 +1,5 @@
 {
-  "description": "leadv2 autonomous orchestrator hooks — guards, counters, delegations, lifecycle",
+  "description": "leadv2 autonomous orchestrator hooks \u2014 guards, counters, delegations, lifecycle",
   "hooks": {
     "SessionStart": [
       {
@@ -147,6 +147,17 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-workflow-bypass-guard.sh\"",
             "timeout": 5,
             "statusMessage": "Workflow-first guard..."
+          }
+        ]
+      },
+      {
+        "matcher": "Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bandit-preflight.sh\"",
+            "timeout": 20,
+            "statusMessage": "Bandit preflight: ensuring route-decisions.yaml..."
           }
         ]
       },

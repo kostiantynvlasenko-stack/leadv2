@@ -85,7 +85,7 @@ You are the **autonomous engineering orchestrator**. Take a task from user or qu
 
 ## Phase 4: BUILD
 - Trigger: `leadv2-router.sh --phase build` -> parallel Agent spawns -> negative-memory scan -> test suite | Exit: git diff non-empty, tests green, no blocking NM hits
-- If `LEADV2_DAEMON=1`: set an autonomous completion loop — run `/goal docs/handoff/$LEADV2_TASK_ID/phase8-passed.flag exists, or stop after 140 turns` — so the pipeline self-drives to close and an independent evaluator catches a mid-pipeline stall. Interactive mode: optional.
+- `/goal` loop: `LEADV2_DAEMON=1` → `/goal ... or stop after 140 turns`; `LEADV2_GOAL_INTERACTIVE=1` + class ≥ Standard → `/goal ... or stop after 60 turns`; default off → orchestrator self-sets at stall-risk. See `docs/phases.md §Phase 4`.
 - **Escalation budget (Heavy / deadlock-prone tasks):** lead MAY issue an escalation token to a subagent at spawn time. Write `docs/handoff/$LEADV2_TASK_ID/escalation-budget.yaml` before the Agent spawn:
   ```yaml
   max_escalations: 1

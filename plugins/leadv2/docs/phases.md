@@ -51,6 +51,7 @@ Each phase entry calls `leadv2_pulse_log "<phase>" "<one-line summary>"` — emi
 - `LEADV2_GATE1_HEAVY_TIMEOUT_SEC=N` — Gate 1 timeout for Heavy tasks in daemon mode (default 60s; 0 = immediate auto-accept). Only applies when LEADV2_DAEMON=1.
 - `LEADV2_MAX_SELF_SPAWNS_PER_DAY=N` — daily self-spawn cap (default 4)
 - `FORCE_OPUS_LEAD=1` — force orchestrator to Opus model
+- `LEADV2_GOAL_INTERACTIVE=1` — when set, lead self-fires `/goal` at Phase 4 start for Standard+/Heavy in interactive (non-daemon) sessions; 60-turn cap (vs 140 for daemon). Default: 0 (off).
 - Note: `LEAD_V2_DAEMON` is a deprecated alias for `LEADV2_DAEMON` — use `LEADV2_DAEMON`
 
 
@@ -136,14 +137,35 @@ generators BEFORE the convergent Plan triad commits. Ported from ADHD
 
 ## §Phase 2: PLAN
 
-**Route first:** `eval "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase plan --step <step> --task-id <id> --class <class> --signals '{...}' 2>/dev/null)" || true` (exit 2 = fall through to class-based default).
+**Route first:** `eval "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase plan --step <step> --task-id <id> --class <class> --signals '{...}' 2>/dev/null)" || true` (exit 2 = fall through to class-based default). When `USE_WORKFLOW=1` is emitted, use the Workflow path below.
 
-**Single message, parallel spawns:**
+**Dispatch (check `USE_WORKFLOW` from router output):**
+
+When `LEADV2_WORKFLOW_ENABLED=1` (default in persona-engine), the router emits `USE_WORKFLOW=1`. Use the Workflow path:
+
+```
+plan_result=$(Workflow('leadv2-plan', {
+  taskId: "$LEADV2_TASK_ID",
+  taskBrief: "<one-sentence task description>",
+  heavy: <true|false>,
+  missionPath: "/tmp/mission-${LEADV2_TASK_ID}.md",
+  codexEnabled: <true if codex-task.sh available>,
+  models: { architect: "opus", critic: "opus", codex: "default" }
+}))
+```
+
+`Workflow('leadv2-plan')` handles: Codex background launch + Monitor watchdog, parallel architect/critic spawns, synthesis into `docs/handoff/<id>/context.yaml`. Returns `{decisions_count, steps_count, blocking_concerns, context_path}`.
+
+**Schema-death fallback (null-check on Workflow return — MANDATORY):** If `plan_result` is null/undefined or `context_path` is missing → log to pulse `plan-workflow: schema-death, falling back to inline` and fall through to the inline path below.
+
+**Inline path (flag off or Workflow schema-death):**
+
+Single message, parallel spawns:
 1. `${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-codex-planner.sh --task-id <id> --mission-file /tmp/mission-<id>.md --effort <high|xhigh>` — background, **only if** `command -v codex-task.sh >/dev/null 2>&1 && codex-task.sh status >/dev/null 2>&1` exits 0 (requires Codex CLI installed; see docs/INSTALLATION.md). If unavailable → skip, Agent(critic) covers Stage 1.
 2. `Agent(subagent_type=architect, model=opus, run_in_background=true)` — if Heavy or arch keyword (NOT claude-subsession)
 3. `Agent(subagent_type=critic, model=opus, run_in_background=true)` — if class ≥ Standard; use `model=sonnet` when Codex already fired and task is Standard (not Heavy)
 
-**MANDATORY after Codex launch (step 1):** Codex does NOT send task-notifications. Capture the task ID printed by `leadv2-codex-planner.sh` (first token on stdout, e.g. `task-abc123`), then immediately spawn a Monitor using the real ID:
+**MANDATORY after Codex launch (inline path only):** Codex does NOT send task-notifications. Capture the task ID printed by `leadv2-codex-planner.sh` (first token on stdout, e.g. `task-abc123`), then immediately spawn a Monitor using the real ID:
 ```bash
 # CODEX_PLAN_ID = actual task-id printed by leadv2-codex-planner.sh
 Monitor(
@@ -197,17 +219,28 @@ Update `docs/leadv2/tasks/<id>/STATE.md` gate_1.status=confirmed. `leadv2_active
 
 **Route first:** `eval "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase build --step <step> --task-id <id> --class <class> --signals '{"total_lines":<N>,"change_kind":"<kind>"}' 2>/dev/null)" || true`. Honor `ceiling_status`: `warn_60pct` log warning, `hard_stop_95pct` exit 1.
 
-**Autonomous completion loop (`LEADV2_DAEMON=1` only):**
-After Gate 1 is confirmed, set the `/goal` loop:
+**Autonomous completion loop:**
+After Gate 1 is confirmed, set the `/goal` loop based on session mode:
+
+```bash
+if [[ "${LEADV2_DAEMON:-0}" == "1" ]]; then
+  # Daemon: always fire /goal with 140-turn cap
+  /goal docs/handoff/$LEADV2_TASK_ID/phase8-passed.flag exists, or stop after 140 turns
+elif [[ "${LEADV2_GOAL_INTERACTIVE:-0}" == "1" ]] && [[ "$CLASS" =~ ^(Standard|Heavy|Strategic)$ ]]; then
+  # Interactive opt-in: fire /goal with 60-turn cap (founder present, shorter tasks)
+  /goal docs/handoff/$LEADV2_TASK_ID/phase8-passed.flag exists, or stop after 60 turns
+fi
+# LEADV2_GOAL_INTERACTIVE=0 (default): /goal not set; orchestrator SHOULD self-set it
+# for Standard+/Heavy tasks at stall-risk (no founder prompt required).
+# Full rubric: docs/goal-workflow-autonomy.md
 ```
-/goal docs/handoff/$LEADV2_TASK_ID/phase8-passed.flag exists, or stop after 140 turns
-```
+
 Rationale:
 - An independent Haiku evaluator checks the goal condition between every turn — catches mid-pipeline stalls that the orchestrator would otherwise miss.
 - The goal survives compaction: if `/compact` fires, `leadv2-postcompact-goal-reinject.sh` (PostCompact hook) re-reads `goal:` from `docs/leadv2/tasks/<id>/STATE.md` and re-injects task id, phase, and goal condition into context.
 - Scoped to `$LEADV2_TASK_ID` to prevent daemon self-spawn cross-talk (each task's flag path is unique).
 - Set after Gate 1 to avoid `AskUserQuestion` sequencing conflict: `/goal` starts the evaluator loop; if set before Gate 1, the evaluator turn fires before the founder can respond to the plan prompt.
-- Interactive mode: `/goal` is optional, BUT the orchestrator SHOULD self-set it (without asking the founder) for any Standard+/Heavy task it judges at stall-risk — same condition + turn cap. Full rubric: `docs/goal-workflow-autonomy.md`.
+- Interactive 60-turn cap (vs 140 for daemon): founder is present, sessions are shorter, stall is detectable earlier.
 
 **Pre-spawn for parallel groups (≥2 groups in plan.parallel_groups):**
 1. Lead writes `docs/handoff/<id>/groups-contract.md` per `.claude/templates/groups-contract.md`. Include producer/consumer signatures, output formats, and `external_callers_to_update` enumerated via ONE global grep before spawn. Catches the "Group A flags work for Group B" drift class.
@@ -226,7 +259,32 @@ Parallel Agent spawns per `context.yaml plan.parallel_groups:` — developer / p
 
 ## §Phase 5: REVIEW
 
-**Route first:** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase review --step <step>`. `model=skip` → no review (CX-03 light_low_risk). `model=codex-adversarial` → Codex only. `model=codex+opus-critic+security-auditor` → full triad.
+**Route first:** `eval "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase review --step <step> --task-id <id> --class <class> --signals '{...}' 2>/dev/null)" || true`. `model=skip` → no review (CX-03 light_low_risk). When `USE_WORKFLOW=1` is emitted, use the Workflow path below.
+
+**Dispatch (check `USE_WORKFLOW` from router output):**
+
+When `LEADV2_WORKFLOW_ENABLED=1`, the router emits `USE_WORKFLOW=1`. Use the Workflow path:
+
+```
+review_result=$(Workflow('leadv2-review', {
+  taskId: "$LEADV2_TASK_ID",
+  base: "main",
+  safetyTouched: <true if auth/RLS/publish in diff>,
+  missionPath: "/tmp/mission-review-${LEADV2_TASK_ID}.md",
+  diffPath: "docs/handoff/${LEADV2_TASK_ID}/build-attempt-1.diff",
+  codexEnabled: <true if codex-task.sh available>,
+  models: { critic: "opus", security_auditor: "sonnet", codex: "default" }
+}))
+```
+
+`Workflow('leadv2-review')` returns `{blocking_count, verdict, findings_path}`. Lead reads `blocking_count`:
+- `blocking_count == 0` → ACCEPT, append findings to followups.md, proceed to Phase 6.
+- `blocking_count >= 1` → spawn developer fix round (same as inline path), call Workflow again (round 2, max).
+- Round cap is enforced by LEAD, not workflow. Round 3+ → `Skill(skill="leadv2-judge-review")`.
+
+**Schema-death fallback (null-check on Workflow return — MANDATORY):** If `review_result` is null/undefined → log to pulse `review-workflow: schema-death, falling back to inline` and fall through to the inline path below.
+
+**Inline path (flag off or Workflow schema-death):**
 
 Parallel in one message:
 - `codex-task.sh adversarial-review --wait --base main` — background, always when not skipped (requires Codex CLI on PATH)

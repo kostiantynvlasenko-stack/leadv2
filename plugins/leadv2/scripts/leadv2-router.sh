@@ -494,4 +494,18 @@ if [[ "${LEADV2_ROUTE_BANDIT:-0}" == "1" ]]; then
   printf 'bandit_deviation=%s\n' "${BANDIT_DEVIATION}"
   printf 'bandit_context_key=%s\n' "${BANDIT_CONTEXT_KEY}"
 fi
+
+# ── [WORKFLOW-01] Workflow dispatch signal ──────────────────────────────────
+# Emit USE_WORKFLOW=1 for Phase 2 (plan) and Phase 5 (review) when the
+# workflow flag is enabled. Callers (phases.md §Phase 2 + §Phase 5) check this
+# key before choosing Workflow vs inline path. Flag-off: key absent from stdout
+# so pre-WORKFLOW-01 callers are unaffected (byte-identical baseline).
+if [[ "${LEADV2_WORKFLOW_ENABLED:-0}" == "1" ]]; then
+  case "$PHASE" in
+    plan|review)
+      printf 'USE_WORKFLOW=1\n'
+      ;;
+  esac
+fi
+# ── end workflow signal ──────────────────────────────────────────────────────
 exit 0
