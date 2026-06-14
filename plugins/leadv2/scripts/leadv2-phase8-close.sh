@@ -343,11 +343,16 @@ fi
 
 # ── [BANDIT-01] Non-blocking route-bandit update ─────────────────────────────
 # Runs after scorecard step; failures never gate close. File-exists guard per design §sync-point.
+# FIX-BANDIT-COST-01: removed trailing & — update must run AFTER scorecard write completes so
+# cmd_update can find the scorecard row via grep. Background spawn caused a race where update
+# ran before flock-protected append finished, saw no row, emitted update_result=skipped, and
+# total_updates never incremented. Synchronous call is still non-blocking to close (|| true).
 BANDIT_UPDATE_SCRIPT="${SCRIPTS_DIR}/leadv2-route-bandit.sh"
 if [[ -x "$BANDIT_UPDATE_SCRIPT" ]]; then
-  log_info "Scheduling bandit reward update for ${TASK_ID}..."
-  LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" bash "$BANDIT_UPDATE_SCRIPT" update \
-    --task-id "$TASK_ID" &
+  log_info "Running bandit reward update for ${TASK_ID}..."
+  LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" PROJECT_ROOT="${PROJECT_ROOT}" \
+    timeout 30 bash "$BANDIT_UPDATE_SCRIPT" update \
+    --task-id "$TASK_ID" || { log_error "[bandit] update failed — continuing (non-blocking)"; true; }
 else
   log_info "[skip] leadv2-route-bandit.sh not found — bandit update skipped (BANDIT-01 Group A pending)"
 fi

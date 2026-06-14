@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Route-bandit never learned (PLUGIN-MONITOR-20260614)** — `leadv2-phase8-close.sh`
+  spawned the bandit `update` with a trailing `&` that raced ahead of the
+  `flock`-protected scorecard append, so `update` found no row and skipped every
+  time (`total_updates` stuck at 0 since seeding). Update now runs synchronously
+  under `timeout 30`, non-blocking to close. Inline `bandit_reward_composite` in
+  `leadv2-scorecard-write.sh` made byte-equivalent to canonical
+  `compute_reward()` (the `ce==0 → cost_eff=1.0` branch was dropped, drifting
+  arm priors under `PE_BANDIT_VALUE_WEIGHT`). NOTE: bandit still won't learn
+  until `select-for-workflow` (writes `route-decisions.yaml`) is actually invoked
+  before `Workflow()` — currently documented but unenforced (follow-on).
+- **`leadv2-loop-detect-hook.sh` null-byte noise** — embedded python emitted
+  NUL-separated fields that bash command-substitution silently strips, spamming
+  "ignored null byte" + "cut: bad delimiter" on every tool call. Now emits
+  newline-separated fields (args as single-line `json.dumps`), parsed in one
+  capture with no extra subprocess.
+- **`leadv2-compact-trigger.sh` missing helper** — sourced
+  `leadv2-active-cache.sh` from a hard-coded `$HOME/.claude/hooks/` path that
+  doesn't exist in the plugin layout; now resolves relative to the hook's own
+  dir with `$HOME` fallback and a `declare -f` guard, logging the skip.
+- **`cost_actual_usd` always null** — added a `cost-actual.yaml` fallback read in
+  scorecard-write for Workflow-tool runs (which bypass `claude-subsession.sh`
+  cost markers); writer hook is a documented TODO follow-on.
+
 ### Added
 
 - **Unrecognized-entity rule (UE, §6.5)** — subagent protocol now requires a

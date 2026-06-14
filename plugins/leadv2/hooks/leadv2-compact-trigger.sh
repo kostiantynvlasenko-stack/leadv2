@@ -104,8 +104,18 @@ done
 TASK_NOTE=""
 if [[ -n "$ACTIVE" ]]; then
   # shellcheck source=/dev/null
-  source "$HOME/.claude/hooks/leadv2-active-cache.sh"
-  leadv2_read_active_yaml "$ACTIVE"
+  HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -f "$HOOK_DIR/leadv2-active-cache.sh" ]]; then
+    source "$HOOK_DIR/leadv2-active-cache.sh"
+  elif [[ -f "$HOME/.claude/hooks/leadv2-active-cache.sh" ]]; then
+    source "$HOME/.claude/hooks/leadv2-active-cache.sh"
+  else
+    # NB3: neither active-cache.sh path found — task note will be empty; observable via debug log
+    printf '[leadv2-compact-trigger] debug: leadv2-active-cache.sh not found in %s or %s — task note skipped\n' "$HOOK_DIR" "$HOME/.claude/hooks" >&2
+  fi
+  if declare -f leadv2_read_active_yaml >/dev/null 2>&1; then
+    leadv2_read_active_yaml "$ACTIVE"
+  fi
   TID="${ACTIVE_TASK_ID:-}"
   [[ -n "$TID" ]] && TASK_NOTE=" task=$TID"
 fi

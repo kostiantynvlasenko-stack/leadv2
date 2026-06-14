@@ -169,6 +169,23 @@ if Path(costs_path).exists():
     except Exception as e:
         errors.append(f'costs.yaml: {e}')
 
+# FIX-BANDIT-COST-01: fallback cost source for Workflow-tool runs (no claude-subsession.sh markers).
+# leadv2-cost-flush.sh only handles .cost-pending.yaml from claude-subsession.sh; Workflow runs
+# don't create those markers, so costs.yaml stays absent. Read optional cost-actual.yaml written
+# by future instrumentation (TODO: add Workflow wrapper that writes token counts on completion).
+# cost-actual.yaml shape: {cost_usd: <float>}  — single scalar, not a list.
+if cost_actual is None:
+    cost_actual_path = Path(project_root) / 'docs' / 'handoff' / task_id / 'cost-actual.yaml'
+    if cost_actual_path.exists():
+        try:
+            ca_data = yaml.safe_load(cost_actual_path.read_text()) or {}
+            if isinstance(ca_data, dict) and ca_data.get('cost_usd') is not None:
+                cost_actual = round(float(ca_data['cost_usd']), 6)
+        except Exception as e:
+            errors.append(f'cost-actual.yaml: {e}')
+# TODO(FIX-BANDIT-COST-01): wire Workflow completion hook to write cost-actual.yaml from
+# usage_metadata returned by the Workflow tool response (input_tokens + output_tokens × model rate).
+
 closed = {}
 if Path(closed_path).exists():
     try:
@@ -215,6 +232,8 @@ if budget_path.exists():
             escalations_used = 0
 
 # [BANDIT-01] Read route-decisions.yaml for bandit route fields
+# FIX-BANDIT-COST-01: also compute bandit_reward_composite inline so scorecard row carries
+# a non-null value immediately; bandit update() later uses the same value to update arm priors.
 route_phases_captured = 0
 bandit_deviations = 0
 bandit_reward_composite = None
@@ -223,12 +242,27 @@ if route_decisions_path and Path(route_decisions_path).exists():
     try:
         import yaml as _ry
         entries = _ry.safe_load(Path(route_decisions_path).read_text()) or []
-        if isinstance(entries, list):
+        if isinstance(entries, list) and len(entries) > 0:
             route_phases_captured = len(entries)
             bandit_deviations = sum(
                 1 for e in entries
                 if isinstance(e, dict) and str(e.get('bandit_deviation', 'false')).lower() == 'true'
             )
+            # Compute composite reward now so the field is non-null in the scorecard row.
+            # Canonical source: leadv2-route-bandit-py.py::compute_reward() (~line 195).
+            # Keep byte-equivalent: ce==0 → cost_eff=1.0; only degrade to 2-term when
+            # both cost values are absent (None), never when cost_est_usd==0.
+            _vp = verify_pass  # already computed above (1 if 'success' in outcome, else 0)
+            _pr = 0            # post_deploy_regression default; may be patched later
+            if cost_actual is not None and cost_est_usd is not None:
+                try:
+                    ca, ce = float(cost_actual), float(cost_est_usd)
+                    cost_eff = max(0.0, 1.0 - (ca / ce - 1.0)) if ce > 0 else 1.0
+                    bandit_reward_composite = round(0.6 * _vp + 0.25 * (1 - _pr) + 0.15 * cost_eff, 4)
+                except (TypeError, ValueError):
+                    bandit_reward_composite = round(0.7 * _vp + 0.3 * (1 - _pr), 4)
+            else:
+                bandit_reward_composite = round(0.7 * _vp + 0.3 * (1 - _pr), 4)
     except Exception as e:
         errors.append(f'route-decisions.yaml: {e}')
 

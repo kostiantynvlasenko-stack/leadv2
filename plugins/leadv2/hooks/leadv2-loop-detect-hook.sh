@@ -20,30 +20,33 @@ DETECT="${LEADV2_LOOP_DETECT:-1}"
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
-# Parse all needed fields in a single python3 call to reduce subprocess overhead
+# Parse all needed fields in a single python3 call to reduce subprocess overhead.
+# Emit 3 lines: tool_name, session_id, args_json (json.dumps — guaranteed single line,
+# ensure_ascii=True default means no embedded newlines, so line-split is safe).
 PARSED="$(printf -- '%s' "$INPUT" | python3 -c "
 import sys, json
 try:
     r = json.loads(sys.stdin.read())
-    tool_name = r.get('tool_name', '')
+    tool_name  = r.get('tool_name', '')
     session_id = r.get('session_id', '')
-    args = json.dumps(r.get('tool_input', {}))
-    # NUL-separated to handle arbitrary content safely
-    sys.stdout.buffer.write((tool_name + '\x00' + session_id + '\x00' + args).encode())
+    args_json  = json.dumps(r.get('tool_input', {}))  # single line, ensure_ascii=True
+    print(tool_name)
+    print(session_id)
+    print(args_json)
 except Exception:
     pass
 " 2>/dev/null || true)"
 
 [[ -z "$PARSED" ]] && exit 0
 
-# Split on NUL bytes
-TOOL_NAME="$(printf -- '%s' "$PARSED" | cut -d $'\x00' -f1)"
-SESSION_ID="$(printf -- '%s' "$PARSED" | cut -d $'\x00' -f2)"
-ARGS_JSON="$(printf -- '%s' "$PARSED" | cut -d $'\x00' -f3)"
+# Split captured output on newlines — one read, no extra subprocesses.
+TOOL_NAME="$(printf -- '%s' "$PARSED" | sed -n '1p')"
+SESSION_ID="$(printf -- '%s' "$PARSED" | sed -n '2p')"
+ARGS_JSON="$(printf -- '%s' "$PARSED" | sed -n '3p')"
+[[ -z "$ARGS_JSON" ]] && ARGS_JSON="{}"
 
 [[ -z "$TOOL_NAME" ]] && exit 0
 [[ -z "$SESSION_ID" ]] && exit 0
-[[ -z "$ARGS_JSON" ]] && ARGS_JSON="{}"
 
 TASK_ID="${LEADV2_TASK_ID:-default}"
 
