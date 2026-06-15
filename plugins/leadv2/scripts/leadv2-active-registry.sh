@@ -164,6 +164,14 @@ try:
                 s["last_pulse_at"] = ts
                 break
 
+    elif op == "update_pid":
+        task_id, pid_str = args
+        pid_int = int(pid_str) if pid_str not in ("null", "", "None") else None
+        for s in sessions:
+            if s.get("task_id") == task_id:
+                s["pid"] = pid_int
+                break
+
     elif op == "mark_stale":
         task_id = args[0]
         for s in sessions:

@@ -64,7 +64,6 @@ if [[ -d "$CLAIMS_DIR" ]]; then
     if [[ "$DRY_RUN" -eq 0 ]]; then
       # Find which task in tasks.yaml has claim.by == _task_id (the sidecar task_id IS the claim session id)
       # We use list_status in_progress then match by claim.by field
-      local _matched_id
       _matched_id=$(python3 - "${PROJECT_ROOT}/docs/tasks.yaml" "$_task_id" <<'MATCH_PY' 2>/dev/null || true
 import sys, yaml
 tasks_file = sys.argv[1]

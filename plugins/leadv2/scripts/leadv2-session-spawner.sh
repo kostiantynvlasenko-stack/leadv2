@@ -157,6 +157,8 @@ PYEOF
 
 # Update pid in active.yaml now that we have the real pid
 _leadv2_yaml_py_lock \
+  "$lockfile" "$yaml_file" update_pid "$task_id" "$CHILD_PID" 2>/dev/null || true
+_leadv2_yaml_py_lock \
   "$lockfile" "$yaml_file" update_pulse "$task_id" "$ts_now" 2>/dev/null || true
 
 # ── 7: Print summary ───────────────────────────────────────────────────────

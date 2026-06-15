@@ -392,5 +392,38 @@ fi
 # ── end learn trigger ─────────────────────────────────────────────────────────
 
 
+# ── [SYS-DRAIN-FOLLOWUPS-AT-CLOSE-01] Followup drain warning ────────────────
+# Grep handoff dir for followups*.md / decision items not yet in tasks.yaml or BOARD.
+# Non-blocking: logs warnings, never aborts close. lean: no auto-promotion — upgrade when tasks API stable.
+_drain_warn_count=0
+if [[ -d "$HANDOFF_DIR" ]]; then
+  _drain_py="${PROJECT_ROOT}/.claude/scripts/leadv2-drain-warn-check.py"
+  while IFS= read -r _fu_file; do
+    [[ -f "$_fu_file" ]] || continue
+    while IFS= read -r _line; do
+      [[ -z "$_line" ]] && continue
+      _ref_found=0
+      _key="$(python3 -c "import sys,re; s=sys.argv[1]; s=re.sub(r'^[-*!#\s]+','',s); print(s[:60])" "$_line" 2>/dev/null || true)"
+      [[ -z "$_key" ]] && continue
+      if [[ -f "${PROJECT_ROOT}/docs/tasks.yaml" ]]; then
+        python3 "$_drain_py" check_tasks "${PROJECT_ROOT}/docs/tasks.yaml" "$_key" 2>/dev/null && _ref_found=1
+      fi
+      if [[ "$_ref_found" -eq 0 ]] && [[ -f "${PROJECT_ROOT}/docs/BOARD.md" ]]; then
+        python3 "$_drain_py" check_board "${PROJECT_ROOT}/docs/BOARD.md" "$_key" 2>/dev/null && _ref_found=1
+      fi
+      if [[ "$_ref_found" -eq 0 ]]; then
+        log_info "[DRAIN-WARN] Untracked followup in $(basename "$_fu_file"): $_line"
+        _drain_warn_count=$(( _drain_warn_count + 1 ))
+      fi
+    done < <(python3 "$_drain_py" extract_items "$_fu_file" 2>/dev/null || true)
+  done < <(find "$HANDOFF_DIR" -maxdepth 1 \( -name "followups*.md" -o -name "*followup*.md" \) 2>/dev/null || true)
+fi
+if [[ "$_drain_warn_count" -gt 0 ]]; then
+  log_info "[DRAIN-WARN] ${_drain_warn_count} untracked followup item(s) in ${HANDOFF_DIR} — add to tasks.yaml or BOARD.md before closing."
+else
+  log_info "[drain-check] no untracked followup items in ${HANDOFF_DIR}"
+fi
+# ── end followup drain warning ────────────────────────────────────────────────
+
 log_info "Phase 8 close complete for ${TASK_ID} (YAML: ${YAML_PATH})"
 exit 0
