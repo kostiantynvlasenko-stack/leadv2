@@ -214,3 +214,4 @@ Exit 0 always — detection errors must not block Phase 8 Close.
 - Auto-promote is idempotent: duplicate fact = skip.
 - This skill exits 0 even on LLM failure — correction-detect is advisory, never blocking.
 - No output to chat — all writes are file-based.
+- **[BROKEN-SIGNAL-GATE] handling:** When `[BROKEN-SIGNAL-GATE]` appears in session context (injected by the `leadv2-broken-signal-gate.sh` UserPromptSubmit hook), immediately invoke Phase 0 Intake with a new `TASK_ID`. Log the old task_id as `superseded_by: <old_task_id>` in `docs/leadv2/active.yaml`. Do NOT resume the previous task's work.

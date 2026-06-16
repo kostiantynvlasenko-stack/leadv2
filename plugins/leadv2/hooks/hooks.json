@@ -1,5 +1,5 @@
 {
-  "description": "leadv2 autonomous orchestrator hooks \u2014 guards, counters, delegations, lifecycle",
+  "description": "leadv2 autonomous orchestrator hooks — guards, counters, delegations, lifecycle",
   "hooks": {
     "SessionStart": [
       {
@@ -51,6 +51,13 @@
             "timeout": 8,
             "continueOnBlock": true,
             "statusMessage": "Pulse-mode enforcer..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-broken-signal-gate.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "Broken-signal gate..."
           },
           {
             "type": "command",
@@ -142,6 +149,18 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-routing-guard.sh\"",
             "timeout": 5,
             "statusMessage": "Routing guard (model check)..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-gate-artifact-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Gate-1 artifact guard..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-blocker-drift-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Blocker-drift diverge guard..."
           },
           {
             "type": "command",

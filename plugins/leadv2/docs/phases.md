@@ -85,6 +85,7 @@ Each phase entry calls `leadv2_pulse_log "<phase>" "<one-line summary>"` — emi
 > **Optimization:** Run `lead-classify` skill FIRST (Phase 1), then execute EnterWorktree + MCP warm only if class ≥ Standard. This avoids ~2K tokens of worktree setup for Trivial/Light tasks. If classify returns Trivial/Light → jump directly to Phase 4 Build without worktree.
 
 - **Enter worktree:** `EnterWorktree(name="<task-id>")` — creates `.claude/worktrees/<task-id>` on branch `task/<task-id>` off current HEAD. Session cwd switches into it. ALL Phase 1-5 edits and commits happen here. Skip for `Trivial/Light` tasks where deploy isn't expected (worktree adds friction). Skip if user's invocation is `/leadv2 status`/`help`/`meeting`/`questions`/`sessions`.
+- **Broken-signal handling:** If a `[BROKEN-SIGNAL-GATE]` advisory appears in session context (injected by `leadv2-broken-signal-gate.sh` hook), the existing task lock MUST be released (`leadv2_lock_release`) before INTAKE proceeds. Do not carry state from the previous run.
 - Write per-task state: `docs/leadv2/tasks/<id>/STATE.md` — `status: active, phase: intake`. `docs/LEAD_V2_STATE.md` is auto-regenerated via `leadv2_active_render_index` (DO NOT EDIT directly).
   **STATE.md schema (required fields):**
   ```
@@ -130,7 +131,7 @@ generators BEFORE the convergent Plan triad commits. Ported from ADHD
 4. **Deepen** — top_k (default 3) parallel `Agent(general-purpose, sonnet)` on ranked non-trap leaders: sketch + load-bearing risk + first step + 3–5 child ideas. Provocation = highest-novelty leaf (no spawn).
 5. **Cost banner + hard ceiling** to STATE.md before spawning: `diverge: running — ~<N+1+K> Agent spawns`. Clamp AFTER any repo override: `frames_per_run ≤ 8`, `ideas_per_frame ≤ 12`, `top_k ≤ 5`, total `frames+1+top_k ≤ 14`. If near budget, drop to 3×4 (~7 spawns) and note reduced breadth.
 
-**Exit:** `docs/handoff/<id>/divergence.md` (wide-set clustered + ★shortlist + traps + deepened + provocation) AND a compact `divergence:` block in `context.yaml` (`shortlist[]`, `non_obvious_pick`, `traps[]`, `artifact:` path, ≤40 lines). Phase 2 architect consumes it (see leadv2-plan §1c).
+**Exit:** `docs/handoff/<id>/divergence.md` (wide-set clustered + ★shortlist + traps + deepened + provocation) AND a compact `divergence:` block in `context.yaml` (`shortlist[]`, `non_obvious_pick`, `traps[]`, `artifact:` path, ≤40 lines). Phase 2 architect consumes it (see leadv2-plan §1c). **Also write `docs/handoff/<id>/diverge-verdict.md`** (single paragraph summary of the chosen frame) — this file clears the `leadv2-blocker-drift-guard.sh` (C3) automatically.
 
 
 ---
@@ -216,6 +217,8 @@ Update `docs/leadv2/tasks/<id>/STATE.md` gate_1.status=confirmed. `leadv2_active
 ---
 
 ## §Phase 4: BUILD
+
+**Pre-condition:** `docs/handoff/$TASK_ID/.gate1-passed` MUST exist before any developer spawn. The Gate 1 approval path (`leadv2-gate1-prompt.sh`) writes this sentinel on every accept path. The `leadv2-gate-artifact-guard.sh` hook (C2) enforces this mechanically — if the sentinel is absent, the spawn is hard-blocked. Lead MUST also write `current_blocker: <one-line description>` to `context.yaml` before each Build spawn if a blocker is active (empty string = no blocker). This field drives the `leadv2-blocker-drift-guard.sh` (C3) drift counter.
 
 **Route first:** `eval "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase build --step <step> --task-id <id> --class <class> --signals '{"total_lines":<N>,"change_kind":"<kind>"}' 2>/dev/null)" || true`. Honor `ceiling_status`: `warn_60pct` log warning, `hard_stop_95pct` exit 1.
 
@@ -377,6 +380,7 @@ it exits 1 with the list, and any close-commit push will be blocked by the hook.
 ### Writes (do these first)
 - If project has `docs/BOARD.md` — rewrite HEAD; otherwise skip
 - Run `lead-reflect` skill → append to `docs/leadv2/tasks/<id>/STATE.md` history (`status: closed`)
+- **Blocker-drift reset:** after confirmed publish (`media_id` non-null): increment `context.yaml.publish_count` by 1 and reset `docs/handoff/$TASK_ID/blocker-drift.yaml` `shift_count` to 0. This clears the C3 guard for the next build cycle.
 - If project has `docs/agents/product-owner/DIALOGUE.md` — append outcome; otherwise skip
 - Update `docs/LEAD_V2_STATE.md` history with `<task_id> ✅ <date> — <summary>`
 - `leadv2_active_unregister "$LEADV2_TASK_ID"` — remove from `docs/leadv2/active.yaml`

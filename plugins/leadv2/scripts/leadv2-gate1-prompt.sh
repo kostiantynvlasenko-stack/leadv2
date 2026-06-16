@@ -24,20 +24,26 @@ plan_summary="${3:?plan_summary required}"
 
 log() { printf -- '[gate1] %s\n' "$*" >&2; }
 
-# ── DRY_RUN: immediate auto-accept ────────────────────────────────────────
-if [[ "${LEADV2_DRY_RUN:-0}" == "1" ]]; then
-  log "DRY_RUN mode — auto-accepted immediately"
-  printf -- 'план: %s. [DRY-RUN — авто-принятие]\n' "$plan_summary"
-  # Capture context.yaml SHA on accept
-  _ctx="docs/handoff/${task_id}/context.yaml"
+# On accept: capture context.yaml SHA and write Gate 1 sentinel for C2 guard.
+_gate1_accept() {
+  local _ctx="docs/handoff/${task_id}/context.yaml"
   if [[ -f "$_ctx" ]]; then
-    _sha=$(sha256sum "$_ctx" 2>/dev/null | awk '{print $1}' || true)
-    _state="docs/leadv2/tasks/${task_id}/STATE.md"
+    local _sha; _sha=$(sha256sum "$_ctx" 2>/dev/null | awk '{print $1}' || true)
+    local _state="docs/leadv2/tasks/${task_id}/STATE.md"
     if [[ -f "$_state" ]]; then
       grep -q "^gate1_context_sha:" "$_state" 2>/dev/null \
         || printf -- '\ngate1_context_sha: %s\n' "$_sha" >> "$_state"
     fi
   fi
+  # Write Gate 1 sentinel — required by leadv2-gate-artifact-guard.sh (C2)
+  touch "docs/handoff/${task_id}/.gate1-passed" 2>/dev/null || true
+}
+
+# ── DRY_RUN: immediate auto-accept ────────────────────────────────────────
+if [[ "${LEADV2_DRY_RUN:-0}" == "1" ]]; then
+  log "DRY_RUN mode — auto-accepted immediately"
+  printf -- 'план: %s. [DRY-RUN — авто-принятие]\n' "$plan_summary"
+  _gate1_accept
   exit 2
 fi
 
@@ -45,16 +51,7 @@ fi
 if [[ "${LEADV2_BOT_MODE:-0}" == "1" ]]; then
   log "BOT_MODE — auto-accepted immediately"
   printf -- 'Gate 1: auto-accepted (bot mode). plan: %s\n' "$plan_summary"
-  # Capture context.yaml SHA on accept
-  _ctx="docs/handoff/${task_id}/context.yaml"
-  if [[ -f "$_ctx" ]]; then
-    _sha=$(sha256sum "$_ctx" 2>/dev/null | awk '{print $1}' || true)
-    _state="docs/leadv2/tasks/${task_id}/STATE.md"
-    if [[ -f "$_state" ]]; then
-      grep -q "^gate1_context_sha:" "$_state" 2>/dev/null \
-        || printf -- '\ngate1_context_sha: %s\n' "$_sha" >> "$_state"
-    fi
-  fi
+  _gate1_accept
   exit 2
 fi
 
@@ -68,16 +65,7 @@ case "${cls,,}" in
     case "${answer,,}" in
       да|go|y|yes|d)
         log "accepted by founder (heavy)"
-        # Capture context.yaml SHA on accept
-        _ctx="docs/handoff/${task_id}/context.yaml"
-        if [[ -f "$_ctx" ]]; then
-          _sha=$(sha256sum "$_ctx" 2>/dev/null | awk '{print $1}' || true)
-          _state="docs/leadv2/tasks/${task_id}/STATE.md"
-          if [[ -f "$_state" ]]; then
-            grep -q "^gate1_context_sha:" "$_state" 2>/dev/null \
-              || printf -- '\ngate1_context_sha: %s\n' "$_sha" >> "$_state"
-          fi
-        fi
+        _gate1_accept
         exit 0
         ;;
       *)
@@ -139,15 +127,6 @@ else
   # Timeout
   printf -- '\n'
   log "Gate 1 auto-accepted (timeout ${timeout_sec}s)"
-  # Capture context.yaml SHA on accept
-  _ctx="docs/handoff/${task_id}/context.yaml"
-  if [[ -f "$_ctx" ]]; then
-    _sha=$(sha256sum "$_ctx" 2>/dev/null | awk '{print $1}' || true)
-    _state="docs/leadv2/tasks/${task_id}/STATE.md"
-    if [[ -f "$_state" ]]; then
-      grep -q "^gate1_context_sha:" "$_state" 2>/dev/null \
-        || printf -- '\ngate1_context_sha: %s\n' "$_sha" >> "$_state"
-    fi
-  fi
+  _gate1_accept
   exit 2
 fi
