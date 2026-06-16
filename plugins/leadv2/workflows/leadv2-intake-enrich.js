@@ -6,7 +6,10 @@ export const meta = {
     { title: 'Enrich', detail: 'parallel: shared-memory read (haiku) + solutions-archive top-K (haiku)' },
   ],
 }
-const a = (typeof args === 'string' ? JSON.parse(args) : args) || {}
+let a
+if (typeof args === 'string') { try { a = JSON.parse(args) } catch { a = { problem: args } } }
+else { a = args }
+a = a || {}
 const TASK_ID = a.taskId || 'adhoc'
 const BRIEF = a.taskBrief || ''
 const TASK_CLASS = a.taskClass || 'general'

@@ -8,7 +8,10 @@ export const meta = {
     { title: 'Reflect', detail: 'quality scoring + write solutions-archive + append signature' },
   ],
 }
-const a = (typeof args === 'string' ? JSON.parse(args) : args) || {}
+let a
+if (typeof args === 'string') { try { a = JSON.parse(args) } catch { a = { problem: args } } }
+else { a = args }
+a = a || {}
 const TASK_ID = a.taskId || 'adhoc'
 const BASE = a.base || 'main'
 const SAFETY = a.safetyTouched === true

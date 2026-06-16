@@ -10,7 +10,10 @@ export const meta = {
   ],
 }
 
-const a = (typeof args === 'string' ? JSON.parse(args) : args) || {}
+let a
+if (typeof args === 'string') { try { a = JSON.parse(args) } catch { a = { problem: args } } }
+else { a = args }
+a = a || {}
 if (a.probe) return { probe_ok: true, parsed_args: a }
 
 const MODE = a.mode || 'personas'

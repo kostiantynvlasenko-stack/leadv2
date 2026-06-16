@@ -21,7 +21,10 @@ export const meta = {
     { title: 'Shadow-Emit', detail: 'classify risk_level + emit shadow proposals to docs/leadv2/shadow/proposals/' },
   ],
 }
-const a = (typeof args === 'string' ? JSON.parse(args) : args) || {}
+let a
+if (typeof args === 'string') { try { a = JSON.parse(args) } catch { a = { problem: args } } }
+else { a = args }
+a = a || {}
 const LABEL = a.label || 'latest'
 const TASK_ID = a.task_id || ''
 const OUT = `docs/leadv2/learning-proposals/${LABEL}.md`

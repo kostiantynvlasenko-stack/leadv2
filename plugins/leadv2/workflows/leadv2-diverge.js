@@ -8,7 +8,10 @@ export const meta = {
     { title: 'Select', detail: 'TopK=3 filter: drop traps, rank by score, dedupe clusters' },
   ],
 }
-const a = (typeof args === 'string' ? JSON.parse(args) : args) || {}
+let a
+if (typeof args === 'string') { try { a = JSON.parse(args) } catch { a = { problem: args } } }
+else { a = args }
+a = a || {}
 const TASK_ID = a.taskId || 'adhoc'
 const PROBLEM = a.problem || a.taskBrief || ''
 const OUT = `docs/handoff/${TASK_ID}/divergence.md`

@@ -8,7 +8,10 @@ export const meta = {
     { title: 'Synthesize', detail: 'merge into context.yaml' },
   ],
 }
-const a = (typeof args === 'string' ? JSON.parse(args) : args) || {}
+let a
+if (typeof args === 'string') { try { a = JSON.parse(args) } catch { a = { problem: args } } }
+else { a = args }
+a = a || {}
 const TASK_ID = a.taskId || 'adhoc'
 const BRIEF = a.taskBrief || ''
 const HEAVY = a.heavy === true || a.archKeyword === true

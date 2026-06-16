@@ -8,7 +8,10 @@ export const meta = {
     { title: 'Reduce', detail: 'sonnet merges cluster evidence into single root_cause verdict' },
   ],
 }
-const a = (typeof args === 'string' ? JSON.parse(args) : args) || {}
+let a
+if (typeof args === 'string') { try { a = JSON.parse(args) } catch { a = { problem: args } } }
+else { a = args }
+a = a || {}
 const TASK_ID = a.taskId || 'adhoc'
 const BUG_BRIEF = a.bugBrief || ''
 const LOGS_HINT = a.logsHint || 'journalctl -u persona-engine --since "1 hour ago" | tail -200'
