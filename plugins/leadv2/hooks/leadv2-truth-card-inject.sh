@@ -33,8 +33,7 @@ fi
 if printf -- '%s' "$PERSONA_SLUG" | grep -qE '^[0-9a-f]{8}-'; then PERSONA_SLUG=""; fi
 
 if [[ -z "$PERSONA_SLUG" ]]; then
-  python3 -c "import json; print(json.dumps({'additionalContext': '[TRUTH CARD] No persona slug found. Set persona_id in .claude/leadv2-overrides/state-paths.yaml or export PERSONA_ID.'}))"
-  exit 0
+  printf '{}'; exit 0
 fi
 
 # ---- Supabase credentials from .env -------------------------------------
