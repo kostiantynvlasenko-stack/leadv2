@@ -1,3 +1,8 @@
+---
+name: leadv2-bg-spawn-protocol
+description: "Watchdog protocol for background agent spawns: every Agent(run_in_background=true) MUST be followed immediately by Monitor(path=<deliverable-file>). Enforced by leadv2-bg-watchdog-gate.sh PostToolUse hook. Triggers: background spawn, run_in_background, Monitor watchdog."
+---
+
 # leadv2-bg-spawn-protocol
 
 > **Watchdog is now default-on.** The `leadv2-bg-watchdog-gate.sh` PostToolUse:Agent hook fires immediately after every `Agent(run_in_background=true)` call and injects a blocking `additionalContext` reminder if no Monitor watchdog has been armed since the spawn. There is no opt-out. Failing to arm a Monitor is now caught in the same turn, not at Stop.
