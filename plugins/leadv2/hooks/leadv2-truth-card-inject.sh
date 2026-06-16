@@ -22,13 +22,36 @@ printf '%s|invoked|cwd=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${CWD:-?}" >> /tm
 # ---- Resolve persona slug (slug only -- UUID is rejected) ---------------
 _SP_YAML="${CWD}/.claude/leadv2-overrides/state-paths.yaml"
 PERSONA_SLUG=""
-if [[ -f "$_SP_YAML" ]]; then
-  PERSONA_SLUG="$(grep -E "^[[:space:]]*persona_id[[:space:]]*:" "$_SP_YAML" 2>/dev/null \
+_read_slug_from_yaml() {
+  local yaml_path="$1"
+  [[ -f "$yaml_path" ]] || return 0
+  grep -E "^[[:space:]]*persona_id[[:space:]]*:" "$yaml_path" 2>/dev/null \
     | head -1 \
     | sed -E "s/^[[:space:]]*persona_id[[:space:]]*:[[:space:]]*//" \
     | sed -E "s/^['\"']//; s/['\"'][[:space:]]*$//" \
-    | tr -d '\r' || true)"
+    | tr -d '\r' || true
+}
+PERSONA_SLUG="$(_read_slug_from_yaml "$_SP_YAML")"
+
+# Worktree fallback: if CWD is inside .claude/worktrees/, the state-paths.yaml
+# there may not have persona_id. Resolve main repo root via --git-common-dir
+# (returns <main>/.git for any linked worktree) and read its state-paths.yaml.
+if [[ -z "$PERSONA_SLUG" || "$PERSONA_SLUG" == "null" ]]; then
+  _GIT_COMMON_DIR="$(git -C "$CWD" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -n "$_GIT_COMMON_DIR" && "$_GIT_COMMON_DIR" != ".git" ]]; then
+    # --git-common-dir returns absolute path to <main-repo>/.git; strip /.git suffix
+    _MAIN_ROOT="${_GIT_COMMON_DIR%/.git}"
+    _MAIN_SP_YAML="${_MAIN_ROOT}/.claude/leadv2-overrides/state-paths.yaml"
+    _FALLBACK_SLUG="$(_read_slug_from_yaml "$_MAIN_SP_YAML")"
+    if [[ -n "$_FALLBACK_SLUG" && "$_FALLBACK_SLUG" != "null" ]]; then
+      PERSONA_SLUG="$_FALLBACK_SLUG"
+      printf '%s|worktree-fallback|main_root=%s|slug=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_MAIN_ROOT" "$PERSONA_SLUG" \
+        >> /tmp/leadv2-truth-card-inject.log 2>/dev/null || true
+    fi
+  fi
 fi
+
 [[ -z "$PERSONA_SLUG" || "$PERSONA_SLUG" == "null" ]] && PERSONA_SLUG="${PERSONA_ID:-}"
 # Reject UUID-shaped values -- canonical key is slug.
 if printf -- '%s' "$PERSONA_SLUG" | grep -qE '^[0-9a-f]{8}-'; then PERSONA_SLUG=""; fi

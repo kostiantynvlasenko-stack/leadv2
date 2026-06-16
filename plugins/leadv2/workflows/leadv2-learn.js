@@ -6,7 +6,7 @@ async function emitLedger(event, extra) {
   const projRoot = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
   try {
     await bash(
-      `python3 "${projRoot}/.claude/scripts/lv2-ledger-emit.py" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`
+      `_EMIT="${projRoot}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`
     )
   } catch (_) { /* fire-and-forget */ }
 }

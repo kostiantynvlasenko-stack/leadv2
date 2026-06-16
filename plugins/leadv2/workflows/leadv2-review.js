@@ -65,7 +65,7 @@ async function emitLedger(event, extra) {
   const _taskId = (typeof TASK_ID !== 'undefined' ? TASK_ID : null) || (typeof a !== 'undefined' && a.task_id) || 'unknown'
   const ev = Object.assign({ event, task_id: _taskId }, extra || {})
   const _root = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
-  try { await bash(`python3 "${_root}/.claude/scripts/lv2-ledger-emit.py" '${JSON.stringify(ev).replace(/'/g, "'\''")}' 2>/dev/null || true`) } catch (_) {}
+  try { await bash(`_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`) } catch (_) {}
 }
 
 phase('Review')
