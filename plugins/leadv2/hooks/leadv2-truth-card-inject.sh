@@ -17,6 +17,7 @@ INPUT="$(python3 -c "import sys; print(sys.stdin.read())" 2>/dev/null || true)"
 
 CWD="$(printf -- '%s' "$INPUT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read() or '{}'); print(d.get('cwd',''))" 2>/dev/null || true)"
 [[ -z "$CWD" ]] && CWD="${CLAUDE_PROJECT_DIR:-${PWD:-}}"
+printf '%s|invoked|cwd=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${CWD:-?}" >> /tmp/leadv2-truth-card-inject.log 2>/dev/null || true
 
 # ---- Resolve persona slug (slug only -- UUID is rejected) ---------------
 _SP_YAML="${CWD}/.claude/leadv2-overrides/state-paths.yaml"
@@ -59,73 +60,109 @@ RAW_RESPONSE="$(curl --silent --max-time 5 \
   -H "Accept: application/json" \
   "${SUPABASE_URL}/rest/v1/persona_truth_card?persona_slug=eq.${SAFE_SLUG}&select=*&limit=1" 2>/dev/null || true)"
 
-# ---- Write formatter to tmp, run it -------------------------------------
-FMT="$(mktemp /tmp/lv2-tc-fmt.XXXXXX.py)"
-trap 'rm -f "$FMT"' EXIT
+# ---- Format and emit additionalContext -------------------------------------
+# M3: pass RAW_RESPONSE via a temp file, not as argv (avoids ARG_MAX + quote injection).
+DATA_FILE="$(mktemp /tmp/lv2-tc-data.XXXXXX.json)"
+trap 'rm -f "$DATA_FILE"' EXIT
+printf -- '%s' "$RAW_RESPONSE" > "$DATA_FILE"
 
-python3 - "$FMT" "$PERSONA_SLUG" "$RAW_RESPONSE" << 'WRITE_FMT'
-import sys, os
-dst = sys.argv[1]
-slug = sys.argv[2]
-raw  = sys.argv[3] if len(sys.argv) > 3 else ""
-# Write formatter script to dst, then exec it with slug+raw as argv
-code = (
-    "import sys,json,datetime\n"
-    "slug,raw=sys.argv[1],sys.argv[2] if len(sys.argv)>2 else ''\n"
-    "def fail(r): return json.dumps({'additionalContext':'[TRUTH CARD FAILED] persona='+slug+' reason='+r+'\\nAction: run /persona-state to retry. NEVER use disk caches.'})\n"
-    "def age(s):\n"
-    "  try:\n"
-    "    t=datetime.datetime.fromisoformat(s.replace('Z','+00:00'))\n"
-    "    h=(datetime.datetime.now(datetime.timezone.utc)-t).total_seconds()/3600\n"
-    "    if h<2: return '[FRESH -- as_of: '+s+']'\n"
-    "    elif h<6: return '[STALE: last seen '+f'{h:.1f}h ago -- as_of: '+s+']'\n"
-    "    else: return '[STALE-CRITICAL: engine may be down ('+f'{h:.1f}h ago) -- as_of: '+s+']'\n"
-    "  except: return '[STALE: cannot parse as_of '+s+']'\n"
-    "if not raw.strip(): print(fail('empty response')); sys.exit(0)\n"
-    "try: rows=json.loads(raw)\n"
-    "except Exception as e: print(fail('invalid JSON: '+str(e))); sys.exit(0)\n"
-    "if isinstance(rows,dict) and 'message' in rows: print(fail('Supabase error: '+rows['message'][:120])); sys.exit(0)\n"
-    "if not isinstance(rows,list) or not rows:\n"
-    "  print(json.dumps({'additionalContext':'[NO TRUTH CARD] No row for '+slug+'. Run one cycle with pe_truth_card_write() wired, then /persona-state.'})); sys.exit(0)\n"
-    "r=rows[0]; hdr=age(r.get('as_of','unknown'))\n"
-    "f=lambda v: '--' if v is None or v=='' else str(v)\n"
-    "fb=lambda v: 'ON' if v is True or v=='true' else ('OFF' if v is False or v=='false' else f(v))\n"
-    "flags=r.get('active_flags') or {}\n"
-    "if isinstance(flags,str):\n"
-    "  try: flags=json.loads(flags)\n"
-    "  except: flags={}\n"
-    "fs=', '.join(k+'='+('ON' if (v.get('on') if isinstance(v,dict) else v) else 'OFF') for k,v in sorted(flags.items())) if flags else '(none)'\n"
-    "lines=['=== PERSONA TRUTH CARD: '+slug+' ===',hdr,'','ENGINE STATE',"
-    "  '  RUN_MODE:             '+f(r.get('run_mode')),"
-    "  '  CONTROL_MODE:         '+f(r.get('control_mode')),"
-    "  '  V4_DETERMINISTIC:     '+fb(r.get('v4_deterministic')),"
-    "  '  LLM_BACKEND:          '+f(r.get('llm_backend')),"
-    "  '  ACTIVE_FLAGS:         '+fs,'',"
-    "  'LAST ACTIVITY',"
-    "  '  Last post media_id:   '+f(r.get('last_post_media_id')),"
-    "  '  Last post timestamp:  '+f(r.get('last_post_ts')),"
-    "  '  Last post slug:       '+f(r.get('last_post_slug')),"
-    "  '  Last comment graph_id:'+f(r.get('last_comment_graph_id')),"
-    "  '  Last comment ts:      '+f(r.get('last_comment_ts')),'',"
-    "  'PIPELINE HEALTH',"
-    "  '  Post count (7d):      '+f(r.get('post_count_7d')),"
-    "  '  Cycle count (7d):     '+f(r.get('cycle_count_7d')),"
-    "  '  Defer queue depth:    '+f(r.get('defer_queue_depth')),"
-    "  '  Pending proposals:    '+f(r.get('pending_proposals')),"
-    "  '  NMC count (new):      '+f(r.get('nmc_count')),"
-    "  '  Bandit updates:       '+f(r.get('bandit_updates')),'',"
-    "  'WORKING HOURS',"
-    "  '  Schedule:             '+f(r.get('working_hours_json')),"
-    "  '  Auth cookie mtime:    '+f(r.get('auth_cookie_mtime')),'',"
-    "  'VERIFICATION RULES (hardcoded -- NEVER use status=confirmed alone)',"
-    "  "  Posts:    action_log WHERE action_type='post' AND context->>'media_id' IS NOT NULL","
-    "  "  Comments: action_log WHERE action_type='comment' AND metadata->>'graph_id' IS NOT NULL","
-    "  '=== END TRUTH CARD ===']\n"
-    "print(json.dumps({'additionalContext':'\n'.join(lines)}))\n"
-)
-with open(dst,'w') as fh: fh.write(code)
-# Also exec immediately
-os.execv(sys.executable, [sys.executable, dst, slug, raw])
-WRITE_FMT
+printf '%s|card-emit|slug=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PERSONA_SLUG" >> /tmp/leadv2-truth-card-inject.log 2>/dev/null || true
+python3 - "$PERSONA_SLUG" "$DATA_FILE" << 'RUN_FMT'
+import sys, json, datetime, os
+
+slug     = sys.argv[1]
+data_fp  = sys.argv[2]
+
+def fail(r):
+    return json.dumps({'additionalContext':
+        '[TRUTH CARD FAILED] persona=' + slug + ' reason=' + r +
+        '\nAction: run /persona-state to retry. NEVER use disk caches.'})
+
+def age(s):
+    try:
+        t = datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
+        h = (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() / 3600
+        if h < 2:
+            return '[FRESH -- as_of: ' + s + ']'
+        elif h < 6:
+            return '[STALE: last seen ' + f'{h:.1f}h ago -- as_of: ' + s + ']'
+        else:
+            return '[STALE-CRITICAL: engine may be down (' + f'{h:.1f}h ago) -- as_of: ' + s + ']'
+    except Exception:
+        return '[STALE: cannot parse as_of ' + s + ']'
+
+try:
+    with open(data_fp) as fh:
+        raw = fh.read()
+except Exception as e:
+    print(fail('cannot read data file: ' + str(e)))
+    sys.exit(0)
+
+if not raw.strip():
+    print(fail('empty response'))
+    sys.exit(0)
+
+try:
+    rows = json.loads(raw)
+except Exception as e:
+    print(fail('invalid JSON: ' + str(e)))
+    sys.exit(0)
+
+if isinstance(rows, dict) and 'message' in rows:
+    print(fail('Supabase error: ' + rows['message'][:120]))
+    sys.exit(0)
+
+if not isinstance(rows, list) or not rows:
+    print(json.dumps({'additionalContext':
+        '[NO TRUTH CARD] No row for ' + slug +
+        '. Run one cycle with pe_truth_card_write() wired, then /persona-state.'}))
+    sys.exit(0)
+
+r   = rows[0]
+hdr = age(r.get('as_of', 'unknown'))
+f   = lambda v: '--' if v is None or v == '' else str(v)
+fb  = lambda v: 'ON' if v is True or v == 'true' else ('OFF' if v is False or v == 'false' else f(v))
+flags = r.get('active_flags') or {}
+if isinstance(flags, str):
+    try:
+        flags = json.loads(flags)
+    except Exception:
+        flags = {}
+fs = ', '.join(
+    k + '=' + ('ON' if (v.get('on') if isinstance(v, dict) else v) else 'OFF')
+    for k, v in sorted(flags.items())
+) if flags else '(none)'
+
+lines = [
+    '=== PERSONA TRUTH CARD: ' + slug + ' ===',
+    hdr, '',
+    'ENGINE STATE',
+    '  RUN_MODE:             ' + f(r.get('run_mode')),
+    '  CONTROL_MODE:         ' + f(r.get('control_mode')),
+    '  V4_DETERMINISTIC:     ' + fb(r.get('v4_deterministic')),
+    '  LLM_BACKEND:          ' + f(r.get('llm_backend')),
+    '  ACTIVE_FLAGS:         ' + fs, '',
+    'LAST ACTIVITY',
+    '  Last post media_id:   ' + f(r.get('last_post_media_id')),
+    '  Last post timestamp:  ' + f(r.get('last_post_ts')),
+    '  Last post slug:       ' + f(r.get('last_post_slug')),
+    '  Last comment graph_id:' + f(r.get('last_comment_graph_id')),
+    '  Last comment ts:      ' + f(r.get('last_comment_ts')), '',
+    'PIPELINE HEALTH',
+    '  Post count (7d):      ' + f(r.get('post_count_7d')),
+    '  Defer queue depth:    ' + f(r.get('defer_queue_depth')),
+    '  Pending proposals:    ' + f(r.get('pending_proposals')),
+    '  NMC count (new):      ' + f(r.get('nmc_count')),
+    '  Bandit updates:       ' + f(r.get('bandit_updates')), '',
+    'WORKING HOURS',
+    '  Schedule:             ' + f(r.get('working_hours_json')),
+    '  Auth cookie mtime:    ' + f(r.get('auth_cookie_mtime')), '',
+    "VERIFICATION RULES (hardcoded -- NEVER use status=confirmed alone)",
+    "  Posts:    action_log WHERE action_type='post' AND context->>'media_id' IS NOT NULL",
+    "  Comments: action_log WHERE action_type='comment' AND metadata->>'graph_id' IS NOT NULL",
+    '=== END TRUTH CARD ===',
+]
+print(json.dumps({'additionalContext': '\n'.join(lines)}))
+RUN_FMT
 
 exit 0
