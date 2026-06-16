@@ -6,6 +6,13 @@
         "hooks": [
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-truth-card-inject.sh\"",
+            "timeout": 6,
+            "continueOnBlock": true,
+            "statusMessage": "Injecting persona truth card..."
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-install-dispatcher.sh\"",
             "timeout": 5,
             "statusMessage": "Installing lv2 dispatcher..."
@@ -318,6 +325,13 @@
             "timeout": 3,
             "continueOnBlock": true,
             "statusMessage": "BG-ledger: recording agent spawn..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-watchdog-gate.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "BG-watchdog: checking for unwatched spawn..."
           }
         ]
       },

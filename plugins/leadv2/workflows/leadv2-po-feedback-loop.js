@@ -86,7 +86,17 @@ const VERIFY_SCHEMA = {
   required: ['checks'],
 }
 
+
+// ── C3: Ledger emit helper ────────────────────────────────────────────────────
+async function emitLedger(event, extra) {
+  const _taskId = (typeof TASK_ID !== 'undefined' ? TASK_ID : null) || (typeof a !== 'undefined' && a.task_id) || 'unknown'
+  const ev = Object.assign({ event, task_id: _taskId }, extra || {})
+  const _root = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
+  try { await bash(`python3 "${_root}/.claude/scripts/lv2-ledger-emit.py" '${JSON.stringify(ev).replace(/'/g, "'\''")}' 2>/dev/null || true`) } catch (_) {}
+}
+
 phase('Audit')
+await emitLedger('phase_enter', { phase: 'Audit' })
 const auditResults = (await parallel([
   () => agent(
     `You are a senior product-owner architect. Visit the deployed preprod URL: ${PREPROD_URL}
@@ -128,6 +138,7 @@ const p0p1 = audit.findings.filter(f => f.severity === 'P0' || f.severity === 'P
 log(`Audit: ${audit.findings.length} findings (${p0p1.length} P0+P1), ${criticTraps.length} critic traps`)
 
 phase('Build')
+await emitLedger('phase_enter', { phase: 'Build' })
 // Group P0+P1 findings by file in JS, disjoint ownership, cap at maxBuildGroups
 const fileMap = new Map()
 for (const f of p0p1) {
@@ -162,6 +173,7 @@ Instructions:
 log(`Build: ${buildResults.length} groups completed`)
 
 phase('Verify')
+await emitLedger('phase_enter', { phase: 'Verify' })
 let verifyResult = await agent(
   `You are a QA engineer verifying fixes for task ${TASK_ID}, ${FEATURE}.
 Preprod URL: ${PREPROD_URL}
@@ -181,6 +193,7 @@ PASS = element + behavior verified. FAIL = missing or broken. PARTIAL = present 
 let checks = (verifyResult && verifyResult.checks) || []
 
 phase('Iterate')
+await emitLedger('phase_enter', { phase: 'Iterate' })
 let round = 1
 while (round <= MAX_ROUNDS) {
   const failedChecks = checks.filter(c => c.status === 'FAIL')

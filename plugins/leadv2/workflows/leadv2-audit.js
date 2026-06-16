@@ -73,7 +73,19 @@ if (MODE === 'personas') {
     required: ['rows'],
   }
 
+// ── C3: Ledger emit helper ────────────────────────────────────────────────────
+async function emitLedger(event, extra) {
+  const _taskId = (typeof TASK_ID !== 'undefined' ? TASK_ID : null) || (typeof a !== 'undefined' && a.task_id) || 'unknown'
+  const ev = Object.assign({ event, task_id: _taskId }, extra || {})
+  const _root = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
+  try { await bash(`python3 "${_root}/.claude/scripts/lv2-ledger-emit.py" '${JSON.stringify(ev).replace(/'/g, "\'\'\'")}' 2>/dev/null || true`) } catch (_) {}
+}
+
+
   phase('Collect')
+
+
+  await emitLedger('phase_enter', { phase: 'Collect' })
   const collectResult = await agent(
     `Run the persona audit collect step in the repo at ${REPO_DIR}.
 Execute: bash scripts/audit-personas.sh --json
@@ -87,6 +99,8 @@ If the script fails or returns empty, return rows: [].`,
   log(`Collect: ${allRows.length} rows, ${breachRows.length} breaches (cap ${MAX_JUDGE})`)
 
   phase('Judge')
+
+  await emitLedger('phase_enter', { phase: 'Judge' })
   const judgeResults = breachRows.length > 0
     ? (await parallel(breachRows.map(row => () => agent(
         `You are diagnosing a persona-engine invariant breach. Provide evidence-backed judgment.
@@ -117,6 +131,7 @@ Return: real (true=confirmed bug, false=probe artifact/race condition), root_cau
 
   if (a.fix === true && confirmed.length > 0) {
     phase('Fix')
+    await emitLedger('phase_enter', { phase: 'Fix' })
     const fixCandidates = confirmed.slice(0, 4)
 
     const fixResults = (await parallel(fixCandidates.map(item => () => agent(
@@ -224,6 +239,8 @@ if (MODE === 'pages') {
 - all-states-wired: loading, empty, error, populated states all render correctly`
 
   phase('Collect')
+
+  await emitLedger('phase_enter', { phase: 'Collect' })
   if (PAGES.length === 0) {
     return { pages: 0, fail_count: 0, fix_items: [] }
   }
@@ -263,6 +280,8 @@ Return verdicts[] (role="Designer", criterion, result, note) and fix_items[] (pr
   }
 
   phase('Judge')
+
+  await emitLedger('phase_enter', { phase: 'Judge' })
   // Merge + dedupe fix_items across all pages in JS
   const seen = new Map()
   const PRIO_RANK = { HIGH: 3, MED: 2, LOW: 1 }
@@ -281,6 +300,8 @@ Return verdicts[] (role="Designer", criterion, result, note) and fix_items[] (pr
   log(`Pages: ${PAGES.length} audited, ${failCount} FAIL verdicts, ${mergedFixItems.length} deduped fix_items`)
 
   phase('Report')
+
+  await emitLedger('phase_enter', { phase: 'Report' })
   await agent(
     `Write a vision-report.md to ${REPORT_DIR}/vision-report.md.
 

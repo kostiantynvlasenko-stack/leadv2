@@ -63,9 +63,11 @@ Use `graph:` queries freely — they cost Claude tokens on lead side only, and t
 
 Use regular (non-graph) questions sparingly — each one interrupts founder. Batch where possible.
 
-## 2.5. Nested spawns (v2.1.172+)
+## 2.5. Nested spawns (v2.1.172+) — 5-LEVEL HARD CAP
 
-Claude Code v2.1.172+ allows subagents to spawn sub-subagents (5 levels deep). This capability is **gated** — only cheap discovery probes are permitted.
+**5-LEVEL NESTING HARD CAP (2.1.172):** Claude Code enforces a maximum of 5 nesting levels across the entire spawn chain. The current leadv2 architecture (lead → workflow → developer → subagent) consumes 3 levels. Subagents in that chain may spawn one more level (level 4), but NEVER level 5 — that is the platform ceiling. Any spawn that would exceed level 5 is silently dropped by the runtime with no error. Design nested workflows to stay within levels 1–4.
+
+Claude Code v2.1.172+ allows subagents to spawn sub-subagents (up to 5 levels deep). This capability is **gated** — only cheap discovery probes are permitted.
 
 **Allowed nested spawns:**
 ```
@@ -284,6 +286,10 @@ Subagent produces `<role>.summary.md` (≤50 words for chat) + `<role>.full.md` 
 - **Finish with the marker.** Without `DELIVERABLE_COMPLETE`, you're not done.
 - **Keep chat empty.** Final message = ONE LINE pointer. Lead reads files; multi-KB final summaries cost parent ~5-58KB context per spawn.
 - **Lead obeys §10.** Reading discipline is part of the protocol, not optional.
+
+## Background spawn watchdog — default-on (ANTI-AMNESIA-01)
+
+Every `Agent(run_in_background=true)` call MUST be immediately followed by `Monitor(path=<deliverable-file>)`. The `leadv2-bg-watchdog-gate.sh` PostToolUse:Agent hook enforces this inline: if no Monitor follows the spawn before the next tool call, it injects a blocking `additionalContext` reminder. There is no opt-out. Both `<role>.md` and `<role>.full.md` paths should be covered where the two-file deliverable split applies. Background agents die silently on spend-limit or crash — without a Monitor, the session stalls indefinitely with no recoverable signal.
 
 ## Anti-patterns
 

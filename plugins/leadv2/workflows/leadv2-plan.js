@@ -1,9 +1,10 @@
 export const meta = {
   name: 'leadv2-plan',
-  description: 'leadv2 Phase 2 Plan as a workflow: parallel architect + critic + Codex-via-agent, synthesize into context.yaml. Retires the Codex Monitor-polling machinery. Model-pinned (opus only Heavy/arch).',
+  description: 'leadv2 Phase 2 Plan as a workflow: capability-match classifier (haiku) → dynamic role fan-out + context envelope → synthesize into context.yaml. Model-pinned.',
   whenToUse: 'leadv2 Phase 2 for class >= Standard. Lead invokes instead of hand-rolled triad + Monitor. Returns a compact plan summary; full context.yaml written to disk.',
   phases: [
-    { title: 'Plan', detail: 'parallel architect + critic + codex-planner' },
+    { title: 'Classify', detail: 'haiku capability-match: pick roles from task brief + file patterns (F5)' },
+    { title: 'Plan', detail: 'dynamic role fan-out + context envelope from shared-memory + solutions-archive (F8)' },
     { title: 'Synthesize', detail: 'merge into context.yaml' },
   ],
 }
@@ -14,6 +15,8 @@ const HEAVY = a.heavy === true || a.archKeyword === true
 const MISSION_PATH = a.missionPath || `docs/handoff/${TASK_ID}/plan-mission.md`
 const CTX = `docs/handoff/${TASK_ID}/context.yaml`
 const CODEX_ON = a.codexEnabled !== false
+// M-3: task_class enum passed from lead; avoids BRIEF.slice(0,50) non-match
+const TASK_CLASS = a.taskClass || 'general'
 // [BANDIT-WIRE-01] Consume bandit model selections from args.models (set by lead before Workflow call).
 // args.models absent (or LEADV2_ROUTE_BANDIT != 1) => falls back to existing pinned defaults.
 // Flag-off guarantee: if args.models is not provided, model values are identical to pre-BANDIT-WIRE-01.
@@ -41,17 +44,108 @@ const CRITIC_SCHEMA = {
   }, required: ['concerns', 'summary_for_lead'],
 }
 
+// [F5-CAP-MATCH] Capability-match schema: haiku classifies task → recommended_roles[]
+const CAP_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    recommended_roles: { type: 'array', items: { type: 'string',
+      enum: ['architect', 'critic', 'developer', 'postgres-pro', 'frontend-developer',
+             'devops-engineer', 'security-auditor'] } },
+    task_class: { type: 'string', enum: ['schema', 'api', 'ui', 'ops', 'security', 'general'] },
+    rationale: { type: 'string' },
+  }, required: ['recommended_roles', 'rationale'],
+}
+
+// [F5] Phase 0: capability-match classifier — haiku, ~5s, zero extra cost
+// Capability map mirrors agent frontmatter capabilities: fields.
+// Fallback: if classifier returns empty/null, static triad is used (backward-compat preserved).
+const STATIC_TRIAD = ['architect', 'critic']
+
+
+// ── C3: Ledger emit helper ────────────────────────────────────────────────────
+async function emitLedger(event, extra) {
+  const _taskId = (typeof TASK_ID !== 'undefined' ? TASK_ID : null) || (typeof a !== 'undefined' && a.task_id) || 'unknown'
+  const ev = Object.assign({ event, task_id: _taskId }, extra || {})
+  const _root = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
+  try { await bash(`python3 "${_root}/.claude/scripts/lv2-ledger-emit.py" '${JSON.stringify(ev).replace(/'/g, "'\''")}' 2>/dev/null || true`) } catch (_) {}
+}
+
+phase('Classify')
+await emitLedger('phase_enter', { phase: 'Classify' })
+// [F8] Also read context envelope sources in parallel: shared-memory + solutions-archive
+const [capResult, sharedMemRaw, archiveRaw] = await Promise.all([
+  agent(
+    `Classify this task to pick the right agent roles. Task brief: "${BRIEF || MISSION_PATH}". ` +
+    `Available agent capabilities:\n` +
+    `  architect: [schema, api-design, migration, data-flow, module-boundaries]\n` +
+    `  critic: [code-review, adversarial, type-safety, test-coverage]\n` +
+    `  developer: [python, async, llm-integration, bash-ops, api]\n` +
+    `  postgres-pro: [sql, rls, migration, supabase, query-optimization]\n` +
+    `  frontend-developer: [ui, nextjs, react, tailwind, server-actions]\n` +
+    `  devops-engineer: [deploy, systemd, vps, cron, bash-scripting, ops]\n` +
+    `  security-auditor: [security, auth, rls, injection, secrets, webhook]\n` +
+    `Return 2-4 recommended_roles that best match the task. Always include architect for Standard+ tasks. ` +
+    `Critic is optional for Light tasks. Return task_class and rationale (1 sentence).`,
+    { label: 'capability-classifier', phase: 'Classify', model: 'haiku', schema: CAP_SCHEMA }),
+  agent(
+    `Read docs/leadv2/shared-memory.yaml if it exists and return its raw text content (max 500 chars). ` +
+    `If the file does not exist, return the string "EMPTY". Do not analyze, just return the content.`,
+    { label: 'shared-mem-read', phase: 'Classify', model: 'haiku' }),
+  agent(
+    `Read docs/leadv2/solutions-archive.yaml if it exists. ` +
+    `Find entries where task_class matches "${TASK_CLASS}". ` +
+    `Return top-3 by score as JSON array [{task_id,score,diff_summary}] or [] if none match or file absent.`,
+    { label: 'archive-read', phase: 'Classify', model: 'haiku' }),
+])
+
+const recommendedRoles = (capResult && Array.isArray(capResult.recommended_roles) && capResult.recommended_roles.length > 0)
+  ? capResult.recommended_roles
+  : STATIC_TRIAD
+log(`Classify: roles=${recommendedRoles.join(',')} class=${capResult ? capResult.task_class : 'fallback'} rationale="${capResult ? capResult.rationale : 'classifier null — static triad'}"`)
+
+// [F8] Build context envelope (≤1500 tokens cap) from shared-memory + solutions-archive
+const sharedMemSnippet = (typeof sharedMemRaw === 'string' && sharedMemRaw !== 'EMPTY')
+  ? sharedMemRaw.slice(0, 600) : ''
+const archiveSnippet = (typeof archiveRaw === 'string' && archiveRaw.trim() !== '[]' && archiveRaw.trim() !== '')
+  ? archiveRaw.slice(0, 600) : ''
+const contextEnvelope = (sharedMemSnippet || archiveSnippet)
+  ? `\n\n## Context envelope (prior exemplars — use as positive examples)\n` +
+    (sharedMemSnippet ? `### Shared memory (top exemplars):\n${sharedMemSnippet}\n` : '') +
+    (archiveSnippet ? `### Solutions archive (matching task class):\n${archiveSnippet}\n` : '')
+  : ''
+
 phase('Plan')
-const spawns = [
-  () => agent(
+await emitLedger('phase_enter', { phase: 'Plan' })
+// [F5+F8] Dynamic spawns from recommended_roles + context envelope injected into architect prompt
+const spawns = []
+if (recommendedRoles.includes('architect')) {
+  spawns.push(() => agent(
     `Architect the plan for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. Read ${MISSION_PATH} + the repo. ` +
-    `Produce decisions[], plan_steps[] (minimal-diff oriented), off_limits[], risks[]. No code, no full-file rewrites.`,
-    { label: 'architect', phase: 'Plan', agentType: 'architect', model: ARCH_MODEL, schema: ARCH_SCHEMA }),
-  () => agent(
+    `Produce decisions[], plan_steps[] (minimal-diff oriented), off_limits[], risks[]. No code, no full-file rewrites.` +
+    contextEnvelope,
+    { label: 'architect', phase: 'Plan', agentType: 'architect', model: ARCH_MODEL, schema: ARCH_SCHEMA }))
+}
+if (recommendedRoles.includes('critic')) {
+  spawns.push(() => agent(
     `Adversarially critique the proposed approach for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. ` +
     `Surface concerns: hidden coupling, irreversible ops, unverifiable invariants, missing tests, scope creep. Severity-tag each.`,
-    { label: 'critic', phase: 'Plan', agentType: 'critic', model: CRITIC_MODEL, schema: CRITIC_SCHEMA }),
-]
+    { label: 'critic', phase: 'Plan', agentType: 'critic', model: CRITIC_MODEL, schema: CRITIC_SCHEMA }))
+}
+if (recommendedRoles.includes('postgres-pro')) {
+  spawns.push(() => agent(
+    `DB/schema review for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. ` +
+    `Check: migration sequencing, RLS policy coverage, partial-index upsert traps, N+1 risks. ` +
+    `Return concerns[] (severity-tagged) + summary_for_lead.`,
+    { label: 'postgres-pro', phase: 'Plan', model: 'sonnet', schema: CRITIC_SCHEMA }))
+}
+if (recommendedRoles.includes('security-auditor')) {
+  spawns.push(() => agent(
+    `Security review for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. ` +
+    `Check: auth gaps, injection risks, RLS correctness, secret handling. ` +
+    `Return concerns[] (severity-tagged) + summary_for_lead.`,
+    { label: 'security-plan', phase: 'Plan', agentType: 'security-auditor', model: 'sonnet', schema: CRITIC_SCHEMA }))
+}
+// lean: devops-engineer and frontend-developer plan-phase spawns omitted — rarely needed at Plan stage; upgrade when task_class=ops|ui is common
 if (CODEX_ON) {
   spawns.push(() => agent(
     `Run this single blocking call: bash ~/.claude/scripts/leadv2-codex-planner.sh --task-id ${TASK_ID} --mission-file "${MISSION_PATH}" --effort ${HEAVY ? 'xhigh' : 'high'} --wait. ` +
@@ -97,6 +191,7 @@ const annotatedSteps = arch.plan_steps.map((stepText, i) => ({
 log(`Agent hints: ${annotatedSteps.map(s => `${s.id}:${s.agent_hint}`).join(', ')}`)
 
 phase('Synthesize')
+await emitLedger('phase_enter', { phase: 'Synthesize' })
 await agent(
   `Write a leadv2 context.yaml to ${CTX} merging this plan. ` +
   `decisions: ${JSON.stringify(arch.decisions)}. steps (with agent_hint per step): ${JSON.stringify(annotatedSteps)}. ` +
@@ -122,6 +217,26 @@ if (validationResult && !validationResult.valid) {
     { label: 'synthesize-retry', phase: 'Synthesize', model: 'sonnet' })
 }
 
+// [TASK-CLASS-PERSIST] Write task_class into context.yaml (additive, backward-compat).
+// This is the source-of-truth for phase8-close.sh → learn-trigger chain.
+// capResult.task_class wins if present; fallback to args.taskClass (M-3 enum); else 'general'.
+const resolvedTaskClass = (capResult && capResult.task_class) || TASK_CLASS || 'general'
+try {
+  await bash(
+    `python3 -c "
+import yaml, sys, pathlib
+p = pathlib.Path('${CTX}')
+if p.exists():
+    d = yaml.safe_load(p.read_text()) or {}
+    d['task_class'] = '${resolvedTaskClass}'
+    p.write_text(yaml.dump(d, default_flow_style=False, allow_unicode=True))
+    print('task_class persisted: ${resolvedTaskClass}')
+else:
+    print('context.yaml not found — task_class not persisted', file=__import__('sys').stderr)
+" 2>&1 || true`
+  )
+} catch (_) { /* non-blocking — task_class defaults to general at learn time */ }
+
 return {
   task_id: TASK_ID, context_path: CTX,
   decisions_count: arch.decisions.length, steps_count: arch.plan_steps.length,
@@ -129,6 +244,8 @@ return {
   blocking_concerns: blocking.length,
   risk_summary: (arch.risks || []).slice(0, 3),
   needs_founder_decision: blocking.length > 0,
+  recommended_roles: recommendedRoles,
+  task_class: resolvedTaskClass,
   architect_failed: undefined,
   validation_error: validationError || undefined,
 }

@@ -69,7 +69,7 @@ If skill fails or MCP is unavailable: set `$GRAPH_FOOTPRINT = null` and continue
 If `LEADV2_LEARN_ON_CLOSE=1` AND (task class >= Standard OR tasks closed since last learn-run > 5):
 
 ```
-Workflow({name:"leadv2-learn", args:{label: LEADV2_TASK_ID}})
+Workflow({name:"leadv2-learn", args:{label: LEADV2_TASK_ID, task_class: LEADV2_TASK_CLASS || 'general', ts: new Date().toISOString()}})
 ```
 
 Write the returned `proposal_path` to `docs/leadv2/last-learn.txt`. Default is `LEADV2_LEARN_ON_CLOSE=0`

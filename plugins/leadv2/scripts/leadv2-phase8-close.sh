@@ -378,10 +378,21 @@ if [[ "${LEADV2_LEARN_ON_CLOSE:-0}" == "1" ]]; then
     _trigger_dir="${PROJECT_ROOT}/docs/leadv2"
     mkdir -p "$_trigger_dir"
     _trigger_file="${_trigger_dir}/.learn-trigger"
+    # Read task_class from context.yaml; default to 'general' if absent.
+    _task_class=$(python3 -c "
+import yaml, pathlib
+p = pathlib.Path('${PROJECT_ROOT}/docs/handoff/${TASK_ID}/context.yaml')
+if p.exists():
+    d = yaml.safe_load(p.read_text()) or {}
+    print(d.get('task_class', 'general'))
+else:
+    print('general')
+" 2>/dev/null || echo 'general')
     printf -- 'trigger_task_id: %s
 trigger_close_count: %d
 triggered_at: %s
-'       "$TASK_ID" "$_close_count" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$_trigger_file"
+trigger_task_class: %s
+'       "$TASK_ID" "$_close_count" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$_task_class" > "$_trigger_file" 
     log_info "[learn-trigger] wrote ${_trigger_file} (close_count=${_close_count}, every_n=${_learn_n})"
   else
     log_info "[skip] learn-trigger not due (close_count=${_close_count} mod ${_learn_n} != 0, or LEADV2_LEARN_ON_CLOSE not triggering)"

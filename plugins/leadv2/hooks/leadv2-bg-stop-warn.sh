@@ -33,7 +33,7 @@ LEDGER_FILE="/tmp/leadv2-bg-ledger/${SAFE_SID}.log"
 [[ -f "$LEDGER_FILE" ]] || exit 0
 
 # --- Throttle: warn once per WARN_EVERY stops ---
-WARN_EVERY="${LEADV2_BG_WARN_EVERY:-3}"
+WARN_EVERY="${LEADV2_BG_WARN_EVERY:-1}"  # reduced from 3: bg-watchdog-gate now fires inline; stop warn is backstop only
 STAMP_FILE="/tmp/leadv2-bg-ledger/${SAFE_SID}.stop-count"
 STOP_COUNT=0
 if [[ -f "$STAMP_FILE" ]]; then
