@@ -359,20 +359,31 @@ fi
 # ── end bandit update ─────────────────────────────────────────────────────────
 
 # ── [R4] Learn trigger: every N closes drop a signal for leadv2-learn ────────
-# Gated by LEADV2_LEARN_ON_CLOSE=1 (DEFAULT OFF).
-# Counts lines in scorecard.jsonl; when count % N == 0 writes a trigger file
-# that lead picks up at next session start. Non-blocking: never gates close.
-# LEADV2_LEARN_EVERY_N tunes the interval (default 10).
-if [[ "${LEADV2_LEARN_ON_CLOSE:-0}" == "1" ]]; then
-  _learn_n="${LEADV2_LEARN_EVERY_N:-10}"
+# Gated by LEADV2_LEARN_ON_CLOSE=1 (DEFAULT ON — founder 2026-06-17 flywheel fix).
+# Counts lines in scorecard.jsonl when available; falls back to a persistent
+# close-counter file so the trigger fires even when scorecard is disabled.
+# When count % N == 0 writes a trigger file lead picks up at next session start.
+# Non-blocking: never gates close.
+# LEADV2_LEARN_EVERY_N tunes the interval (default 5; was 10, halved for faster feedback).
+if [[ "${LEADV2_LEARN_ON_CLOSE:-1}" == "1" ]]; then
+  _learn_n="${LEADV2_LEARN_EVERY_N:-5}"
   # Use PROJECT_ROOT-relative path (phase8 always cd'd to PROJECT_ROOT above)
   _sc_file="${PROJECT_ROOT}/docs/leadv2/scorecard.jsonl"
-  # Only trigger learn when scorecard is also enabled; stale line-counts from
-  # prior sessions cannot be isolated when scorecard is disabled, so guard both.
+  # Primary: scorecard line count (enabled by default now).
+  # Fallback: persistent close-counter so trigger fires even without scorecard.
   _close_count=0
-  if [[ "${LEADV2_SCORECARD_ON_CLOSE:-0}" == "1" && -f "$_sc_file" ]]; then
+  if [[ "${LEADV2_SCORECARD_ON_CLOSE:-1}" == "1" && -f "$_sc_file" ]]; then
     _close_count=$(wc -l < "$_sc_file" 2>/dev/null || echo 0)
     _close_count=$(( _close_count + 0 ))   # strip whitespace
+  fi
+  # Fallback counter: increment docs/leadv2/.close-count when scorecard gave 0.
+  if [[ $_close_count -eq 0 ]]; then
+    _counter_file="${PROJECT_ROOT}/docs/leadv2/.close-count"
+    mkdir -p "${PROJECT_ROOT}/docs/leadv2"
+    _prev=$(cat "$_counter_file" 2>/dev/null || echo 0)
+    _prev=$(( _prev + 0 ))
+    _close_count=$(( _prev + 1 ))
+    printf -- '%d\n' "$_close_count" > "$_counter_file"
   fi
   if [[ $_learn_n -gt 0 && $(( _close_count % _learn_n )) -eq 0 && $_close_count -gt 0 ]]; then
     _trigger_dir="${PROJECT_ROOT}/docs/leadv2"

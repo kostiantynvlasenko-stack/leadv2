@@ -134,6 +134,41 @@ for sess in sessions:
     except OSError:
         pass  # best-effort; still emit block
 
+    # Write a stub reflect-history.yaml entry so leadv2-learn.js has data even
+    # when the lead skips the full Phase 8 close skill.  The learn workflow reads
+    # docs/leadv2/reflect-history.yaml entries[].{task,failure_class,pattern,lesson}.
+    # This is the authoritative sink — without it, synthesis never fires (303 tasks,
+    # 0 entries confirmed 2026-06-17).  Full close should overwrite with richer data.
+    try:
+        import datetime
+        reflect_path = os.path.join(cwd, "docs", "leadv2", "reflect-history.yaml")
+        os.makedirs(os.path.dirname(reflect_path), exist_ok=True)
+        # Load existing file or initialise structure.
+        existing = {}
+        if os.path.isfile(reflect_path):
+            try:
+                with open(reflect_path, encoding="utf-8") as _rh:
+                    existing = yaml.safe_load(_rh) or {}
+            except Exception:
+                existing = {}
+        entries = existing.get("entries") or []
+        # Idempotent: skip if this task already has an entry.
+        if not any(isinstance(e, dict) and e.get("task") == task_id for e in entries):
+            entries.append({
+                "task": task_id,
+                "phase": phase,
+                "failure_class": "skipped_close",
+                "pattern": f"task {task_id} reached {phase} phase but Phase 8 close was not invoked",
+                "lesson": "Run leadv2-close skill at the end of every task to populate reflect-history",
+                "written_by": "force-reflect-hook",
+                "ts": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+            existing["entries"] = entries
+            with open(reflect_path, "w", encoding="utf-8") as _wh:
+                yaml.dump(existing, _wh, allow_unicode=True, default_flow_style=False)
+    except Exception:
+        pass  # never block on reflect write failure
+
     print(json.dumps({
         "decision": "block",
         "reason": (
