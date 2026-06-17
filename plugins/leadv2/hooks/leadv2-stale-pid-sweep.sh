@@ -37,6 +37,7 @@ if dropped:
         yaml.safe_dump(d, f, default_flow_style=False)
     print(f'[leadv2-stale-pid-sweep] dropped {dropped} from {path}', file=sys.stderr)
 PYEOF
+  printf '%s|stale-pid-sweep|ran path=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$candidate" >> /tmp/leadv2-sweep.log 2>/dev/null || true
   ACTIVE_YAML=""
 done
 exit 0

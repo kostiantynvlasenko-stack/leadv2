@@ -54,6 +54,7 @@ print('1' if m else '0')
 [[ "${MATCHED:-0}" != "1" ]] && exit 0
 
 # Emit additionalContext advisory (non-blocking inject -- exit 0)
+printf '%s|broken-signal-gate|signal-matched\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/leadv2-broken-signal-gate.log 2>/dev/null || true
 python3 -c "
 import json
 ctx = (

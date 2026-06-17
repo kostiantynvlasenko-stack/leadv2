@@ -34,5 +34,6 @@ done
 
 if [[ ${#KILLED[@]} -gt 0 ]]; then
   echo "[leadv2-orphan-monitor-sweep] killed ${#KILLED[@]} orphan codex-monitor loops: ${KILLED[*]}" >&2
+  printf '%s|orphan-monitor-sweep|killed=%d\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${#KILLED[@]}" >> /tmp/leadv2-sweep.log 2>/dev/null || true
 fi
 exit 0

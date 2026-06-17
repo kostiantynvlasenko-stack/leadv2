@@ -101,8 +101,10 @@ LEADV2_PROJECT_ROOT="${PROJ_ROOT}" PROJECT_ROOT="${PROJ_ROOT}" \
 
 if [[ -f "$RD_FILE" ]]; then
   printf -- '[bandit-preflight] auto-selected models written to %s\n' "$RD_FILE" >&2
+  printf '%s|bandit-preflight|route-selected task=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SAFE_TASK_ID" >> /tmp/leadv2-bandit-preflight.log 2>/dev/null || true
 else
   printf -- '[bandit-preflight] WARN: select-for-workflow ran but route-decisions.yaml absent -- continuing\n' >&2
+  printf '%s|bandit-preflight|warn-no-rd task=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SAFE_TASK_ID" >> /tmp/leadv2-bandit-preflight.log 2>/dev/null || true
 fi
 
 exit 0

@@ -122,6 +122,7 @@ if [[ -z "$RESULTS" ]]; then
   exit 0
 fi
 
+printf '%s|wiki-query|inject hits>0\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/leadv2-wiki-query.log 2>/dev/null || true
 # ── emit additionalContext + ledger event ─────────────────────────────────────
 python3 - "$RESULTS" <<'PYEOF'
 import sys, json, os, datetime
