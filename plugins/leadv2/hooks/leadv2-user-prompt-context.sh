@@ -68,6 +68,22 @@ You are the LEADV2 ORCHESTRATOR. Task: $TID_FOR_RESUME, phase: $PHASE_NOW.
 After /compact: read ${_lv2_leadv2_dir}/tasks/$TID_FOR_RESUME/STATE.md limit=20 and ${_lv2_handoff_dir}/$TID_FOR_RESUME/context.yaml limit=30.
 NEVER write .py/.sh/.ts/.tsx/.sql directly. Delegate ALL code changes to developer subagents.
 RESUME
+      # Emit typed pre-compact-resume.json alongside the .md for machine-readable recovery.
+      # Fields: task_id/phase/latest_handoff/written from known values; others empty (no fabrication).
+      python3 -c "
+import json, sys
+d = {
+  'task_id': sys.argv[1],
+  'phase': sys.argv[2],
+  'latest_handoff': sys.argv[3],
+  'written': sys.argv[4],
+  'session_summary': '',
+  'key_decisions': [],
+  'blockers': [],
+  'next_actions': [],
+}
+print(json.dumps(d, indent=2))
+" "$TID_FOR_RESUME" "$PHASE_NOW" "${LATEST_ARTIFACT:-unknown}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"         > "${RESUME_DIR}/pre-compact-resume.json" 2>/dev/null || true
     fi
   fi
 fi

@@ -63,4 +63,21 @@ mkdir -p "$TASK_DIR" 2>/dev/null || true
   printf -- 'NEVER write .py/.sh/.ts/.tsx/.sql directly. Delegate ALL code changes to developer subagents.\n'
 } > "$RESUME" 2>/dev/null || true
 
+# Emit typed pre-compact-resume.json alongside the .md for machine-readable recovery.
+# Fields: task_id/phase/latest_handoff/written from known values; others empty (no fabrication).
+python3 -c "
+import json, sys
+d = {
+  'task_id': sys.argv[1],
+  'phase': sys.argv[2],
+  'latest_handoff': sys.argv[3],
+  'written': sys.argv[4],
+  'session_summary': '',
+  'key_decisions': [],
+  'blockers': [],
+  'next_actions': [],
+}
+print(json.dumps(d, indent=2))
+" "$TID" "$PHASE_NOW" "$(basename "$CHECKPOINT" 2>/dev/null || echo "checkpoint.md")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"   > "${TASK_DIR}/pre-compact-resume.json" 2>/dev/null || true
+
 exit 0

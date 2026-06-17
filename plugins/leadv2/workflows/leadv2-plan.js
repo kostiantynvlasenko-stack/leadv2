@@ -225,18 +225,39 @@ if (validationResult && !validationResult.valid) {
 // capResult.task_class wins if present; fallback to args.taskClass (M-3 enum); else 'general'.
 const resolvedTaskClass = (capResult && capResult.task_class) || TASK_CLASS || 'general'
 try {
+  // [TASK-CLASS-PERSIST] Serialize under per-task .context.lock (same lock used by context-prune.sh).
+  // Uses flock --exclusive --timeout 10 (command form: flock LOCKFILE cmd) + temp+os.replace
+  // atomic write + yaml.safe_dump. _ctxDir is resolved in JS (no shell subshell) so _lockFile
+  // equals exactly $(dirname "$CTX")/.context.lock as used by context-prune.sh.
+  const _ctxDir = CTX.includes('/') ? CTX.substring(0, CTX.lastIndexOf('/')) : '.'
+  const _lockFile = `${_ctxDir}/.context.lock`
   await bash(
-    `python3 -c "
-import yaml, sys, pathlib
+    `touch '${_lockFile}' 2>/dev/null || true
+flock --exclusive --timeout 10 '${_lockFile}' python3 - <<'__PYEOF__'
+import yaml, sys, os, tempfile, pathlib
 p = pathlib.Path('${CTX}')
-if p.exists():
-    d = yaml.safe_load(p.read_text()) or {}
-    d['task_class'] = '${resolvedTaskClass}'
-    p.write_text(yaml.dump(d, default_flow_style=False, allow_unicode=True))
-    print('task_class persisted: ${resolvedTaskClass}')
-else:
-    print('context.yaml not found — task_class not persisted', file=__import__('sys').stderr)
-" 2>&1 || true`
+if not p.exists():
+    print('context.yaml not found — task_class not persisted', file=sys.stderr)
+    sys.exit(0)
+d = yaml.safe_load(p.read_text()) or {}
+d['task_class'] = '${resolvedTaskClass}'
+ctx_dir = str(p.parent)
+fd, tmp = tempfile.mkstemp(dir=ctx_dir, suffix='.ctx.tmp')
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as tf:
+        tf.write(yaml.safe_dump(d, default_flow_style=False, allow_unicode=True, width=120))
+        tf.flush()
+        os.fsync(tf.fileno())
+    os.replace(tmp, str(p))
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+print('task_class persisted: ${resolvedTaskClass}')
+__PYEOF__
+`
   )
 } catch (_) { /* non-blocking — task_class defaults to general at learn time */ }
 
