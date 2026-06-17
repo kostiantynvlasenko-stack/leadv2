@@ -130,7 +130,7 @@ for sess in sessions:
 
     # Touch the one-shot marker and emit the block.
     try:
-        open(forced_marker, "a").close()
+        with open(forced_marker, "a"): pass
     except OSError:
         pass  # best-effort; still emit block
 
@@ -152,20 +152,32 @@ for sess in sessions:
             except Exception:
                 existing = {}
         entries = existing.get("entries") or []
-        # Idempotent: skip if this task already has an entry.
-        if not any(isinstance(e, dict) and e.get("task") == task_id for e in entries):
+        # Idempotent: skip if this task already has a non-stub entry.
+        # Stub entries (stub: true) are replaced by Phase 8 close with richer data.
+        has_entry = any(isinstance(e, dict) and e.get("task") == task_id and not e.get("stub") for e in entries)
+        if not has_entry:
+            # Remove any existing stub for this task before appending the new one.
+            entries = [e for e in entries if not (isinstance(e, dict) and e.get("task") == task_id and e.get("stub"))]
             entries.append({
                 "task": task_id,
                 "phase": phase,
                 "failure_class": "skipped_close",
+                "stub": True,
                 "pattern": f"task {task_id} reached {phase} phase but Phase 8 close was not invoked",
                 "lesson": "Run leadv2-close skill at the end of every task to populate reflect-history",
                 "written_by": "force-reflect-hook",
-                "ts": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             })
             existing["entries"] = entries
-            with open(reflect_path, "w", encoding="utf-8") as _wh:
-                yaml.dump(existing, _wh, allow_unicode=True, default_flow_style=False)
+            import tempfile
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(reflect_path), suffix=".tmp")
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as _tmp:
+                    yaml.dump(existing, _tmp, allow_unicode=True, default_flow_style=False)
+                os.replace(tmp_path, reflect_path)
+            except Exception:
+                try: os.unlink(tmp_path)
+                except OSError: pass
     except Exception:
         pass  # never block on reflect write failure
 

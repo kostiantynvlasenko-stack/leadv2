@@ -372,18 +372,18 @@ if [[ "${LEADV2_LEARN_ON_CLOSE:-1}" == "1" ]]; then
   # Primary: scorecard line count (enabled by default now).
   # Fallback: persistent close-counter so trigger fires even without scorecard.
   _close_count=0
-  if [[ "${LEADV2_SCORECARD_ON_CLOSE:-1}" == "1" && -f "$_sc_file" ]]; then
+  if [[ "${LEADV2_SCORECARD_ON_CLOSE:-0}" == "1" && -f "$_sc_file" ]]; then
     _close_count=$(wc -l < "$_sc_file" 2>/dev/null || echo 0)
     _close_count=$(( _close_count + 0 ))   # strip whitespace
   fi
-  # Fallback counter: increment docs/leadv2/.close-count when scorecard gave 0.
-  if [[ $_close_count -eq 0 ]]; then
+  # Fallback counter: only when scorecard is explicitly disabled (not just empty).
+  if [[ "${LEADV2_SCORECARD_ON_CLOSE:-0}" != "1" ]]; then
     _counter_file="${PROJECT_ROOT}/docs/leadv2/.close-count"
     mkdir -p "${PROJECT_ROOT}/docs/leadv2"
     _prev=$(cat "$_counter_file" 2>/dev/null || echo 0)
-    _prev=$(( _prev + 0 ))
-    _close_count=$(( _prev + 1 ))
-    printf -- '%d\n' "$_close_count" > "$_counter_file"
+    [[ "$_prev" =~ ^[0-9]+$ ]] || _prev=0   # M1: validate before arithmetic (shell-injection guard)
+    _close_count=$(( (_prev + 1) % 1000000 ))
+    printf -- '%d\n' "$_close_count" > "${_counter_file}.tmp" && mv "${_counter_file}.tmp" "$_counter_file"  # H1: atomic write
   fi
   if [[ $_learn_n -gt 0 && $(( _close_count % _learn_n )) -eq 0 && $_close_count -gt 0 ]]; then
     _trigger_dir="${PROJECT_ROOT}/docs/leadv2"

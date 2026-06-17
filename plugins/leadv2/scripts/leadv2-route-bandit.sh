@@ -57,7 +57,8 @@ _ensure_py_helper() {
 
 _default_state_file() {
   local proj_root
-  proj_root="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+  # H3: apply same 3-tier resolution as cmd_update so READ and WRITE agree on the consuming repo.
+  proj_root="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || cd "$SCRIPT_DIR/../.." && pwd)}}"
   printf '%s/docs/leadv2/route-bandit-state.yaml' "$proj_root"
 }
 
@@ -201,7 +202,11 @@ cmd_update() {
     }
 
     local proj_root
-    proj_root="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+    # Mirror cmd_select_for_workflow: honor LEADV2_PROJECT_ROOT (consuming repo) first,
+    # then PROJECT_ROOT, then git toplevel of $PWD, then fallback.
+    # The old fallback $(cd "$SCRIPT_DIR/../.." && pwd) resolves to the plugin repo, not
+    # the consuming repo, causing rd_file to be looked up in the wrong tree → skipped.
+    proj_root="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
     local handoff_dir="${proj_root}/docs/handoff/${task_id}"
     local rd_file="${handoff_dir}/route-decisions.yaml"
 
