@@ -1,5 +1,5 @@
 {
-  "description": "leadv2 autonomous orchestrator hooks — guards, counters, delegations, lifecycle",
+  "description": "leadv2 autonomous orchestrator hooks \u2014 guards, counters, delegations, lifecycle",
   "hooks": {
     "SessionStart": [
       {
@@ -122,6 +122,12 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-read-gate.sh\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-opus-read-budget.sh\"",
+            "timeout": 5,
+            "statusMessage": "Opus read-budget gate..."
           }
         ]
       },
@@ -149,6 +155,12 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-routing-guard.sh\"",
             "timeout": 5,
             "statusMessage": "Routing guard (model check)..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-model-inherit-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Model-inherit guard (opus allowlist)..."
           },
           {
             "type": "command",
@@ -184,6 +196,12 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bandit-preflight.sh\"",
             "timeout": 20,
             "statusMessage": "Bandit preflight: ensuring route-decisions.yaml..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-workflow-model-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Workflow model-guard (unpinned agent warn)..."
           }
         ]
       },
@@ -217,6 +235,12 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-verdict-format-guard.sh\"",
             "timeout": 5,
             "statusMessage": "Checking verdict YAML format..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-no-opus-code-edit.sh\"",
+            "timeout": 5,
+            "statusMessage": "No-opus-code-edit guard..."
           }
         ]
       },
@@ -240,6 +264,12 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-verdict-format-guard.sh\"",
             "timeout": 5,
             "statusMessage": "Checking verdict YAML format..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-no-opus-code-edit.sh\"",
+            "timeout": 5,
+            "statusMessage": "No-opus-code-edit guard..."
           }
         ]
       },
