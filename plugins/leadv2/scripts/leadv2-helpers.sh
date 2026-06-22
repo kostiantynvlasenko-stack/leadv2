@@ -2302,6 +2302,34 @@ YAML
   done
 }
 
+
+# ── Context YAML read-modify-write lock ───────────────────────────────
+# Acquire an exclusive flock on <task_dir>/.context.lock for the duration
+# of a context.yaml read-modify-write cycle.  Mirrors the STATE.md.lock
+# pattern in leadv2-state-atomic-write.sh.
+#
+# Usage:
+#   leadv2_with_context_lock <context_yaml_path> <cmd> [args...]
+#
+# The lock file is placed alongside context.yaml:
+#   $(dirname <context_yaml_path>)/.context.lock
+#
+# On timeout (10s): prints warning to stderr and exits non-zero.
+# The entire read→modify→_atomic_write_yaml chain must run inside this call
+# so that concurrent sessions cannot interleave their reads and writes.
+leadv2_with_context_lock() {
+  local ctx_path="$1"; shift
+  local lock_dir
+  lock_dir="$(dirname "$ctx_path")"
+  local lock_file="${lock_dir}/.context.lock"
+  mkdir -p "$lock_dir"
+  touch "$lock_file"
+  flock -x -w 10 "$lock_file" "$@" || {
+    printf -- '[helpers] leadv2_with_context_lock: timeout waiting for %s\n' "$lock_file" >&2
+    return 1
+  }
+}
+
 # ── _leadv2_claude_agents_json ────────────────────────────────────────────────
 # Call `claude agents --json` with a 5-second timeout.
 # Returns JSON on stdout; empty string on any failure (binary missing, timeout,
@@ -2407,5 +2435,6 @@ if [[ -n "${BASH_VERSION:-}" ]]; then
   export -f leadv2_wait_answer
   export -f _leadv2_claude_agents_json
   export -f _lv2_load_quality_engine_config
+  export -f leadv2_with_context_lock
   export -f lv2_script
 fi

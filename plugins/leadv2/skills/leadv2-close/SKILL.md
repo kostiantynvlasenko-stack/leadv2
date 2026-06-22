@@ -14,7 +14,18 @@ allowed-tools:
 
 ## Protocol
 
-### Step 0. Emit cost telemetry (NEW — before reading)
+### Step 0 — MANDATORY: run phase8-close.sh before any close commit
+
+```bash
+bash "$(bash .claude/scripts/lv2 --path leadv2-phase8-close.sh)" "${LEADV2_TASK_ID}"
+```
+
+This writes scorecard/ledger/reflect artifacts and sets `docs/handoff/<task_id>/phase8-passed.flag`.
+The `leadv2-close-ritual-guard.sh` PreToolUse hook will **block** any close-style git commit
+(`chore: close <TASK_ID>` etc.) until both `docs/leadv2/closed/<task_id>.yaml` and
+`phase8-passed.flag` exist. To bypass in exceptional circumstances: `LEADV2_SKIP_CLOSE_GUARD=1`.
+
+### Step 0a. Emit cost telemetry (before reading)
 
 ```bash
 source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)"

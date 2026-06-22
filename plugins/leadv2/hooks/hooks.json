@@ -33,6 +33,20 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-compact-trigger.sh\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-learn-consume.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "Flywheel: checking for learn trigger..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-pending-close-inject.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "Checking for pending close obligations..."
           }
         ]
       }
@@ -112,6 +126,12 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-schema-audit-pre-gate.sh\"",
             "timeout": 10,
             "statusMessage": "Schema audit pre-gate..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-close-ritual-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Close-ritual guard (blocks lying-fast closes)..."
           }
         ]
       },

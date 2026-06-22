@@ -133,6 +133,56 @@ with open(pulse_file, 'a', encoding='utf-8') as pf:
     pf.flush()
     os.fsync(pf.fileno())
 
+# ── Cap pulse.md to last N lines (LEADV2_PULSE_MAX_LINES, default 200) ────────
+# Pruned head is archived to pulse-archive.md rather than discarded.
+try:
+    pulse_max = max(1, int(os.environ.get('LEADV2_PULSE_MAX_LINES', '200') or '200'))
+except (ValueError, TypeError):
+    pulse_max = 200
+with open(pulse_file, 'r', encoding='utf-8') as pf:
+    pulse_lines = pf.readlines()
+if len(pulse_lines) > pulse_max:
+    head_lines = pulse_lines[: len(pulse_lines) - pulse_max]
+    keep_lines = pulse_lines[len(pulse_lines) - pulse_max :]
+    archive_file = os.path.join(os.path.dirname(pulse_file), 'pulse-archive.md')
+    # Read existing archive content, then write combined (existing + new head_lines) atomically.
+    # Atomic archive write prevents duplicate archive entries when the process is killed after
+    # a partial append but before pulse.md is truncated (on next run head_lines re-archived).
+    existing_archive: list[str] = []
+    if os.path.exists(archive_file):
+        with open(archive_file, 'r', encoding='utf-8') as _af:
+            existing_archive = _af.readlines()
+    archive_dir = os.path.dirname(archive_file)
+    fd_arch, tmp_arch = tempfile.mkstemp(dir=archive_dir, suffix='.archive.tmp')
+    try:
+        with os.fdopen(fd_arch, 'w', encoding='utf-8') as tf_arch:
+            tf_arch.writelines(existing_archive + head_lines)
+            tf_arch.flush()
+            os.fsync(tf_arch.fileno())
+        os.replace(tmp_arch, archive_file)
+    except Exception:
+        try:
+            os.unlink(tmp_arch)
+        except OSError:
+            pass
+        raise
+    # Rewrite pulse.md with kept lines only
+    pulse_dir = os.path.dirname(pulse_file)
+    fd2, tmp2 = tempfile.mkstemp(dir=pulse_dir, suffix='.pulse.tmp')
+    try:
+        with os.fdopen(fd2, 'w', encoding='utf-8') as tf2:
+            tf2.writelines(keep_lines)
+            tf2.flush()
+            os.fsync(tf2.fileno())
+        os.replace(tmp2, pulse_file)
+    except Exception:
+        try:
+            os.unlink(tmp2)
+        except OSError:
+            pass
+        raise
+
+
 print(f"OK: {field}={value}")
 PYEOF
 )

@@ -61,7 +61,7 @@ Each phase entry calls `leadv2_pulse_log "<phase>" "<one-line summary>"` — emi
 
 - **Pre-flight git-log check (BEFORE worktree create):** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-preflight-gitlog.sh" "$LEADV2_TASK_ID"`. Exit 2 → surface oneline commits to founder via single AskUserQuestion (`already-shipped → admin-close` vs `continue anyway`). Saves the entire setup cycle on already-landed tasks.
 - **Parallel-session collision sniff:** `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-collision-check.sh"`. Exit 2 → log warning into pulse + plan rebase-flow vs ff-merge BEFORE EnterWorktree.
-- **Immediately after user picks a task** (before any other work): write provisional entry to `docs/leadv2/active.yaml` so other sessions see it claimed:
+- **MANDATORY — active.yaml session registration (BEFORE any other work):** write provisional entry to `docs/leadv2/active.yaml` so other sessions see it claimed. This registration is also what enables the `leadv2-force-reflect.sh` Stop hook to fire at session end — without it the hook has no sessions to iterate and the reflect/self-learning loop is silently skipped (root cause confirmed 2026-06-22).
   ```bash
   python3 -c "
   import yaml, datetime, os, sys

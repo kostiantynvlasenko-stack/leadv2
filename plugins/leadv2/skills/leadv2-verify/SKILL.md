@@ -12,6 +12,15 @@ allowed-tools:
 
 ## When: Phase 7, after Deploy clean. When NOT: deploy circuit-broke.
 
+## VERIFY PASS requires (anti-lying-green invariants)
+
+Before declaring verify complete, ALL of these must hold:
+
+1. **Concrete live signal** — at least one of: a real DB row (with distinct id/media_id logged), a non-zero metric delta, a log line with timestamp, or a confirmed HTTP response. "No error" alone is NOT a pass.
+2. **Exit code captured non-masked** — probe exit code must be captured and checked explicitly; never swallowed by `|| true` or `2>/dev/null` after the signal step.
+3. **0/null/empty result → mandatory layer-by-layer probe** — if the expected signal returns 0 rows, null, or empty: re-query by alternate key (e.g. slug not UUID), check RUN_MODE=prod, confirm the event was emitted at all. Only after all layers return negative is the result treated as PROBE_NEG → recovery. Never close on a 0/null result without the layer probe (root of lying-green closes).
+4. **`verify-probe-result.yaml` written** — `outcome:` field must be `probe_ok`; no other value admits close.
+
 ## Protocol
 
 ### 1. Read verification spec from context.yaml
@@ -201,6 +210,36 @@ context.yaml.verification.confirmed_at: <ISO>
 ```bash
 source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)" && leadv2_active_update_phase close
 ```
+
+#### 6a. [R3-3 MANDATORY] Write pending-close.yaml (close obligation, survives /compact)
+
+Immediately after `probe_ok`, before proceeding to Phase 8:
+
+```bash
+# [R3-3 COMPACT-SURVIVE-03] Durable close obligation — SessionStart reads this and reminds
+# the lead to run phase8-close if the session was compacted between verify and close.
+_PENDING_CLOSE_DIR="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}/docs/leadv2/tasks/${LEADV2_TASK_ID}"
+mkdir -p "$_PENDING_CLOSE_DIR"
+python3 -c "
+import yaml, sys, datetime, pathlib
+p = pathlib.Path(sys.argv[1])
+d = {
+    'task_id': sys.argv[2],
+    'owed_phase': 'phase8-close',
+    'phase8_context': {
+        'verdict': 'PASS',
+        'deploy_sha': sys.argv[3],
+        'created_at': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+    }
+}
+p.write_text(yaml.dump(d, default_flow_style=False, allow_unicode=True))
+" "${_PENDING_CLOSE_DIR}/pending-close.yaml" \
+  "${LEADV2_TASK_ID}" \
+  "$(git rev-parse --short HEAD 2>/dev/null || echo no-deploy)"
+```
+
+Phase 8 close automatically deletes `pending-close.yaml`; if the session is compacted before
+phase8-close runs, the SessionStart hook injects a reminder so the obligation is not dropped.
 
 Proceed to Phase 8 Close.
 

@@ -342,6 +342,17 @@ else
 fi
 # ── end memory GC ─────────────────────────────────────────────────────────────
 
+# ── [D-5a] Ensure route-decisions.yaml stub exists before bandit reads it ────
+# Bandit update skips when route-decisions.yaml is absent (leadv2-route-bandit.sh ~L219).
+# Write a minimal stub so bandit can proceed and total_updates can increment.
+ROUTE_DEC="${PROJECT_ROOT}/docs/handoff/${TASK_ID}/route-decisions.yaml"
+if [[ ! -f "$ROUTE_DEC" ]]; then
+  mkdir -p "${PROJECT_ROOT}/docs/handoff/${TASK_ID}"
+  printf 'task_id: %s\nrouted_workflow: unknown\nmodel: unknown\n' "$TASK_ID" > "$ROUTE_DEC"
+  log_info "[bandit] route-decisions.yaml missing — wrote stub so bandit update does not skip"
+fi
+# ── end route-decisions stub ──────────────────────────────────────────────────
+
 # ── [BANDIT-01] Non-blocking route-bandit update ─────────────────────────────
 # Runs after scorecard step; failures never gate close. File-exists guard per design §sync-point.
 # FIX-BANDIT-COST-01: removed trailing & — update must run AFTER scorecard write completes so
@@ -358,6 +369,16 @@ else
   log_info "[skip] leadv2-route-bandit.sh not found — bandit update skipped (BANDIT-01 Group A pending)"
 fi
 # ── end bandit update ─────────────────────────────────────────────────────────
+
+# ── [D-2] Ledger emit: task_close event ──────────────────────────────────────
+# Fire-and-forget — lv2-ledger-emit.py never raises (exits 0 on any error).
+LEDGER_EMIT="${SCRIPTS_DIR}/lv2-ledger-emit.py"
+if [[ -f "$LEDGER_EMIT" ]]; then
+  # H2: build ledger JSON safely via python3 (no shell interpolation inside JSON literal)
+  _lv2_payload=$(python3 -c 'import json,sys; print(json.dumps({"event":"task_close","task_id":sys.argv[1],"outcome":sys.argv[2],"phase":"close"}))' "$TASK_ID" "$OUTCOME" 2>/dev/null || true)
+  [[ -n "$_lv2_payload" ]] && python3 "$LEDGER_EMIT" "$_lv2_payload" 2>/dev/null || true
+fi
+# ── end ledger emit ───────────────────────────────────────────────────────────
 
 # ── [R4] Learn trigger: every N closes drop a signal for leadv2-learn ────────
 # Gated by LEADV2_LEARN_ON_CLOSE=1 (DEFAULT ON — founder 2026-06-17 flywheel fix).
@@ -447,6 +468,19 @@ else
   log_info "[drain-check] no untracked followup items in ${HANDOFF_DIR}"
 fi
 # ── end followup drain warning ────────────────────────────────────────────────
+
+# ── [C-1 R4] Unregister from active.yaml on close ────────────────────────────
+# Empties sessions[] for this task_id so pre-compact-checkpoint knows the task is closed.
+_REGISTRY="${SCRIPTS_DIR}/leadv2-active-registry.sh"
+if [[ -f "$_REGISTRY" ]]; then
+  LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" source "$_REGISTRY" 2>/dev/null \
+    && leadv2_active_unregister "${TASK_ID}" 2>/dev/null \
+    && log_info "[active-registry] unregistered ${TASK_ID} from active.yaml" \
+    || log_info "[active-registry] unregister failed (non-blocking)"
+else
+  log_info "[active-registry] registry script not found — active.yaml unregister skipped"
+fi
+# ── end active.yaml unregister ────────────────────────────────────────────────
 
 log_info "Phase 8 close complete for ${TASK_ID} (YAML: ${YAML_PATH})"
 exit 0

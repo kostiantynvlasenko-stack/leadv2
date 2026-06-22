@@ -217,6 +217,7 @@ cmd_update() {
     fi
 
     if [[ "$rd_json" == "[]" || -z "$rd_json" ]]; then
+      echo "WARN[bandit]: no route-decisions.yaml for task ${task_id} — update skipped, total_updates will not increment" >&2
       log_info "update: no route-decisions for task $task_id; skipping"
       printf 'update_result=skipped\n'
       return 0

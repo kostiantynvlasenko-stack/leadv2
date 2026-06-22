@@ -45,6 +45,18 @@ if ! command -v python3 >/dev/null; then
   exit 0
 fi
 
+# ── Hold .context.lock across the full read→modify→write cycle ───────────
+# Acquire an exclusive flock on <task_dir>/.context.lock before reading
+# context.yaml so no concurrent session can interleave its own RMW.
+# Mirrors the STATE.md.lock pattern in leadv2-state-atomic-write.sh.
+CTX_LOCK="$(dirname "$CTX")/.context.lock"
+touch "$CTX_LOCK"
+exec 9>"$CTX_LOCK"
+if ! flock -x -w 10 9; then
+  echo "WARN: leadv2-context-prune: timeout waiting for $CTX_LOCK — skipping prune" >&2
+  exit 1
+fi
+
 prune_yaml=$(python3 - "$CTX" "$MODE" <<'PY'
 import sys, os
 try:
@@ -121,9 +133,11 @@ PY
 )
 if [[ -z "$prune_yaml" ]]; then
   echo "WARN: prune produced empty output, skipping write" >&2
+  flock -u 9
   exit 0
 fi
 _atomic_write_yaml "$CTX" "$prune_yaml"
+flock -u 9
 
 OUT_BYTES=$(wc -c < "$CTX" | tr -d ' ')
 REDUCTION=0

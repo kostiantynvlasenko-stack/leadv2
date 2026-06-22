@@ -206,6 +206,46 @@ if [[ $A4_REFLECT_OK -eq 0 ]]; then
   failures+=("A4: docs/leadv2/reflect-history.yaml has no entry for ${TASK_ID} — run lead-reflect §5a to append structured entry (this is required; board ✅ line alone is insufficient)")
 fi
 
+# ── A5: closed YAML must NOT contain placeholder lie-language in live_signal/verification ──
+# Hard-fails ONLY when live_signal/verification is PRESENT with placeholder deferral text.
+# (case-insensitive: pending, verify-tonight, verify tonight, DO AFTER COMPACT, TODO verify)
+# When field is simply ABSENT/empty -> WARNING only (non-blocking). Keeps anti-lying-green
+# teeth without blocking 294/304 legacy closed YAMLs that lack the field entirely.
+A5_OK=0
+if [[ -f "$CLOSED_YAML" ]]; then
+  # Use python3 -c with args to avoid heredoc; exit 0=ok 1=placeholder 2=absent/unparseable
+  python3 -c '
+import sys, re, yaml
+PLACEHOLDER_RE = re.compile(
+    r"\bpending\b|verify[-\s]tonight|do\s+after\s+compact|todo\s+verify",
+    re.IGNORECASE,
+)
+try:
+    d = yaml.safe_load(open(sys.argv[2], encoding="utf-8")) or {}
+except Exception:
+    sys.exit(2)
+value = (d.get("live_signal") or d.get("verification") or "").strip()
+if not value: sys.exit(2)
+sys.exit(1 if PLACEHOLDER_RE.search(value) else 0)
+  '  "$TASK_ID" "$CLOSED_YAML" 2>/dev/null; a5_rc=$?
+  case $a5_rc in
+    0)
+      A5_OK=1
+      log_pass "A5 closed YAML: live_signal/verification present and not a placeholder"
+      ;;
+    1)
+      log_fail "A5 closed YAML: placeholder lie-language detected in ${CLOSED_YAML}"
+      failures+=("A5: ${CLOSED_YAML} has placeholder lie-language (pending/TODO verify/etc.) -- replace with real evidence or remove the field")
+      ;;
+    *)
+      A5_OK=1
+      log_warning "A5 closed YAML: live_signal/verification absent or empty -- non-blocking (set when evidence available)"
+      ;;
+  esac
+else
+  log_warning "A5 closed YAML not found (A1 would catch this): ${CLOSED_YAML} -- non-blocking"
+fi
+
 # ── W1 (best-effort): BOARD.md HEAD has today's date AND task_id ─────────────
 if [[ -f "$BOARD_FILE" ]]; then
   has_today=0
@@ -281,7 +321,7 @@ else
 fi
 
 # ── result ────────────────────────────────────────────────────────────────────
-log_info "=== Phase 8 assertions for ${TASK_ID}: $((4 - ${#failures[@]})) / 4 HARD checks PASS ==="
+log_info "=== Phase 8 assertions for ${TASK_ID}: $((5 - ${#failures[@]})) / 5 HARD checks PASS ==="
 
 if (( ${#failures[@]} > 0 )); then
   {
@@ -300,12 +340,12 @@ fi
 
 # ── write sentinel on full PASS ───────────────────────────────────────────────
 mkdir -p "$(dirname "$SENTINEL")"
-printf -- 'phase8-passed: %s\nasserted_at: %s\ntask_id: %s\nassertions: 4/4\n' \
+printf -- 'phase8-passed: %s\nasserted_at: %s\ntask_id: %s\nassertions: 5/5\n' \
   "${TASK_ID}" \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   "${TASK_ID}" \
   > "$SENTINEL"
 
 log_info "Sentinel written: ${SENTINEL}"
-log_info "Phase 8 gate PASSED for ${TASK_ID} (4/4 hard assertions)"
+log_info "Phase 8 gate PASSED for ${TASK_ID} (5/5 hard assertions)"
 exit 0
