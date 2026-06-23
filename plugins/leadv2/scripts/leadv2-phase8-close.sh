@@ -485,5 +485,34 @@ else
 fi
 # ── end active.yaml unregister ────────────────────────────────────────────────
 
+
+# ── [MEMORY-ARCHIVE-01] Memory GC sweep on close ─────────────────────────────
+# Non-fatal: archives RESOLVED/FIXED/✅ lines from MEMORY.md hot index.
+# Dry-run by default; set MEMORY_GC_APPLY=1 to move entries to archive/.
+# Resolution logic mirrors memory-size-guard.sh (CLAUDE_PROJECT_DIR → PWD → slug scan).
+_ARCHIVER="${HOME}/.claude/hooks/memory-archive-resolved.sh"
+if [[ -x "$_ARCHIVER" ]]; then
+  _mem_dir=""
+  _projects_dir="${HOME}/.claude/projects"
+  _path_to_slug() { printf -- '%s' "${1:-}" | tr '/.' '--'; }
+  # Prefer CLAUDE_PROJECT_DIR (set by Claude Code hooks), fall back to PROJECT_ROOT
+  _search_path="${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT}}"
+  if [[ -n "$_search_path" ]]; then
+    _slug=$(_path_to_slug "$_search_path")
+    _candidate="${_projects_dir}/${_slug}/memory"
+    if [[ -d "$_candidate" ]] && [[ -f "${_candidate}/MEMORY.md" ]]; then
+      _mem_dir="$_candidate"
+    fi
+  fi
+  if [[ -z "$_mem_dir" ]]; then
+    log_info "[memory-gc] could not resolve memory dir — archiver skipped"
+  else
+    log_info "[memory-gc] running archiver on ${_mem_dir} (APPLY mode — pending guard active)"
+    MEMORY_GC_APPLY=1 bash "$_ARCHIVER" "$_mem_dir" >/dev/null 2>&1 || true
+  fi
+else
+  log_info "[memory-gc] archiver not found at ${_ARCHIVER} — skipped"
+fi
+# ── end memory-archive ────────────────────────────────────────────────────────
 log_info "Phase 8 close complete for ${TASK_ID} (YAML: ${YAML_PATH})"
 exit 0
