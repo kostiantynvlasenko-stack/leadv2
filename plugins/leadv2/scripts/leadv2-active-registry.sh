@@ -205,6 +205,53 @@ PYEOF
 
 # ── Public functions ───────────────────────────────────────────────────────
 
+# _lv2_durable_pid — walk $PPID chain to find the durable 'claude' process PID.
+# Returns the claude process PID on stdout, or PPID as fallback.
+# Rationale: gate1-prompt.sh runs as a short-lived bash subprocess; stale-pid-sweep
+# drops any session whose pid is dead at next SessionStart. Registering with the
+# durable claude process PID keeps the session alive until the real session ends.
+_lv2_durable_pid() {
+  python3 - "$PPID" 2>/dev/null <<'PYEOF' || printf -- '%s' "$PPID"
+import sys, subprocess
+
+def ppid_of(pid: int) -> int | None:
+    try:
+        r = subprocess.run(
+            ['ps', '-o', 'ppid=', '-p', str(pid)],
+            capture_output=True, text=True, timeout=2
+        )
+        s = r.stdout.strip()
+        return int(s) if s else None
+    except Exception:
+        return None
+
+def comm_of(pid: int) -> str:
+    try:
+        r = subprocess.run(
+            ['ps', '-o', 'comm=', '-p', str(pid)],
+            capture_output=True, text=True, timeout=2
+        )
+        return r.stdout.strip().split('/')[-1].lower()
+    except Exception:
+        return ''
+
+start = int(sys.argv[1])
+pid = start
+visited: set = set()
+while pid and pid > 1 and pid not in visited:
+    visited.add(pid)
+    if 'claude' in comm_of(pid):
+        print(pid, end='')
+        sys.exit(0)
+    nxt = ppid_of(pid)
+    if nxt is None or nxt == pid:
+        break
+    pid = nxt
+# fallback: start is PPID of the bash script (caller's shell), reasonably durable
+print(start, end='')
+PYEOF
+}
+
 # leadv2_active_register <task_id> <class> <worktree> <branch> <daemon_mode>
 # Writes a new session row to active.yaml.
 # Returns (stdout): session_id in format s-YYYYMMDDTHHMMSSZ-PID
@@ -219,10 +266,15 @@ leadv2_active_register() {
     branch="$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || printf -- 'unknown')"
   fi
 
+  # Use the durable claude process PID so stale-pid-sweep doesn't drop the row
+  # at the next SessionStart when the gate1 bash subprocess has already exited.
+  local durable_pid
+  durable_pid="$(_lv2_durable_pid)"
+
   local session_id ts pid_birth pulse_log parent_sid
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  session_id="s-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  pid_birth="$(ps -o lstart= -p $$ 2>/dev/null | tr -s ' ' || printf -- 'unknown')"
+  session_id="s-$(date -u +%Y%m%dT%H%M%SZ)-${durable_pid}"
+  pid_birth="$(ps -o lstart= -p "${durable_pid}" 2>/dev/null | tr -s ' ' || printf -- 'unknown')"
   pulse_log="docs/leadv2/tasks/${task_id}/pulse.md"
   parent_sid="${LEADV2_PARENT_SESSION_ID:-null}"
 
@@ -233,7 +285,7 @@ leadv2_active_register() {
   _leadv2_yaml_py_lock \
     "$lockfile" "$yaml_file" register \
     "$session_id" "$task_id" "$worktree" "$branch" "$ts" \
-    "intake" "$cls" "$$" "$pid_birth" "$parent_sid" \
+    "intake" "$cls" "${durable_pid}" "$pid_birth" "$parent_sid" \
     "$daemon_mode" "$ts" "$pulse_log"
 }
 

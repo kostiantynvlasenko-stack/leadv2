@@ -1446,10 +1446,15 @@ leadv2_active_list() {
 # Registry sourced LAST so active.yaml functions override active.md legacy stubs above.
 # ── Active registry (multi-session YAML-backed store) ─────────────────────
 # Source after LEADV2_PROJECT_ROOT is set so the registry inherits the path.
+# Resolution: lv2_script (needs CLAUDE_PLUGIN_ROOT) → BASH_SOURCE-relative fallback
+# so the registry loads even when CLAUDE_PLUGIN_ROOT is unset.
 # shellcheck source=leadv2-active-registry.sh
-_LEADV2_REGISTRY="$(lv2_script leadv2-active-registry.sh 2>/dev/null || true)"
+_LEADV2_REGISTRY="$(lv2_script leadv2-active-registry.sh 2>/dev/null \
+  || printf -- '%s' "$(dirname "${BASH_SOURCE[0]}")/leadv2-active-registry.sh")"
 if [[ -f "$_LEADV2_REGISTRY" ]]; then
   source "$_LEADV2_REGISTRY"
+else
+  printf -- '[helpers] WARNING: leadv2-active-registry.sh not found — active.yaml writes will use legacy .md stub\n' >&2
 fi
 unset _LEADV2_REGISTRY
 

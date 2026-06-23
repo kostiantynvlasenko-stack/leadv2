@@ -33,9 +33,10 @@ _gate1_register_active() {
   mkdir -p "$_yaml_dir"
   if [[ -f "$_registry" ]]; then
     LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}" \
-      source "$_registry" 2>/dev/null \
-      && leadv2_active_register "$task_id" "${cls:-Standard}" "$(pwd)" "" "false" 2>/dev/null \
-      && { log "registered task in active.yaml via registry"; return 0; } || true
+      source "$_registry" \
+      && leadv2_active_register "$task_id" "${cls:-Standard}" "$(pwd)" "" "false" \
+      && { log "registered task in active.yaml via registry"; return 0; } \
+      || { log "WARNING: registry register failed — falling back to direct write"; true; }
   fi
   # Fallback: write minimal session row directly (schema per leadv2-pre-compact-checkpoint.sh L34-45)
   local _yaml="${_yaml_dir}/active.yaml"

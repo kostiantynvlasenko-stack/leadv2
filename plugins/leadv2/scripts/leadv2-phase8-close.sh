@@ -473,8 +473,8 @@ fi
 # Empties sessions[] for this task_id so pre-compact-checkpoint knows the task is closed.
 _REGISTRY="${SCRIPTS_DIR}/leadv2-active-registry.sh"
 if [[ -f "$_REGISTRY" ]]; then
-  LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" source "$_REGISTRY" 2>/dev/null \
-    && leadv2_active_unregister "${TASK_ID}" 2>/dev/null \
+  LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" source "$_REGISTRY" \
+    && leadv2_active_unregister "${TASK_ID}" \
     && log_info "[active-registry] unregistered ${TASK_ID} from active.yaml" \
     || log_info "[active-registry] unregister failed (non-blocking)"
 else
