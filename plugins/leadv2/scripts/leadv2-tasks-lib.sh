@@ -16,7 +16,8 @@ else
   _TASKS_LIB_PATH="$0"
 fi
 _TASKS_LIB_DIR="$(cd "$(dirname "$_TASKS_LIB_PATH")" && pwd)"
-_PROJECT_ROOT="${PROJECT_ROOT:-$(git -C "$_TASKS_LIB_DIR" rev-parse --show-toplevel)}"
+# Precedence: explicit PROJECT_ROOT > caller cwd git root (worktree-safe) > CLAUDE_PROJECT_DIR > lib-dir (last-resort)
+_PROJECT_ROOT="${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo "${CLAUDE_PROJECT_DIR:-$(git -C "$_TASKS_LIB_DIR" rev-parse --show-toplevel)}")}"
 _TASKS_FILE="${_PROJECT_ROOT}/docs/tasks.yaml"
 _TASKS_LOCK="/tmp/leadv2-tasks.lock"
 
