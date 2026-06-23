@@ -214,6 +214,8 @@ fi
 A5_OK=0
 if [[ -f "$CLOSED_YAML" ]]; then
   # Use python3 -c with args to avoid heredoc; exit 0=ok 1=placeholder 2=absent/unparseable
+  # Initialize before invocation so set -e abort cannot prevent capture.
+  a5_rc=0
   python3 -c '
 import sys, re, yaml
 PLACEHOLDER_RE = re.compile(
@@ -227,7 +229,7 @@ except Exception:
 value = (d.get("live_signal") or d.get("verification") or "").strip()
 if not value: sys.exit(2)
 sys.exit(1 if PLACEHOLDER_RE.search(value) else 0)
-  '  "$TASK_ID" "$CLOSED_YAML" 2>/dev/null; a5_rc=$?
+  '  "$TASK_ID" "$CLOSED_YAML" 2>/dev/null || a5_rc=$?
   case $a5_rc in
     0)
       A5_OK=1
