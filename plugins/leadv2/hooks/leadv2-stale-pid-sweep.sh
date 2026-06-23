@@ -27,7 +27,16 @@ for sess in sessions:
         dropped.append(sess.get('task_id', '?'))
         continue
     try:
-        os.kill(int(pid), 0)
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        dropped.append(sess.get('task_id', '?'))
+        continue
+    # Guard: pid==1 is init/systemd — always alive in containers; treat as stale.
+    if pid_int <= 1:
+        dropped.append(sess.get('task_id', '?'))
+        continue
+    try:
+        os.kill(pid_int, 0)
         live.append(sess)
     except (OSError, ValueError):
         dropped.append(sess.get('task_id', '?'))

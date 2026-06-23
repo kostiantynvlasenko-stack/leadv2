@@ -38,16 +38,31 @@ _gate1_register_active() {
       && { log "registered task in active.yaml via registry"; return 0; } \
       || { log "WARNING: registry register failed — falling back to direct write"; true; }
   fi
-  # Fallback: write minimal session row directly (schema per leadv2-pre-compact-checkpoint.sh L34-45)
+  # Fallback: write minimal session row directly.
+  # Compute durable pid in shell first so the python subprocess doesn't register
+  # os.getpid() (a short-lived process the sweep would drop immediately).
   local _yaml="${_yaml_dir}/active.yaml"
-  local _ts; _ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  python3 - "$_yaml" "$task_id" "${cls:-Standard}" "$_ts" <<'PYEOF' 2>/dev/null || true
+  local _ts _durable_pid _fb_registry
+  _ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  _fb_registry="$(dirname "${BASH_SOURCE[0]}")/leadv2-active-registry.sh"
+  if [[ -f "$_fb_registry" ]]; then
+    # Source just to get _lv2_durable_pid function; suppress set -euo noise on source
+    # lean: guard via subshell to avoid polluting current env — upgrade when registry is always loaded
+    _durable_pid="$(bash -c "source \"$_fb_registry\" 2>/dev/null; _lv2_durable_pid" 2>/dev/null || printf -- '%s' "$PPID")"
+  else
+    _durable_pid="$PPID"
+  fi
+  python3 - "$_yaml" "$task_id" "${cls:-Standard}" "$_ts" "${_durable_pid}" <<'PYEOF' 2>/dev/null || true
 import sys, os, fcntl, tempfile
 try:
     import yaml
 except ImportError:
     sys.exit(0)
-yaml_path, task_id, cls, ts = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+yaml_path, task_id, cls, ts, durable_pid_str = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+try:
+    durable_pid = int(durable_pid_str)
+except ValueError:
+    durable_pid = None
 lock_path = yaml_path + ".lock"
 os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
 lock_fd = open(lock_path, "a+")
@@ -62,12 +77,15 @@ try:
     existing = next((s for s in data["sessions"] if s.get("task_id") == task_id), None)
     if not existing:
         data["sessions"].append({
-            "session_id": f"s-{ts.replace(':','').replace('-','')}-{os.getpid()}",
+            "session_id": "s-{}-{}-{}".format(
+                ts.replace(':', '').replace('-', ''), durable_pid or os.getpid(), os.getpid()
+            ),
             "task_id": task_id,
             "phase": "build",
             "class": cls,
             "gate1_status": "approved",
             "started_at": ts,
+            "pid": durable_pid,
             "stale": False,
         })
     d = os.path.dirname(yaml_path)
@@ -84,7 +102,7 @@ finally:
     fcntl.flock(lock_fd, fcntl.LOCK_UN)
     lock_fd.close()
 PYEOF
-  log "registered task in active.yaml (fallback direct write)"
+  log "registered task in active.yaml (fallback direct write, durable_pid=${_durable_pid})"
 }
 
 # On accept: capture context.yaml SHA and write Gate 1 sentinel for C2 guard.

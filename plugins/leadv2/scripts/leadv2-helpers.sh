@@ -1446,17 +1446,22 @@ leadv2_active_list() {
 # Registry sourced LAST so active.yaml functions override active.md legacy stubs above.
 # ── Active registry (multi-session YAML-backed store) ─────────────────────
 # Source after LEADV2_PROJECT_ROOT is set so the registry inherits the path.
-# Resolution: lv2_script (needs CLAUDE_PLUGIN_ROOT) → BASH_SOURCE-relative fallback
+# Resolution: lv2_script (needs CLAUDE_PLUGIN_ROOT) → BASH_SOURCE canonical-dir fallback
 # so the registry loads even when CLAUDE_PLUGIN_ROOT is unset.
+# BASH_SOURCE[0] may be a symlink (repo copy of helpers.sh); resolve to canonical dir
+# via realpath/readlink -f so we get the source dir, not the symlink dir.
 # shellcheck source=leadv2-active-registry.sh
+_LEADV2_HELPERS_CANONICAL="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null \
+  || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null \
+  || printf -- '%s' "${BASH_SOURCE[0]}")"
 _LEADV2_REGISTRY="$(lv2_script leadv2-active-registry.sh 2>/dev/null \
-  || printf -- '%s' "$(dirname "${BASH_SOURCE[0]}")/leadv2-active-registry.sh")"
+  || printf -- '%s' "$(dirname "${_LEADV2_HELPERS_CANONICAL}")/leadv2-active-registry.sh")"
 if [[ -f "$_LEADV2_REGISTRY" ]]; then
   source "$_LEADV2_REGISTRY"
 else
   printf -- '[helpers] WARNING: leadv2-active-registry.sh not found — active.yaml writes will use legacy .md stub\n' >&2
 fi
-unset _LEADV2_REGISTRY
+unset _LEADV2_REGISTRY _LEADV2_HELPERS_CANONICAL
 
 # ── Settings.local.json refcount (M3: concurrent subsession safety) ──────────
 # Sidecar file: .claude/settings.local.json.leadv2-refcount

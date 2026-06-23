@@ -213,8 +213,9 @@ PYEOF
 _lv2_durable_pid() {
   python3 - "$PPID" 2>/dev/null <<'PYEOF' || printf -- '%s' "$PPID"
 import sys, subprocess
+from typing import Optional
 
-def ppid_of(pid: int) -> int | None:
+def ppid_of(pid: int) -> Optional[int]:
     try:
         r = subprocess.run(
             ['ps', '-o', 'ppid=', '-p', str(pid)],
@@ -244,11 +245,12 @@ while pid and pid > 1 and pid not in visited:
         print(pid, end='')
         sys.exit(0)
     nxt = ppid_of(pid)
-    if nxt is None or nxt == pid:
+    if nxt is None or nxt == pid or nxt == 1:
         break
     pid = nxt
 # fallback: start is PPID of the bash script (caller's shell), reasonably durable
-print(start, end='')
+print(start, end='', file=sys.stdout)
+print(f'[lv2_durable_pid] WARNING: no claude process found in PPID chain; using fallback pid={start}', file=sys.stderr)
 PYEOF
 }
 
@@ -273,7 +275,9 @@ leadv2_active_register() {
 
   local session_id ts pid_birth pulse_log parent_sid
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  session_id="s-$(date -u +%Y%m%dT%H%M%SZ)-${durable_pid}"
+  # Tiebreaker: append $$ (gate1 subprocess pid, unique per invocation) after durable_pid.
+  # durable_pid is the liveness key; $$ ensures uniqueness when two tasks register same second.
+  session_id="s-$(date -u +%Y%m%dT%H%M%SZ)-${durable_pid}-$$"
   pid_birth="$(ps -o lstart= -p "${durable_pid}" 2>/dev/null | tr -s ' ' || printf -- 'unknown')"
   pulse_log="docs/leadv2/tasks/${task_id}/pulse.md"
   parent_sid="${LEADV2_PARENT_SESSION_ID:-null}"
