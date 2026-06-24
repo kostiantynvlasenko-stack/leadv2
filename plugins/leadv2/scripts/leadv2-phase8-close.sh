@@ -344,12 +344,15 @@ fi
 
 # ── [D-5a] Ensure route-decisions.yaml stub exists before bandit reads it ────
 # Bandit update skips when route-decisions.yaml is absent (leadv2-route-bandit.sh ~L219).
-# Write a minimal stub so bandit can proceed and total_updates can increment.
+# FIX-TOTALUPDATES-01: stub MUST be a valid list entry; parse_rd_yaml (leadv2-route-bandit-py.py)
+# requires entries with context_key + chosen_arm fields. The old plain-map stub parsed to []
+# and triggered the early-return at cmd_update L219, leaving total_updates permanently 0.
 ROUTE_DEC="${PROJECT_ROOT}/docs/handoff/${TASK_ID}/route-decisions.yaml"
 if [[ ! -f "$ROUTE_DEC" ]]; then
   mkdir -p "${PROJECT_ROOT}/docs/handoff/${TASK_ID}"
-  printf 'task_id: %s\nrouted_workflow: unknown\nmodel: unknown\n' "$TASK_ID" > "$ROUTE_DEC"
-  log_info "[bandit] route-decisions.yaml missing — wrote stub so bandit update does not skip"
+  printf -- '- context_key: "close:%s:unknown"\n  chosen_arm: "sonnet"\n  heuristic_arm: "sonnet"\n  bandit_active: false\n  bandit_deviation: false\n  source: stub\n' \
+    "$TASK_ID" > "$ROUTE_DEC"
+  log_info "[bandit] route-decisions.yaml missing — wrote list-entry stub so bandit update does not skip"
 fi
 # ── end route-decisions stub ──────────────────────────────────────────────────
 
