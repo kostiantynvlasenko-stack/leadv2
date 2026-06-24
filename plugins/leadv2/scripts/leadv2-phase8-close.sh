@@ -517,5 +517,20 @@ else
   log_info "[memory-gc] archiver not found at ${_ARCHIVER} — skipped"
 fi
 # ── end memory-archive ────────────────────────────────────────────────────────
+# ── [WT-SWEEP-01] Sweep merged subagent worktrees on close ───────────────────
+# Removes .claude/worktrees/agent-<hex> worktrees whose branches are fully
+# merged into the default branch. Non-blocking: never gates close.
+# Agent worktrees survive Agent-tool auto-removal when the wt has changes;
+# without this sweep they pile up across sessions.
+WT_CLEANUP_SCRIPT="${SCRIPTS_DIR}/leadv2-worktree-cleanup.sh"
+if [[ -x "$WT_CLEANUP_SCRIPT" ]]; then
+  log_info "Sweeping merged subagent worktrees..."
+  bash "$WT_CLEANUP_SCRIPT" --sweep-merged \
+    || log_info "[wt-sweep] sweep-merged returned non-zero — continuing (non-blocking)"
+else
+  log_info "[wt-sweep] leadv2-worktree-cleanup.sh not found — skipping sweep"
+fi
+# ── end worktree sweep ────────────────────────────────────────────────────────
+
 log_info "Phase 8 close complete for ${TASK_ID} (YAML: ${YAML_PATH})"
 exit 0
