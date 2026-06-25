@@ -7,6 +7,7 @@
 #   (b) ~/.claude/leadv2-shared/                            (scripts + contracts only)
 #   (c) <project>/.claude/scripts/                          (per-repo runtimes from cross-repo-paths.yaml)
 #   (d) <project>/.claude/contracts/                        (schema files per-repo)
+#   (e) ~/.claude/scripts/                                  (user-global leadv2-* scripts; ADDITIVE, no --delete)
 #
 # (c)/(d): reads project roots from ~/.claude/leadv2-shared/cross-repo-paths.yaml.
 # Missing root on disk → WARN + skip (never silent).
@@ -157,6 +158,16 @@ for subdir in scripts contracts; do
     changed_summary+=("shared/${subdir}")
   fi
 done
+
+# ── (e) ~/.claude/scripts/ — user-global leadv2-* scripts ───────────────────
+# ADDITIVE ONLY: --include='leadv2-*' --exclude='*' scopes rsync to leadv2-*
+# files only. NO --delete — preserves codex-task.sh, ask-lead.sh, cx-tail.sh,
+# and all other non-leadv2 user-global scripts (24 files; must never change).
+USER_SCRIPTS_TARGET="${HOME}/.claude/scripts"
+log "Syncing -> user-global scripts (e): ${USER_SCRIPTS_TARGET} [leadv2-* only, additive, no --delete]"
+_rsync_or_dry "user-scripts" "${PLUGIN_ROOT}/scripts/" "${USER_SCRIPTS_TARGET}" \
+  --include='leadv2-*' --exclude='*'
+changed_summary+=("user-scripts")
 
 # ── (c)/(d) Per-project .claude/scripts + .claude/contracts ──────────────────
 # Iterate all roots from cross-repo-paths.yaml (or single --project-root override).
