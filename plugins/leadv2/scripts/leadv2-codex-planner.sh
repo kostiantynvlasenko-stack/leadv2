@@ -30,7 +30,7 @@ EOF
   exit 1
 }
 
-TASK_ID=""; MISSION=""; MISSION_FILE=""; EFFORT="high"
+TASK_ID=""; MISSION=""; MISSION_FILE=""; EFFORT="high"; WAIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -38,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     --mission)      MISSION="$2"; shift 2 ;;
     --mission-file) MISSION_FILE="$2"; shift 2 ;;
     --effort)       EFFORT="$2"; shift 2 ;;
+    --wait)         WAIT=1; shift ;;
     --model)
       echo "[leadv2-codex-planner] --model is no longer accepted (gpt-5.5 default, spark banned)" >&2
       usage
@@ -102,31 +103,60 @@ Decision rules:
 text.verbosity: low.
 EOF
 
-CODEX_ARGS=(task --background --effort "$EFFORT")
-CODEX_ARGS+=("$(cat "$PROMPT_FILE")")
-
-OUT=$(~/.claude/scripts/codex-task.sh "${CODEX_ARGS[@]}" 2>&1)
-DISPATCH_EXIT=$?
-# PO-LEADV2-001 R4 H3: fail-closed on dispatch exit BEFORE attempting to
-# parse — error output may contain noise that matches the slug pattern.
-if [[ $DISPATCH_EXIT -ne 0 ]]; then
-  echo "[leadv2-codex-planner] ERROR: codex-task.sh dispatch failed (exit $DISPATCH_EXIT):" >&2
-  echo "$OUT" | head -10 >&2
-  exit "$DISPATCH_EXIT"
-fi
-# Stricter slug match: real Codex IDs follow {task,review,job}-XXXXXXXX-YYYYYY
-# where each segment is base36-like (lowercase alnum), 6-12 chars. This rejects
-# unrelated tokens like `task-id`, `task-list`, `job-name`.
-JOB_ID=$(echo "$OUT" | grep -oE '(task|review|job)-[a-z0-9]{6,12}-[a-z0-9]{4,12}' | head -1 || true)
-if [[ -z "${JOB_ID:-}" ]]; then
-  echo "[leadv2-codex-planner] ERROR: dispatched but could not parse task ID from codex-task.sh output:" >&2
-  echo "$OUT" | head -10 >&2
-  exit 2
-fi
-
 STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-cat > "$HANDOFF_DIR/codex-plan.json" <<EOF
+if ! command -v gtimeout >/dev/null 2>&1 && ! command -v timeout >/dev/null 2>&1; then
+  echo "[leadv2-codex-planner] WARN: no timeout binary (gtimeout/timeout) — --wait path unbounded" >&2
+fi
+
+if [[ "$WAIT" == "1" ]]; then
+  # Synchronous path: block until codex completes, write findings to a file.
+  # `task` is synchronous by default; no --wait flag needed (nor accepted by codex-companion).
+  FINDINGS_FILE="$HANDOFF_DIR/codex-plan-output.txt"
+  CODEX_ARGS=(task --effort "$EFFORT")
+  CODEX_ARGS+=("$(cat "$PROMPT_FILE")")
+  DISPATCH_EXIT=0
+  ~/.claude/scripts/codex-task.sh "${CODEX_ARGS[@]}" > "$FINDINGS_FILE" 2>&1 || DISPATCH_EXIT=$?
+  if [[ $DISPATCH_EXIT -ne 0 ]]; then
+    echo "[leadv2-codex-planner] ERROR: codex-task.sh --wait failed (exit $DISPATCH_EXIT):" >&2
+    head -10 "$FINDINGS_FILE" >&2
+    exit "$DISPATCH_EXIT"
+  fi
+  cat > "$HANDOFF_DIR/codex-plan.json" <<EOF
+{
+  "mode": "wait",
+  "findings_file": "$FINDINGS_FILE",
+  "started_at": "$STARTED_AT",
+  "effort": "$EFFORT",
+  "model": "default",
+  "prompt_file": "$PROMPT_FILE"
+}
+EOF
+  # Emit findings file path so callers can: cx-tail.sh <path>
+  echo "$FINDINGS_FILE"
+else
+  # Async path (original behaviour): dispatch background job, emit job ID.
+  CODEX_ARGS=(task --background --effort "$EFFORT")
+  CODEX_ARGS+=("$(cat "$PROMPT_FILE")")
+  OUT=$(~/.claude/scripts/codex-task.sh "${CODEX_ARGS[@]}" 2>&1)
+  DISPATCH_EXIT=$?
+  # PO-LEADV2-001 R4 H3: fail-closed on dispatch exit BEFORE attempting to
+  # parse — error output may contain noise that matches the slug pattern.
+  if [[ $DISPATCH_EXIT -ne 0 ]]; then
+    echo "[leadv2-codex-planner] ERROR: codex-task.sh dispatch failed (exit $DISPATCH_EXIT):" >&2
+    echo "$OUT" | head -10 >&2
+    exit "$DISPATCH_EXIT"
+  fi
+  # Stricter slug match: real Codex IDs follow {task,review,job}-XXXXXXXX-YYYYYY
+  # where each segment is base36-like (lowercase alnum), 6-12 chars. This rejects
+  # unrelated tokens like `task-id`, `task-list`, `job-name`.
+  JOB_ID=$(echo "$OUT" | grep -oE '(task|review|job)-[a-z0-9]{6,12}-[a-z0-9]{4,12}' | head -1 || true)
+  if [[ -z "${JOB_ID:-}" ]]; then
+    echo "[leadv2-codex-planner] ERROR: dispatched but could not parse task ID from codex-task.sh output:" >&2
+    echo "$OUT" | head -10 >&2
+    exit 2
+  fi
+  cat > "$HANDOFF_DIR/codex-plan.json" <<EOF
 {
   "job_id": "$JOB_ID",
   "started_at": "$STARTED_AT",
@@ -135,5 +165,5 @@ cat > "$HANDOFF_DIR/codex-plan.json" <<EOF
   "prompt_file": "$PROMPT_FILE"
 }
 EOF
-
-echo "$JOB_ID"
+  echo "$JOB_ID"
+fi

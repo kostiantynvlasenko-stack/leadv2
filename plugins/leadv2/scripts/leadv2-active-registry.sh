@@ -179,6 +179,12 @@ try:
                 s["stale"] = True
                 break
 
+    elif op == "set_rendered_at":
+        ts_val = args[0]
+        if "meta" not in data:
+            data["meta"] = {}
+        data["meta"]["rendered_at"] = ts_val
+
     else:
         print(f"[registry] unknown op: {op}", file=sys.stderr)
         sys.exit(1)
@@ -291,6 +297,13 @@ leadv2_active_register() {
     "$session_id" "$task_id" "$worktree" "$branch" "$ts" \
     "intake" "$cls" "${durable_pid}" "$pid_birth" "$parent_sid" \
     "$daemon_mode" "$ts" "$pulse_log"
+
+  # Auto-refresh LEAD_V2_STATE.md on every register — non-fatal to register itself
+  _render_log="/tmp/lv2-render-$(date +%s).log"
+  leadv2_active_render_index 2>"$_render_log" || {
+    printf -- '[registry] WARN: render_index failed after register:\n' >&2
+    cat "$_render_log" >&2
+  }
 }
 
 # leadv2_active_unregister <task_id>
@@ -301,6 +314,13 @@ leadv2_active_unregister() {
   lockfile="$(_leadv2_yaml_lockfile)"
   [[ -f "$yaml_file" ]] || return 0
   _leadv2_yaml_py_lock "$lockfile" "$yaml_file" unregister "$task_id"
+
+  # Auto-refresh LEAD_V2_STATE.md on every unregister — non-fatal to unregister itself
+  _render_log="/tmp/lv2-render-$(date +%s).log"
+  leadv2_active_render_index 2>"$_render_log" || {
+    printf -- '[registry] WARN: render_index failed after unregister:\n' >&2
+    cat "$_render_log" >&2
+  }
 }
 
 # leadv2_active_update_phase <task_id> <phase>
@@ -357,13 +377,15 @@ else:
 
 # Preserve "## Recent history" block from prior render so it survives regeneration.
 # Block ends at next H2 heading or EOF. Lead/founder edits this section by hand.
+# Uses re.MULTILINE so the match is anchored to line-start, not inside HTML comments.
+import re
 history_block = ""
 if os.path.exists(state_md):
     with open(state_md, encoding="utf-8") as fh:
         prior = fh.read()
-    marker = "## Recent history"
-    if marker in prior:
-        tail = prior[prior.index(marker):]
+    m = re.search(r'^## Recent history', prior, re.MULTILINE)
+    if m:
+        tail = prior[m.start():]
         next_h2 = tail.find("\n## ", 1)
         history_block = tail if next_h2 == -1 else tail[:next_h2]
         history_block = history_block.rstrip() + "\n"
@@ -401,6 +423,14 @@ with open(state_md, "w", encoding="utf-8") as fh:
     fh.write(out)
 print(f"[registry] rendered {state_md} ({len(sessions)} sessions, history_preserved={bool(history_block)})")
 PYEOF
+
+  # Write rendered_at back to active.yaml under the same lock discipline (non-fatal)
+  local lockfile
+  lockfile="$(_leadv2_yaml_lockfile)"
+  if [[ -f "$yaml_file" ]]; then
+    _leadv2_yaml_py_lock "$lockfile" "$yaml_file" set_rendered_at "$ts" \
+      || printf -- '[registry] WARN: rendered_at write to active.yaml failed (non-fatal)\n' >&2
+  fi
 }
 
 # leadv2_active_list
