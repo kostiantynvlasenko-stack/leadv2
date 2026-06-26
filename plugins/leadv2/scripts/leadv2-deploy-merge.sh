@@ -24,9 +24,19 @@ elif [[ "$BEHIND" -gt 0 ]]; then
   printf '[DIVERGENCE] rebase succeeded — proceeding\n' >&2
 fi
 
+# Resolve the actual task branch (EnterWorktree makes worktree-<id>; legacy task/<id>)
+TASK_BRANCH=""
+for _b in "task/$LEADV2_TASK_ID" "worktree-$LEADV2_TASK_ID"; do
+  git show-ref --verify --quiet "refs/heads/$_b" && { TASK_BRANCH="$_b"; break; }
+done
+[[ -z "$TASK_BRANCH" ]] && { echo "no task branch (task/ or worktree-) for $LEADV2_TASK_ID" >&2; exit 1; }
+# Rebase the task branch onto origin/main if it is not already a fast-forward (handles stale local main)
+if ! git merge-base --is-ancestor origin/main "$TASK_BRANCH"; then
+  git rebase origin/main "$TASK_BRANCH" || { echo "rebase onto origin/main conflict — resolve manually" >&2; exit 1; }
+fi
 git checkout main 2>/dev/null || true
 git pull --ff-only origin main || { echo "main moved during task — manual rebase needed"; exit 1; }
-git merge --ff-only "task/$LEADV2_TASK_ID" || { echo "ff-only merge failed — rebase task branch first"; exit 1; }
+git merge --ff-only "$TASK_BRANCH" || { echo "ff-only merge failed — rebase task branch first"; exit 1; }
 git push origin main
 COMMIT=$(git rev-parse HEAD)
 
