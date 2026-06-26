@@ -560,6 +560,21 @@ verification:
   live_signal: "<from architect recommendation or codex rollback plan>"
   probe: {type: signal-file|log-grep|http-check|supabase-check, args: ...}
   timeout: 1800
+  # criteria[] is OPTIONAL and ADDITIVE — omit when no concrete checkable criteria exist.
+  # When present, ALL items must pass before Phase 7 verify succeeds.
+  # See contracts/context.verification.schema.json for full field definitions.
+  criteria:
+    - id: "<short-slug>"
+      type: programmatic        # or: judge | human
+      expect: exit_zero         # or: exit_nonzero | stdout_contains
+      check: ["<cmd>", "<arg>"]  # argv; required when type==programmatic
+      # contains: "<substr>"   # required when expect==stdout_contains
+    - id: "<rubric-slug>"
+      type: judge
+      rubric: "<natural-language pass/fail criterion for LLM or founder>"
+    - id: "<human-gate-slug>"
+      type: human
+      prompt: "<instruction shown to founder at the manual gate>"
 ```
 
 ### Plan schema (mandatory for every step)

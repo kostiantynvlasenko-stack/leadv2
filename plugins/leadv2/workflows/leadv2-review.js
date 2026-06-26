@@ -102,6 +102,12 @@ for (const f of allFindings) {
 const deduped = [...seen.values()]
 const blocking = deduped.filter(f => f.severity === 'critical' || f.severity === 'high')
 log(`Review: ${allFindings.length} raw -> ${deduped.length} deduped, ${blocking.length} blocking`)
+// [STALL-DETECT-01] Deterministic no-progress guard: identical blocking signature across rounds triggers escalation
+const blocking_count = blocking.length
+const sig = deduped.filter(f => /critical|high/i.test(f.severity || '')).map(f => (f.dimension || '?') + ':' + (f.severity || '?')).sort().join('|')
+const prior = Array.isArray(a.priorSignatures) ? a.priorSignatures : []
+const recent = [...prior, sig]
+const stall = blocking_count > 0 && recent.length >= 2 && recent.slice(-2).every(s => s === sig)
 phase('Verify')
 await emitLedger('phase_enter', { phase: 'Verify' })
 const MAX_VERIFY = a.maxVerify || 10
@@ -121,7 +127,10 @@ phase('Reflect')
 await emitLedger('phase_enter', { phase: 'Reflect' })
 const ROUND = a.round || 1
 const maxSev = deduped.reduce((m, f) => Math.max(m, SEV_RANK[f.severity] || 0), 0)
-const verdict = confirmedBlocking.length === 0 ? 'ACCEPT' : (ROUND >= 2 ? 'ESCALATE' : 'REVISE')
+const ESCALATE_VERDICT = 'ESCALATE'
+let verdict = confirmedBlocking.length === 0 ? 'ACCEPT' : (ROUND >= 2 ? ESCALATE_VERDICT : 'REVISE')
+// [STALL-DETECT-01] Force escalation when blocking signature unchanged across 2+ rounds
+if (stall) { verdict = ESCALATE_VERDICT }
 
 // [F6] Quality scoring — structured rubric via JSON schema; only fires on ACCEPT or informational pass
 // Score: diff_coherence(0-4) + test_coverage(0-3) + security_pass(0-3) + novelty_bonus(0-1) = max 10
@@ -168,4 +177,7 @@ return {
   diff_summary: diffSummary,
   followups: deduped.filter(f => !(f.severity === 'critical' || f.severity === 'high')),
   overflow_findings: overflowFindings.map(f => ({ ...f, confirmed: false })),
+  signature: sig,
+  stall,
+  ...(stall ? { stall_reason: 'identical blocking signature 2 rounds' } : {}),
 }

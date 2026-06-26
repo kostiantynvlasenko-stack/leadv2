@@ -36,6 +36,31 @@ verification:
 
 If `verification.probe` missing → circuit break: "verification spec missing, architect should have defined".
 
+### 1b. Evaluate typed criteria (pre-probe gate — optional)
+
+If `verification.criteria[]` is present in context.yaml, evaluate each item IN ORDER before running the probe.
+When `criteria[]` is absent, skip this step entirely — behavior is byte-identical to the existing path.
+
+**programmatic** (`type: programmatic`):
+Run the `check` argv as a subprocess.
+- `expect: exit_zero` → pass if exit code is 0; fail otherwise.
+- `expect: exit_nonzero` → pass if exit code is non-zero; fail otherwise.
+- `expect: stdout_contains` → pass if stdout includes the `contains` substring; fail otherwise.
+Never swallow the exit code with `|| true` or `2>/dev/null` on the assertion step.
+
+**judge** (`type: judge`):
+Present the `rubric` string to the LLM/founder for a structured verdict.
+Accepted responses: `pass` or `revise`. Any other response → treat as `revise`.
+On `revise` → stop, emit the rubric + LLM/founder response to the deliverable, return PROBE_NEG.
+
+**human** (`type: human`):
+Show the `prompt` string to founder and wait for explicit confirmation.
+Use `ask-lead.sh` with the prompt text. If founder responds anything other than a clear `yes/pass/ok` → treat as not-confirmed → PROBE_NEG.
+
+**Failure mode:** if ANY criterion fails → write `verify-probe-result.yaml` with `outcome: probe_neg` and the failing criterion id+reason. Do NOT proceed to the probe step. Return PROBE_NEG.
+
+**Success mode:** all criteria pass → proceed to probe step below (live_signal/probe path) as normal.
+
 ### 2. Choose probe mode
 
 **Decision flowchart:**

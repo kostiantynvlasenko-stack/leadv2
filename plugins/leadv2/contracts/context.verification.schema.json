@@ -1,0 +1,110 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "context.verification",
+  "title": "leadv2 context.yaml verification block",
+  "description": "Schema for the optional verification.criteria[] typed checklist (Looper-style). Existing live_signal/probe/timeout keys remain valid and unchanged.",
+  "type": "object",
+  "required": ["live_signal"],
+  "properties": {
+    "live_signal": {
+      "type": "string",
+      "description": "Human-readable description of the expected live signal (always required)"
+    },
+    "probe": {
+      "type": "object",
+      "description": "Probe dispatch config for verify-probe.sh"
+    },
+    "timeout": {
+      "type": "integer",
+      "description": "Overall verification timeout in seconds (default 1800)"
+    },
+    "criteria": {
+      "type": "array",
+      "description": "OPTIONAL typed criteria list. When present ALL items must pass before verify succeeds. When absent behavior is identical to the existing live_signal/probe path.",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "type"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Short slug identifying this criterion e.g. row-inserted or no-5xx"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "programmatic",
+              "judge",
+              "human"
+            ],
+            "description": "programmatic: run a shell command; judge: present rubric for pass/revise; human: manual gate requiring founder confirmation"
+          },
+          "expect": {
+            "type": "string",
+            "enum": [
+              "exit_zero",
+              "exit_nonzero",
+              "stdout_contains"
+            ],
+            "description": "Required when type==programmatic. Assertion mode"
+          },
+          "check": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "Required when type==programmatic. argv of the shell command to run"
+          },
+          "contains": {
+            "type": "string",
+            "description": "Required when expect==stdout_contains. Substring that must appear in stdout"
+          },
+          "rubric": {
+            "type": "string",
+            "description": "Required when type==judge. Rubric presented to judge; response must be pass or revise"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Required when type==human. Instruction shown to founder at the manual gate"
+          }
+        },
+        "if": {
+          "properties": { "type": { "const": "programmatic" } },
+          "required": ["type"]
+        },
+        "then": {
+          "required": ["expect", "check"],
+          "if": {
+            "properties": { "expect": { "const": "stdout_contains" } },
+            "required": ["expect"]
+          },
+          "then": {
+            "required": ["contains"]
+          }
+        },
+        "else": {
+          "if": {
+            "properties": { "type": { "const": "judge" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["rubric"]
+          },
+          "else": {
+            "if": {
+              "properties": { "type": { "const": "human" } },
+              "required": ["type"]
+            },
+            "then": {
+              "required": ["prompt"]
+            }
+          }
+        }
+      }
+    }
+  }
+}

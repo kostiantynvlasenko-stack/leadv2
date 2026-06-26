@@ -477,6 +477,13 @@ If `docs/leadv2-negative-memory.yaml` missing → skip, no error.
 | Round 2: new High introduced (not in Round 1) | **Judge escalation** — `Skill(leadv2-judge)` mode=review; use verdict directly |
 | Round 2: Critical still present | **Escape hatch** — spawn `architect(opus)` with full history → alt approach |
 | After architect alt: Critical still | **Circuit break** — PushNotification + AskUserQuestion with 2 options |
+| Any round: workflow returns `stall:true` | **Skip further REVISE** — go straight to Judge (`Skill(leadv2-judge)` mode=review); do NOT spawn another developer fix round |
+
+**Stall detection — lead persistence contract:**
+- Workflow returns `signature` (string) and `stall` (boolean) in every call.
+- Lead MUST persist `signature` from the returned object and pass the accumulated list as `priorSignatures` in the next round's Workflow args.
+- Example: round 1 returns `{signature:"codex:high|security:critical"}` → lead passes `{priorSignatures:["codex:high|security:critical"]}` to round 2.
+- When `stall:true`, workflow has already forced `verdict:"ESCALATE"` — lead acts on that verdict directly.
 
 ### 5. Round 2 — if needed
 

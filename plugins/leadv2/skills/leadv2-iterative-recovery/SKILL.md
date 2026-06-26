@@ -54,6 +54,21 @@ After each iteration, lead writes to `docs/handoff/<task-id>/iterative-blockers.
 
 Lead writes this file — not subagent. It becomes the canonical chain.
 
+**No-progress stall check (mandatory after each entry write):**
+
+After writing each entry to `iterative-blockers.yaml`, call the helper with the `root_cause` slug:
+
+```bash
+bash scripts/leadv2-noprogress-check.sh \
+  docs/handoff/<task-id>/recovery-sig.jsonl \
+  "<root_cause_slug>"
+```
+
+- Exit 0 (`PROGRESS`) → continue to next iteration normally.
+- Exit 1 (`STALLED`) → stop layer-peel immediately; escalate to founder via `ask-lead.sh <task-id> "iterative-recovery stalled: same root_cause <slug> repeated <N> times with no progress. Recommend: escalate to leadv2-judge-recovery or abort."`. Do NOT attempt another fix iteration.
+
+> **Signature independence:** the `root_cause` slug passed here is distinct from the `dimension:severity` signature used by the review workflow's stall-check. Always use separate JSONL paths per tracker: `recovery-sig.jsonl` for this recovery loop, and a different file for the review workflow — mixing them produces false STALLED/PROGRESS signals.
+
 ## Probe discipline — batch signals
 - ONE SQL query per iteration covering all key metrics — not 5 sequential probes.
 - Probe template:

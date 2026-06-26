@@ -203,7 +203,10 @@ await agent(
   `off_limits: ${JSON.stringify(arch.off_limits || [])}. risks: ${JSON.stringify(arch.risks || [])}. ` +
   `concerns: ${JSON.stringify(concerns)}. Use the standard leadv2 context.yaml shape (decisions[], off_limits[], plan.steps[], risk summary). ` +
   `Each plan.steps[i] MUST include the agent_hint field from the annotated steps above. ` +
-  `Resolve any critic concern into either an off_limit or a plan step. Return "ok".`,
+  `Resolve any critic concern into either an off_limit or a plan step. ` +
+  `ALSO emit verification.criteria[] WHEN concrete checkable criteria exist (a shell command, a judge rubric, or a human signoff). ` +
+  `Keep verification.live_signal as the human description. criteria[] is OPTIONAL — omit it entirely when no concrete criteria apply. ` +
+  `Each criterion: {id, type:programmatic|judge|human, expect?:exit_zero|exit_nonzero|stdout_contains, check?:argv-array, contains?:string, rubric?:string, prompt?:string}. Return "ok".`,
   { label: 'synthesize', phase: 'Synthesize', model: 'sonnet', effort: 'medium' })
 
 const REQUIRED_FIELDS = ['id', 'mission', 'reads', 'writes', 'acceptance']
