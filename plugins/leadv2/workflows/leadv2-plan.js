@@ -89,16 +89,16 @@ const [capResult, sharedMemRaw, archiveRaw] = await Promise.all([
     `  security-auditor: [security, auth, rls, injection, secrets, webhook]\n` +
     `Return 2-4 recommended_roles that best match the task. Always include architect for Standard+ tasks. ` +
     `Critic is optional for Light tasks. Return task_class and rationale (1 sentence).`,
-    { label: 'capability-classifier', phase: 'Classify', model: 'haiku', schema: CAP_SCHEMA }),
+    { label: 'capability-classifier', phase: 'Classify', model: 'haiku', effort: 'low', schema: CAP_SCHEMA }),
   agent(
     `Read docs/leadv2/shared-memory.yaml if it exists and return its raw text content (max 500 chars). ` +
     `If the file does not exist, return the string "EMPTY". Do not analyze, just return the content.`,
-    { label: 'shared-mem-read', phase: 'Classify', model: 'haiku' }),
+    { label: 'shared-mem-read', phase: 'Classify', model: 'haiku', effort: 'low' }),
   agent(
     `Read docs/leadv2/solutions-archive.yaml if it exists. ` +
     `Find entries where task_class matches "${TASK_CLASS}". ` +
     `Return top-3 by score as JSON array [{task_id,score,diff_summary}] or [] if none match or file absent.`,
-    { label: 'archive-read', phase: 'Classify', model: 'haiku' }),
+    { label: 'archive-read', phase: 'Classify', model: 'haiku', effort: 'low' }),
 ])
 
 const recommendedRoles = (capResult && Array.isArray(capResult.recommended_roles) && capResult.recommended_roles.length > 0)
@@ -126,35 +126,37 @@ if (recommendedRoles.includes('architect')) {
     `Architect the plan for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. Read ${MISSION_PATH} + the repo. ` +
     `Produce decisions[], plan_steps[] (minimal-diff oriented), off_limits[], risks[]. No code, no full-file rewrites.` +
     contextEnvelope,
-    { label: 'architect', phase: 'Plan', agentType: 'architect', model: ARCH_MODEL, schema: ARCH_SCHEMA }))
+    { label: 'architect', phase: 'Plan', agentType: 'architect', model: ARCH_MODEL, effort: 'medium', schema: ARCH_SCHEMA }))
 }
 if (recommendedRoles.includes('critic')) {
   spawns.push(() => agent(
     `Adversarially critique the proposed approach for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. ` +
     `Surface concerns: hidden coupling, irreversible ops, unverifiable invariants, missing tests, scope creep. Severity-tag each.`,
-    { label: 'critic', phase: 'Plan', agentType: 'critic', model: CRITIC_MODEL, schema: CRITIC_SCHEMA }))
+    { label: 'critic', phase: 'Plan', agentType: 'critic', model: CRITIC_MODEL, effort: 'high', schema: CRITIC_SCHEMA }))
 }
 if (recommendedRoles.includes('postgres-pro')) {
   spawns.push(() => agent(
     `DB/schema review for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. ` +
     `Check: migration sequencing, RLS policy coverage, partial-index upsert traps, N+1 risks. ` +
     `Return concerns[] (severity-tagged) + summary_for_lead.`,
-    { label: 'postgres-pro', phase: 'Plan', model: 'sonnet', schema: CRITIC_SCHEMA }))
+    { label: 'postgres-pro', phase: 'Plan', model: 'sonnet', effort: 'high', schema: CRITIC_SCHEMA }))
 }
 if (recommendedRoles.includes('security-auditor')) {
   spawns.push(() => agent(
     `Security review for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. ` +
     `Check: auth gaps, injection risks, RLS correctness, secret handling. ` +
     `Return concerns[] (severity-tagged) + summary_for_lead.`,
-    { label: 'security-plan', phase: 'Plan', agentType: 'security-auditor', model: 'sonnet', schema: CRITIC_SCHEMA }))
+    { label: 'security-plan', phase: 'Plan', agentType: 'security-auditor', model: 'sonnet', effort: 'high', schema: CRITIC_SCHEMA }))
 }
 // lean: devops-engineer and frontend-developer plan-phase spawns omitted — rarely needed at Plan stage; upgrade when task_class=ops|ui is common
+// [COST-LEVERS-01] Codex is the PRIMARY adversarial brain for Plan (Lever 3). Agent critic above is the fallback when CODEX_ON=false.
+// Both run in parallel; Codex findings are weighted first during concern dedup (higher signal-to-token ratio).
 if (CODEX_ON) {
-  spawns.push(() => agent(
+  spawns.unshift(() => agent(
     `Run this single blocking call: bash ~/.claude/scripts/leadv2-codex-planner.sh --task-id ${TASK_ID} --mission-file "${MISSION_PATH}" --effort ${HEAVY ? 'xhigh' : 'high'} --wait. ` +
     `The --wait flag blocks until done; no polling needed. When it exits, read findings: bash ~/.claude/scripts/cx-tail.sh <output-file>. ` +
     `Return codex's plan findings as concerns[] (severity-tagged). If codex unavailable (non-zero exit), return empty with summary_for_lead="codex unavailable". Do NOT poll or loop.`,
-    { label: 'codex-planner', phase: 'Plan', model: 'haiku', schema: CRITIC_SCHEMA }))
+    { label: 'codex-planner', phase: 'Plan', model: 'haiku', effort: 'low', schema: CRITIC_SCHEMA }))
 }
 const res = (await parallel(spawns)).filter(Boolean)
 const archRaw = res.find(r => r && r.decisions)
@@ -202,12 +204,12 @@ await agent(
   `concerns: ${JSON.stringify(concerns)}. Use the standard leadv2 context.yaml shape (decisions[], off_limits[], plan.steps[], risk summary). ` +
   `Each plan.steps[i] MUST include the agent_hint field from the annotated steps above. ` +
   `Resolve any critic concern into either an off_limit or a plan step. Return "ok".`,
-  { label: 'synthesize', phase: 'Synthesize', model: 'sonnet' })
+  { label: 'synthesize', phase: 'Synthesize', model: 'sonnet', effort: 'medium' })
 
 const REQUIRED_FIELDS = ['id', 'mission', 'reads', 'writes', 'acceptance']
 const validationResult = await agent(
   `Validate ${CTX}: run python3 -c "import yaml,sys; d=yaml.safe_load(open('${CTX}')); missing=[f for f in ["id","mission","reads","writes","acceptance"] if f not in d]; sys.stdout.write('MISSING:'+','.join(missing) if missing else 'OK')". Return {valid:true} if output is OK, else {valid:false,error:'Missing: <fields>'}.`,
-  { label: 'validate-ctx', phase: 'Synthesize', model: 'haiku', schema: { type: 'object', additionalProperties: false, properties: { valid: { type: 'boolean' }, error: { type: 'string' } }, required: ['valid'] } })
+  { label: 'validate-ctx', phase: 'Synthesize', model: 'haiku', effort: 'low', schema: { type: 'object', additionalProperties: false, properties: { valid: { type: 'boolean' }, error: { type: 'string' } }, required: ['valid'] } })
 let validationError = null
 if (validationResult && !validationResult.valid) {
   validationError = validationResult.error || 'context.yaml missing required fields'
@@ -217,7 +219,7 @@ if (validationResult && !validationResult.valid) {
     `decisions: ${JSON.stringify(arch.decisions)}. steps (with agent_hint per step): ${JSON.stringify(annotatedSteps)}. ` +
     `off_limits: ${JSON.stringify(arch.off_limits || [])}. risks: ${JSON.stringify(arch.risks || [])}. ` +
     `concerns: ${JSON.stringify(concerns)}. Each plan.steps[i] MUST include the agent_hint field. Return "ok".`,
-    { label: 'synthesize-retry', phase: 'Synthesize', model: 'sonnet' })
+    { label: 'synthesize-retry', phase: 'Synthesize', model: 'sonnet', effort: 'medium' })
 }
 
 // [TASK-CLASS-PERSIST] Write task_class into context.yaml (additive, backward-compat).

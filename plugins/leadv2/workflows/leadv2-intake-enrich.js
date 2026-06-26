@@ -48,13 +48,13 @@ const [memResult, archResult] = await Promise.all([
     `Find the entry whose task_class best matches "${TASK_CLASS}" (exact match preferred, then partial). ` +
     `If the file does not exist or has no matching entry, return {found: false}. ` +
     `Otherwise return {found: true, top_exemplar: <top_exemplar_summary>, task_class_match: <matched task_class>, score: <score>}.`,
-    { label: 'shared-mem-exemplar', phase: 'Enrich', model: 'haiku', schema: EXEMPLAR_SCHEMA }),
+    { label: 'shared-mem-exemplar', phase: 'Enrich', model: 'haiku', effort: 'low', schema: EXEMPLAR_SCHEMA }),
   agent(
     `Read docs/leadv2/solutions-archive.yaml. It is a YAML list: [{task_id, task_class, score, diff_summary, ts}]. ` +
     `Filter entries where task_class == "${TASK_CLASS}". Sort by score descending. Return top-3. ` +
     `If the file does not exist or has no matches, return {found: false, exemplars: []}. ` +
     `Otherwise return {found: true, exemplars: [{task_id, score, diff_summary}]}.`,
-    { label: 'archive-top-k', phase: 'Enrich', model: 'haiku', schema: ARCHIVE_SCHEMA }),
+    { label: 'archive-top-k', phase: 'Enrich', model: 'haiku', effort: 'low', schema: ARCHIVE_SCHEMA }),
 ])
 
 // Build context envelope — capped at ENVELOPE_CAP chars

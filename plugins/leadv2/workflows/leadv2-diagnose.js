@@ -76,7 +76,7 @@ const classified = await agent(
   `For each cluster: give a name, the domain to probe, a 1-sentence symptom_hint, and an optional probe_command (the exact bash command to run to gather evidence for this cluster). ` +
   `Logs hint available: ${LOGS_HINT}. DB hint: ${DB_HINT}.\n` +
   `Return clusters[] + summary_for_lead.`,
-  { label: 'symptom-classifier', phase: 'Classify', model: 'haiku', schema: SYMPTOM_SCHEMA })
+  { label: 'symptom-classifier', phase: 'Classify', model: 'haiku', effort: 'low', schema: SYMPTOM_SCHEMA })
 
 const clusters = (classified && classified.clusters && classified.clusters.length > 0)
   ? classified.clusters
@@ -104,7 +104,7 @@ const evidenceAgents = clusters.slice(0, 3).map(cl => () => agent(
     ? `Check Supabase state: ${DB_HINT}. Look for: unexpected nulls, missing rows, stale status, RLS-blocked writes.`
     : `Check ops/infra: systemd unit status, env vars, deploy state, file permissions.`) +
   `\nReturn up to 5 hypotheses (cause, confidence, evidence). Set cluster="${cl.name}".`,
-  { label: `trace:${cl.name}`, phase: 'Trace', model: 'haiku', schema: EVIDENCE_SCHEMA }))
+  { label: `trace:${cl.name}`, phase: 'Trace', model: 'haiku', effort: 'low', schema: EVIDENCE_SCHEMA }))
 
 const traceResults = (await parallel(evidenceAgents)).filter(Boolean)
 const allHypotheses = traceResults.flatMap(r => r.hypotheses || [])
@@ -118,7 +118,7 @@ const result = await agent(
   `Hypotheses: ${JSON.stringify(allHypotheses)}\n` +
   `Pick the most likely root_cause (high-confidence wins; corroboration across clusters upgrades confidence). ` +
   `Set evidence_files to specific files/tables implicated. Provide a concrete fix_hint. List alternates for any competing hypotheses.`,
-  { label: 'reduce', phase: 'Reduce', model: 'sonnet', schema: ROOT_CAUSE_SCHEMA })
+  { label: 'reduce', phase: 'Reduce', model: 'sonnet', effort: 'medium', schema: ROOT_CAUSE_SCHEMA })
 
 return result || {
   root_cause: 'Reduce agent returned null — review raw hypotheses manually',

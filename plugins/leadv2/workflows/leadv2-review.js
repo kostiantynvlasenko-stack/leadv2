@@ -70,23 +70,26 @@ async function emitLedger(event, extra) {
 
 phase('Review')
 await emitLedger('phase_enter', { phase: 'Review' })
+// [COST-LEVERS-01] Codex is the PRIMARY adversarial brain for Review (Lever 3). Agent critic is the fallback when CODEX_ON=false.
+// Codex runs first (unshifted to front) for highest signal-to-token ratio; critic always present as fallback.
 const reviewers = [
   () => agent(
     `Adversarial code review of the diff at ${DIFF}. Brief: ${MISSION}. Read the diff yourself (git diff ${BASE}). Report findings: correctness bugs, type/RLS gaps, N+1, missing tests, design-system violations. Severity-tag each. Minimal-diff context only.`,
-    { label: 'critic', phase: 'Review', agentType: 'critic', model: CRITIC_MODEL, schema: FINDINGS_SCHEMA }),
+    { label: 'critic', phase: 'Review', agentType: 'critic', model: CRITIC_MODEL, effort: 'high', schema: FINDINGS_SCHEMA }),
   () => agent(
     `Run hack-detection on the diff at ${DIFF}: TODO/FIXME band-aids, magic numbers, broad except, hardcoded creds/secrets, silent fallbacks. Return each as a finding (dimension="hack").`,
-    { label: 'hack-detect', phase: 'Review', model: 'haiku', schema: FINDINGS_SCHEMA }),
+    { label: 'hack-detect', phase: 'Review', model: 'haiku', effort: 'low', schema: FINDINGS_SCHEMA }),
 ]
 if (SAFETY) {
   reviewers.push(() => agent(
     `Security review of the diff at ${DIFF}. Full-file read allowed for security paths. Check injection, auth/session, RLS correctness, webhook verification, secret handling, CSRF, rate-limit gaps. Severity-tag (dimension="security").`,
-    { label: 'security-auditor', phase: 'Review', agentType: 'security-auditor', model: 'sonnet', schema: FINDINGS_SCHEMA }))
+    { label: 'security-auditor', phase: 'Review', agentType: 'security-auditor', model: 'sonnet', effort: 'high', schema: FINDINGS_SCHEMA }))
 }
 if (CODEX_ON) {
-  reviewers.push(() => agent(
+  // Codex is primary: unshift to run before agent-critic in parallel (first slot = primary adversarial brain)
+  reviewers.unshift(() => agent(
     `Run and wait: bash ~/.claude/scripts/codex-task.sh adversarial-review --wait --base ${BASE}. Then read findings with: bash ~/.claude/scripts/cx-tail.sh <output-file>. Parse [critical]/[high]/[medium]/[low] lines into findings (dimension="codex"). If codex unavailable (exit non-zero), return empty findings with summary_for_lead="codex unavailable". Do NOT invent findings.`,
-    { label: 'codex-adversarial', phase: 'Review', model: 'haiku', schema: FINDINGS_SCHEMA }))
+    { label: 'codex-adversarial', phase: 'Review', model: 'haiku', effort: 'low', schema: FINDINGS_SCHEMA }))
 }
 const reviewResults = (await parallel(reviewers)).filter(Boolean)
 const allFindings = reviewResults.flatMap(r => r.findings || [])
@@ -109,7 +112,7 @@ if (cappedBlocking.length > 0) {
   const verdicts = await parallel(cappedBlocking.map(f => () =>
     agent(
       `Try to REFUTE this finding. Default is_real=false if you cannot concretely confirm it against ${DIFF}. Finding [${f.severity}/${f.dimension}]: ${f.description}. Fix: ${f.suggested_fix || '(none)'}.`,
-      { label: `verify:${f.dimension}`, phase: 'Verify', model: VERIFY_MODEL, schema: VERDICT_SCHEMA }
+      { label: `verify:${f.dimension}`, phase: 'Verify', model: VERIFY_MODEL, effort: 'high', schema: VERDICT_SCHEMA }
     ).then(v => ({ ...f, verdict: v }))))
   confirmedBlocking = verdicts.filter(Boolean).filter(f => f.verdict && f.verdict.is_real)
   log(`Verify: ${cappedBlocking.length} capped (${overflowFindings.length} overflow) -> ${confirmedBlocking.length} survived refutation`)
@@ -131,7 +134,7 @@ const qualityResult = await agent(
   `quality_score = min(10, diff_coherence + test_coverage + security_pass + novelty_bonus).\n` +
   `Read git diff ${BASE} to assess. Write a 1-sentence diff_summary.\n` +
   `Review findings context: ${confirmedBlocking.length} blocking, ${deduped.length} total findings.`,
-  { label: 'quality-scorer', phase: 'Reflect', model: 'haiku', schema: QUALITY_SCHEMA })
+  { label: 'quality-scorer', phase: 'Reflect', model: 'haiku', effort: 'low', schema: QUALITY_SCHEMA })
 
 const qualityScore = qualityResult ? qualityResult.quality_score : null
 const diffSummary = qualityResult ? qualityResult.diff_summary : '(scoring unavailable)'
@@ -150,12 +153,12 @@ if (verdict === 'ACCEPT' && qualityScore !== null) {
     `    diff_summary: "${diffSummary.replace(/"/g, "'")}"\n` +
     `    ts: "${TS}"\n` +
     `Use python3: import yaml; load existing or []; append entry; dump back. Return "ok".`,
-    { label: 'archive-write', phase: 'Reflect', model: 'haiku' })
+    { label: 'archive-write', phase: 'Reflect', model: 'haiku', effort: 'low' })
 }
 
 await agent(
   `Append one line to docs/handoff/${TASK_ID}/review-signature.md (create if absent): "${TASK_ID} | verdict=${verdict} | blocking=${confirmedBlocking.length} | dims=${[...new Set(deduped.map(f => f.dimension))].join(',')} | quality=${qualityScore !== null ? qualityScore : 'n/a'}". One Bash echo, no analysis. Return "ok".`,
-  { label: 'reflect', phase: 'Reflect', model: 'haiku' })
+  { label: 'reflect', phase: 'Reflect', model: 'haiku', effort: 'low' })
 return {
   task_id: TASK_ID, verdict, round: ROUND, blocking_count: confirmedBlocking.length,
   blocking: confirmedBlocking.map(f => ({ severity: f.severity, dimension: f.dimension, file: f.file, description: f.description })),

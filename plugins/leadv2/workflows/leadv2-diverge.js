@@ -69,7 +69,7 @@ for (let i = 0; i < N; i++) {
     `Generate ONE distinct solution to this problem, strictly through this lens — ${frame}.\n` +
     `Problem: ${PROBLEM || `see docs/handoff/${TASK_ID}/`}.\n` +
     `Do not hedge toward the obvious answer; commit to the lens. Give idea + approach + key_risk.`,
-    { label: `gen:${i}`, phase: 'Generate', model: 'sonnet', schema: IDEA_SCHEMA }))
+    { label: `gen:${i}`, phase: 'Generate', model: 'sonnet', effort: 'medium', schema: IDEA_SCHEMA }))
 }
 const ideas = (await parallel(gens)).filter(Boolean)
 log(`Generate: ${ideas.length}/${N} candidate ideas`)
@@ -82,14 +82,14 @@ let judged = await agent(
   `Flag traps (plausible-but-doomed, trap=true). Recommend ONE (or a synthesis) and say why. ` +
   `Also write a short divergence.md to ${OUT} with the ranked set.\n` +
   `Candidates: ${JSON.stringify(ideas)}`,
-  { label: 'judge', phase: 'Judge', agentType: 'critic', model: 'sonnet', schema: JUDGE_SCHEMA })
+  { label: 'judge', phase: 'Judge', agentType: 'critic', model: 'sonnet', effort: 'high', schema: JUDGE_SCHEMA })
 if (judged === null) {
   log('Judge returned null — generating fallback summary via haiku')
   judged = await agent(
     `Judge agent failed for task ${TASK_ID}. Write a minimal fallback divergence.md to ${OUT} listing these ideas with no scores. ` +
     `Return { ranked: [], recommended: 'judge-failed — review ideas manually', summary_for_lead: 'Judge returned null; raw ideas listed in divergence.md' }.\n` +
     `Ideas: ${JSON.stringify(ideas.map(i => i.idea || '(unnamed)'))}`,
-    { label: 'judge-fallback', phase: 'Judge', model: 'haiku', schema: JUDGE_SCHEMA })
+    { label: 'judge-fallback', phase: 'Judge', model: 'haiku', effort: 'low', schema: JUDGE_SCHEMA })
 }
 
 phase('Select')

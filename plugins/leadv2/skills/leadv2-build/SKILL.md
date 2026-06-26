@@ -20,8 +20,9 @@ Lead's mission file MUST contain:
 - `## Acceptance` — 1-3 bullet test/verification steps
 - `## Graph context` — pre-populated MCP results (search_graph/trace_path) so subagent doesn't re-discover
 - `## Output budget` — always: `Write full detail to docs/handoff/<id>/developer.md. Chat reply: ≤50 words + file pointer. Bash calls: ≤3 for discovery. File reads: ≤5.`
+- `## Turn cap` — always: `Hard limit: 30 tool calls. At call 30 without reaching Acceptance → write DELIVERABLE_BLOCKED and stop.`
 
-Missing any section = mission incomplete = spawn FAILS prep. Founder rule: "incomplete specs → 47-turn discovery loops in subagent."
+Missing any section = mission incomplete = spawn FAILS prep. Founder rule: "incomplete specs → 47-turn discovery loops in subagent." (avg observed: 53 turns; cap saves ~23 turns × ~$0.03/turn per overflow subagent)
 
 ## When: Phase 4, after Gate 1. Trivial tasks skip to Close.
 ## When NOT: Plan not synthesized (no context.yaml).

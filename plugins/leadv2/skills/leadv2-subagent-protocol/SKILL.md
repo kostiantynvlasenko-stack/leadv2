@@ -16,6 +16,10 @@ allowed-tools:
 
 > **Hardest rule #2:** your FINAL assistant message returned to lead MUST be ONE LINE. Format: `DELIVERABLE_COMPLETE — see docs/handoff/<task-id>/<role>.full.md` (or `DELIVERABLE_BLOCKED: <reason>`). NO recap, NO summary table, NO "what I did", NO emoji headers. Lead reads the file. Audit shows 87% of subagents bloat parent context with multi-KB final messages — this is the #1 token leak. Violators waste 5-58KB of parent context per spawn.
 
+> **Turn-cap (COST-LEVERS-01):** Hard limit — **30 tool calls per subagent run**. At call 30 without reaching Acceptance: write `DELIVERABLE_BLOCKED: turn-cap reached at <step>` and stop. Do NOT loop past 30 hoping it resolves. [lean: cap enforced by self-monitoring only — upgrade when workflow runtime exposes a hard stop hook]
+
+> **Context-first (COST-LEVERS-01):** Lead pre-specifies files, paths, and facts in the mission. **Use the `## Graph context` block and explicit `Reads:` list as your first source — do NOT re-discover what is already injected.** Every re-discovery turn wastes ~2K tokens and compounds across all parallel subagents.
+
 Rules for operating as a subagent inside a /leadv2 run. These apply whether you're spawned via `claude-subsession.sh` (isolated process) or via Agent tool (shared parent session).
 
 ## 1. Handoff file contract — IMMUTABLE per task

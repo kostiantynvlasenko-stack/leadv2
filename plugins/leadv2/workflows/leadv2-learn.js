@@ -131,7 +131,7 @@ const [patterns, rejectedResult, exemplarResult] = await parallel([
     `For each recurring signal, compute a class_key as "<phase>:<task_class>:<agent_role>:<failure_mode>" (use "unknown" for any unknown field). ` +
     `Identify recurring failure signals: which review dimensions recur, REVISE rate, repeated failure_classes/phases. ` +
     `Return them as recurring[] with counts and class_keys. Be factual — only what the data shows.`,
-    { label: 'gather-signals', phase: 'Gather', model: 'haiku', schema: PATTERNS_SCHEMA }),
+    { label: 'gather-signals', phase: 'Gather', model: 'haiku', effort: 'low', schema: PATTERNS_SCHEMA }),
 
   // B1 fan-out leg 2: rejected-edits reader (model=haiku)
   () => agent(
@@ -139,14 +139,14 @@ const [patterns, rejectedResult, exemplarResult] = await parallel([
     `Filter to entries where rejected_at date is within the last 30 days (today is approx ${TS.slice(0,10)}). ` +
     `Return rejected_keys[] = array of class_key strings for recent rejections. ` +
     `If file does not exist or is empty, return rejected_keys=[] rejected_count=0.`,
-    { label: 'gather-rejected', phase: 'Gather', model: 'haiku', schema: REJECTED_SCHEMA }),
+    { label: 'gather-rejected', phase: 'Gather', model: 'haiku', effort: 'low', schema: REJECTED_SCHEMA }),
 
   // B2 fan-out leg 3: solutions-archive exemplar reader (model=haiku)
   () => agent(
     `Read docs/leadv2/solutions-archive.yaml. ` +
     `Group entries by task_class. For each task_class, keep only the top-K=3 entries by score (descending). ` +
     `Return those as exemplars[]. If file does not exist or solutions is empty, return exemplars=[].`,
-    { label: 'gather-exemplars', phase: 'Gather', model: 'haiku', schema: EXEMPLAR_SCHEMA }),
+    { label: 'gather-exemplars', phase: 'Gather', model: 'haiku', effort: 'low', schema: EXEMPLAR_SCHEMA }),
 ])
 
 const safePatterns = patterns || { recurring: [], revise_rate: 'n/a', summary_for_lead: 'gather returned null' }
@@ -181,7 +181,7 @@ if (belowThreshold.length > 0) {
     `Signals to accumulate: ${JSON.stringify(belowThreshold)}. ` +
     `Above-threshold keys to remove: ${JSON.stringify(aboveThreshold.map(r => r.class_key || r.signal))}. ` +
     `Write the full updated YAML to docs/leadv2/signal-accumulator.yaml. Return "ok".`,
-    { label: 'accumulate-signals', phase: 'Gather', model: 'haiku' })
+    { label: 'accumulate-signals', phase: 'Gather', model: 'haiku', effort: 'low' })
 }
 
 // Early-exit if nothing above threshold — no proposal needed this cycle
@@ -213,7 +213,7 @@ const proposal = await agent(
   `Include class_key in each proposal (same as the signal's class_key) for threshold-tracking. ` +
   `Then WRITE the proposal to ${OUT} as a governance markdown ` +
   `(status: pending — NOT auto-applied; founder or auto-approve decides). Return the proposals[].`,
-  { label: 'propose', phase: 'Propose', model: 'sonnet', schema: PROPOSAL_SCHEMA })
+  { label: 'propose', phase: 'Propose', model: 'sonnet', effort: 'medium', schema: PROPOSAL_SCHEMA })
 await emitLedger('phase_exit', { phase: 'Propose', proposals_count: (proposal && proposal.proposals) ? proposal.proposals.length : 0 })
 
 // ── Shadow-Emit phase (D3 / G3c + C1/C2 dual-memory) ────────────────────────
@@ -251,7 +251,7 @@ if (TASK_ID && proposal && proposal.proposals && proposal.proposals.length > 0) 
     `entries by reading each file's score field (apply decay: score * 0.9^months_old where months_old = ` +
     `(now_ms - Date.parse(ts)) / 2592000000). Keep top-50, delete the rest. ` +
     `Return "written" or "written+gc:<N>_deleted".`,
-    { label: 'episodic-write', phase: 'Shadow-Emit', model: 'haiku' })
+    { label: 'episodic-write', phase: 'Shadow-Emit', model: 'haiku', effort: 'low' })
   log(`Shadow-Emit: episodic entry written for task=${TASK_ID} class=${taskClass} score=${exemplarScore}`)
 }
 
@@ -280,7 +280,7 @@ if (TASK_ID && proposal && proposal.proposals && proposal.proposals.length > 0) 
     `Write the full updated YAML back to ${sharedMemPath}. ` +
     `${worktreeId ? 'This is a per-worktree tmp file; lead will merge it on Close.' : 'This is the canonical shared-memory file.'} ` +
     `Return "updated:<count>_entries".`,
-    { label: 'shared-mem-update', phase: 'Shadow-Emit', model: 'haiku' })
+    { label: 'shared-mem-update', phase: 'Shadow-Emit', model: 'haiku', effort: 'low' })
   log(`Shadow-Emit: shared-memory updated at ${sharedMemPath} (worktree="${worktreeId || 'main'}")`)
 }
 

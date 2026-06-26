@@ -95,7 +95,7 @@ Execute: bash scripts/audit-personas.sh --json
 Capture the stdout (JSON array of invariant rows). Return it verbatim as rows[].
 Each row has: persona_id, invariant, status (pass/breach/unknown), l2, l1, delta, threshold.
 If the script fails or returns empty, return rows: [].`,
-    { label: 'collect', phase: 'Collect', model: 'haiku', schema: ROWS_SCHEMA })
+    { label: 'collect', phase: 'Collect', model: 'haiku', effort: 'low', schema: ROWS_SCHEMA })
 
   const allRows = (collectResult && collectResult.rows) || []
   const breachRows = allRows.filter(r => r.status === 'breach').slice(0, MAX_JUDGE)
@@ -121,7 +121,7 @@ Investigate with evidence:
 - Common invariants: throughput (check action_log vs graph_media), auth (check cookies.enc + token_valid), cycle (check engine_sessions), pillar_drift (check pillar_drift probe)
 
 Return: real (true=confirmed bug, false=probe artifact/race condition), root_cause (one sentence), evidence (file:line or query result), fix_hint (one sentence).`,
-        { label: `judge:${row.persona_id}:${row.invariant}`, phase: 'Judge', model: 'sonnet', schema: JUDGE_SCHEMA })
+        { label: `judge:${row.persona_id}:${row.invariant}`, phase: 'Judge', model: 'sonnet', effort: 'high', schema: JUDGE_SCHEMA })
         .then(v => ({ row, verdict: v }))
     ))).filter(Boolean)
     : []
@@ -147,7 +147,7 @@ Fix hint: ${item.verdict.fix_hint}
 
 Apply a minimal-diff fix. Read the relevant file(s) first. Do NOT commit.
 Return a one-sentence summary of what you changed.`,
-      { label: `fix:${item.row.persona_id}:${item.row.invariant}`, phase: 'Fix', model: 'sonnet' })
+      { label: `fix:${item.row.persona_id}:${item.row.invariant}`, phase: 'Fix', model: 'sonnet', effort: 'medium' })
     ))).filter(Boolean)
 
     const reprobeResult = await agent(
@@ -156,7 +156,7 @@ In repo at ${REPO_DIR}, run: bash scripts/audit-personas.sh --json
 Then filter for these persona+invariant pairs:
 ${fixCandidates.map(i => `  ${i.row.persona_id} / ${i.row.invariant}`).join('\n')}
 Return only those matching rows as rows[].`,
-      { label: 'reprobe', phase: 'Fix', model: 'haiku', schema: REPROBE_SCHEMA })
+      { label: 'reprobe', phase: 'Fix', model: 'haiku', effort: 'low', schema: REPROBE_SCHEMA })
 
     const reprobeRows = (reprobeResult && reprobeResult.rows) || []
     fixed = fixCandidates.map((item, idx) => {
@@ -258,7 +258,7 @@ Criteria definitions: ${CRITERIA_DESC}
 QA lens: working + all-states-wired — does every state render? Any broken API call, 404, console error?
 Examine the page thoroughly. For each criterion: PASS (fully meets), PARTIAL (partially meets), FAIL (does not meet).
 Return verdicts[] (role="QA", criterion, result, note) and fix_items[] (prio HIGH/MED/LOW, item as actionable one-liner).`,
-        { label: `qa:${page}`, phase: 'Collect', model: 'sonnet', schema: PAGE_AUDIT_SCHEMA }),
+        { label: `qa:${page}`, phase: 'Collect', model: 'sonnet', effort: 'medium', schema: PAGE_AUDIT_SCHEMA }),
       () => agent(
         `You are a Product Owner auditing the page: ${page}
 Criteria to evaluate: ${CRITERIA.PO.join(', ')}
@@ -266,7 +266,7 @@ Criteria definitions: ${CRITERIA_DESC}
 PO lens: informative + no-tech-jargon + clear — does the page communicate value? Would a non-technical customer understand it?
 Examine the page thoroughly. For each criterion: PASS/PARTIAL/FAIL.
 Return verdicts[] (role="PO", criterion, result, note) and fix_items[] (prio HIGH/MED/LOW, item as actionable one-liner).`,
-        { label: `po:${page}`, phase: 'Collect', model: 'sonnet', schema: PAGE_AUDIT_SCHEMA }),
+        { label: `po:${page}`, phase: 'Collect', model: 'sonnet', effort: 'medium', schema: PAGE_AUDIT_SCHEMA }),
       () => agent(
         `You are a Designer auditing the page: ${page}
 Criteria to evaluate: ${CRITERIA.Designer.join(', ')}
@@ -274,7 +274,7 @@ Criteria definitions: ${CRITERIA_DESC}
 Designer lens: simple + clear + beautiful — spacing, hierarchy, color consistency, typography, responsiveness.
 Examine the page thoroughly. For each criterion: PASS/PARTIAL/FAIL.
 Return verdicts[] (role="Designer", criterion, result, note) and fix_items[] (prio HIGH/MED/LOW, item as actionable one-liner).`,
-        { label: `designer:${page}`, phase: 'Collect', model: 'sonnet', schema: PAGE_AUDIT_SCHEMA }),
+        { label: `designer:${page}`, phase: 'Collect', model: 'sonnet', effort: 'medium', schema: PAGE_AUDIT_SCHEMA }),
     ])).filter(Boolean)
 
     const verdicts = roleResults.flatMap(r => (r && r.verdicts) || [])
@@ -324,7 +324,7 @@ ${fixItems.map(f => `- [ ] [${f.prio}] ${f.item}`).join('\n')}
 ${mergedFixItems.map(f => `- [ ] [${f.prio}] ${f.item}`).join('\n')}
 
 Create parent directories if needed. Return "ok".`,
-    { label: 'report', phase: 'Report', model: 'haiku' })
+    { label: 'report', phase: 'Report', model: 'haiku', effort: 'low' })
 
   return {
     pages: PAGES.length,
