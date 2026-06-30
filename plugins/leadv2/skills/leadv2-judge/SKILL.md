@@ -26,6 +26,19 @@ Lead needs an Opus verdict and the mode is clear. Pass `--mode` to select the de
 - After 3 failures → automatic escalate, skip judge.
 - Founder said "ответь сам" → skip judge.
 
+### Mode `review` — Codex gut-check before spawning (added 2026-06-30, SONNET5-ADAPT-01)
+
+Before spawning this Opus judge for a critic-vs-codex conflict specifically (codex was itself one of the disagreeing reviewers), re-fire Codex once fresh at `--effort medium` as a gut-check re-confirmation — reuses the existing "Round 2 tie-break" pattern from `leadv2-plan/SKILL.md`. Codex cannot adjudicate its own round-1 disagreement, so this is a re-confirmation, not an appeal:
+
+```bash
+bash .claude/scripts/lv2 leadv2-codex-planner.sh \
+  --task-id "<task-id>" --mode reconfirm --effort medium \
+  --prior-verdict "docs/handoff/<task-id>/codex.summary.md" \
+  --out "docs/handoff/<task-id>/codex-reconfirm.md"
+```
+
+If Codex round 2 flips to APPROVE → skip the Opus judge spawn entirely, advance with that verdict. Only on genuine persistent disagreement (round 2 still REVISE/ABORT) does this mode proceed to the Opus judge as documented above. Saves an Opus spawn on the common "Codex was just being strict" case. Does not apply to `question` or `recovery` modes — those don't involve Codex as a disagreeing party.
+
 ## Invocation
 
 Lead spawns this skill with the `--mode` flag in the mission or context header:

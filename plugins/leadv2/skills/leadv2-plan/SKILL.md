@@ -265,7 +265,7 @@ On any QUESTION_PENDING notification → run `leadv2-question-proxy` skill.
 > // Workflow script — planning fan-out
 > const results = await parallel([
 >   agent("architect", {
->     model: "claude-opus-4-5",
+>     model: "claude-opus-4-8",
 >     prompt: `<architect mission — full mission context + graph context from /tmp/mission-<id>.md>`,
 >     outputSchema: {
 >       type: "object",
@@ -279,7 +279,7 @@ On any QUESTION_PENDING notification → run `leadv2-question-proxy` skill.
 >     }
 >   }),
 >   agent("critic", {
->     model: "claude-sonnet-4-5",
+>     model: "claude-sonnet-5",
 >     prompt: `<initial framing review — review mission scope, highlight structural risks, do NOT review a plan (none exists yet)>`,
 >     outputSchema: {
 >       type: "object",

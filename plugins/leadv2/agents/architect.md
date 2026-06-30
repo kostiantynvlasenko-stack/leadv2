@@ -2,7 +2,7 @@
 name: architect
 description: "Use when designing a new feature or subsystem — data flow, module boundaries, integration contracts, DB schema changes, migration strategy, and cross-component dependencies."
 tools: Read, Write, Edit, Bash, Glob, Grep, Agent, mcp__codebase-memory-mcp__search_graph, mcp__codebase-memory-mcp__search_code, mcp__codebase-memory-mcp__trace_path, mcp__codebase-memory-mcp__get_code_snippet, mcp__codebase-memory-mcp__get_architecture, mcp__codebase-memory-mcp__query_graph
-model: claude-sonnet-4-6
+model: claude-sonnet-5
 effort: max
 skills:
   - leadv2-subagent-protocol

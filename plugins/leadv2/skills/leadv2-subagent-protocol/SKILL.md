@@ -76,7 +76,7 @@ Claude Code v2.1.172+ allows subagents to spawn sub-subagents (up to 5 levels de
 **Allowed nested spawns:**
 ```
 Agent(subagent_type="Explore",          model="claude-haiku-4-5",   ...)  # graph/file discovery
-Agent(subagent_type="general-purpose",  model="claude-sonnet-4-5",  ...)  # light synthesis
+Agent(subagent_type="general-purpose",  model="claude-sonnet-5",  ...)  # light synthesis
 ```
 
 **Rules:**
@@ -100,7 +100,7 @@ Agent(subagent_type="Explore", model="claude-haiku-4-5",
 
 **Example — denied:**
 ```
-Agent(subagent_type="developer", model="claude-sonnet-4-5", ...)  # build role not allowed nested
+Agent(subagent_type="developer", model="claude-sonnet-5", ...)  # build role not allowed nested
 Agent(subagent_type="Explore",   ...)                              # model= omitted → DENIED
 ```
 

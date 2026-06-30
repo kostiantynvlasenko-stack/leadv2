@@ -26,6 +26,7 @@ allowed-tools:
 ```
 Iteration N:
   1. Name the blocker precisely (one sentence, root cause not symptom)
+  1b. Codex second-hypothesis check (see below) — reconcile before scoping the fix
   2. Scope the fix to ONLY this blocker — touch nothing else
   3. Syntax-check: bash -n (sh) / python3 -m py_compile (py)
   4. Deploy both VPS via deploy-latest.sh
@@ -34,6 +35,21 @@ Iteration N:
   7. RED/BLOCKED → name the NEW blocker → Iteration N+1
   8. Pulse: "iter-N: <blocker-name> → <GREEN|next-blocker>"
 ```
+
+### 1b. Codex second-hypothesis check (added 2026-06-30, SONNET5-ADAPT-01)
+
+The exact failure mode this targets: a whole session burned on 2 wrong root-cause theories before the real cause (a swallowed NOT-NULL error, sitting in the log the whole time) was found — see persona-engine's CLAUDE.md "Diagnosis protocol" section. A second, independent reader catches this cheaply.
+
+If `bash ~/.claude/scripts/codex-task.sh status >/dev/null 2>&1` succeeds, fire Codex as an independent hypothesis generator in background, in parallel with the lead's own log read for step 1:
+
+```bash
+bash .claude/scripts/lv2 leadv2-codex-planner.sh \
+  --task-id "<task-id>" --mode diagnose --effort medium \
+  --log-path "<failure-log-path>" --diff-path "<last-diff>" \
+  --out "docs/handoff/<task-id>/codex-iter-${N}-hypothesis.md" &
+```
+
+Monitor for completion, then reconcile: if Codex's hypothesis matches the lead's, proceed with high confidence. If they diverge, do NOT pick one blind — re-check the actual error log/runtime evidence (per the Diagnosis protocol: read the error first, never ship on a code-read hypothesis alone) before naming the blocker in step 1. Skip silently if `codex-task.sh status` fails (no ChatGPT login) — lead's own read is sufficient, this is advisory only and never blocks the iteration.
 
 ## Traceability — mandatory log
 

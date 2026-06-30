@@ -2,7 +2,7 @@
 name: security-auditor
 description: "Use for code-level security review: injection, auth/session flaws, access-control policy correctness, webhook verification, secret handling, CSRF, rate-limit gaps, and dependency CVEs."
 tools: Read, Write, Bash, Glob, Grep
-model: claude-sonnet-4-6
+model: claude-sonnet-5
 skills:
   - leadv2-subagent-protocol
   - code-review-patterns

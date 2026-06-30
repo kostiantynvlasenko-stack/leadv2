@@ -246,7 +246,7 @@ The bandit writes `docs/handoff/<id>/route-decisions.yaml`; scorecard-write.sh r
 >
 > const round1 = await parallel([
 >   agent("critic", {
->     model: safetyTouched ? "claude-opus-4-5" : "claude-sonnet-4-5",
+>     model: safetyTouched ? "claude-opus-4-8" : "claude-sonnet-5",
 >     prompt: `Adversarial code review. Diff: ${DIFF_PATH}. Brief: /tmp/review-mission-<id>.md.
 >              Output CHALLENGE blocks per critic role format with severity tags.`,
 >     outputSchema: {
@@ -272,7 +272,7 @@ The bandit writes `docs/handoff/<id>/route-decisions.yaml`; scorecard-write.sh r
 >   }),
 >   // security-auditor fires only when safety-touched (same gate as manual Cases B/C)
 >   ...(safetyTouched ? [agent("security-auditor", {
->     model: "claude-sonnet-4-5",
+>     model: "claude-sonnet-5",
 >     prompt: `Security review. Diff: ${DIFF_PATH}. Full-file read allowed for security-sensitive paths.`,
 >     outputSchema: {
 >       type: "object",
@@ -284,7 +284,7 @@ The bandit writes `docs/handoff/<id>/route-decisions.yaml`; scorecard-write.sh r
 >     }
 >   })] : []),
 >   agent("developer", {
->     model: "claude-sonnet-4-5",
+>     model: "claude-sonnet-5",
 >     prompt: `Run hack-detection per .claude/skills/leadv2-hack-detection/SKILL.md on diff ${DIFF_PATH}.
 >              Output findings YAML with block_count/warn_count/has_block summary.`,
 >     outputSchema: {
@@ -310,7 +310,7 @@ The bandit writes `docs/handoff/<id>/route-decisions.yaml`; scorecard-write.sh r
 > // Each finding is put to 3 independent review dimensions; ≥2 refutations kill it.
 > const verified = await pipeline(round1, {
 >   agent: "critic",
->   model: "claude-sonnet-4-5",
+>   model: "claude-sonnet-5",
 >   prompt: `For each Critical/High finding from round1, apply 3-vote majority-kill:
 >            vote on (correctness, risk, actionability). If ≥2 votes refute → kill finding.
 >            Output: verified_findings[], killed_findings[] with kill_reasons.`,

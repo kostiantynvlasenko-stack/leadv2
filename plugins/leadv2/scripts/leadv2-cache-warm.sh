@@ -88,8 +88,8 @@ fi
 
 # Map model alias to full model ID
 case "$MODEL" in
-  opus)   MODEL_ID="claude-opus-4-5" ;;
-  sonnet) MODEL_ID="claude-sonnet-4-5" ;;
+  opus)   MODEL_ID="claude-opus-4-8" ;;
+  sonnet) MODEL_ID="claude-sonnet-5" ;;
   haiku)  MODEL_ID="claude-haiku-4-5" ;;
   *)      MODEL_ID="$MODEL" ;;
 esac
