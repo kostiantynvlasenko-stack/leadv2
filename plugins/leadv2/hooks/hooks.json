@@ -111,6 +111,12 @@
           },
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-codex-nopoll-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Codex no-poll guard (G3)..."
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bash-lint-pre-gate.sh\"",
             "timeout": 10,
             "statusMessage": "bash -n pre-gate..."

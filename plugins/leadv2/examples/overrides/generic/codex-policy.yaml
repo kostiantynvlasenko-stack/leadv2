@@ -5,3 +5,8 @@ codex_enabled: false
 codex_model: gpt-5.5
 codex_review_rounds_max: 2
 codex_planner_max_findings: 5
+
+# G1: max seconds before codex-task.sh auto-kills the companion process (default 600)
+codex_review_timeout_sec: 600
+# G2: max findings returned per adversarial-review, Critical/High only (default 8)
+codex_review_max_findings: 8
