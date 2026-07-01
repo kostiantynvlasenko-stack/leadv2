@@ -167,6 +167,13 @@
           },
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-codex-first-nudge.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "Codex-first nudge (WARN-only)..."
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-worktree-enforce.sh\"",
             "timeout": 5
           },
