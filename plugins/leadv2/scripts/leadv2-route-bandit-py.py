@@ -346,6 +346,12 @@ def cmd_update(args: list[str]) -> None:
     reward_success = composite >= 0.5
 
     circuit_triggers: list[str] = []
+    # PLUGIN-REVIEW-FIX-01 fix7: entries with source=="stub" are synthetic
+    # placeholders written by phase8-close D-5a when route-decisions.yaml is
+    # missing — they carry no real bandit_deviation/reward signal and must
+    # never move alpha/beta counts.
+    considered = 0
+    stub_skipped = 0
 
     for entry in rd_list:
         ctx_key = entry.get("context_key", "")
@@ -353,6 +359,11 @@ def cmd_update(args: list[str]) -> None:
         deviation = bool(entry.get("bandit_deviation", False))
         heuristic = entry.get("heuristic_arm", arm)
         if not ctx_key or not arm:
+            continue
+        considered += 1
+
+        if entry.get("source") == "stub":
+            stub_skipped += 1
             continue
 
         _ensure_arm(state, ctx_key, arm, heuristic)
@@ -366,6 +377,11 @@ def cmd_update(args: list[str]) -> None:
 
         if deviation and not reward_success:
             circuit_triggers.append(ctx_key)
+
+    if stub_skipped:
+        print(f"WARN[bandit]: {stub_skipped} stub entries ignored", file=sys.stderr)
+    if considered > 0 and stub_skipped == considered:
+        print("update_result=skipped_stub", file=sys.stderr)
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 

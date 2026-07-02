@@ -19,10 +19,18 @@ fi
 usage() {
   cat >&2 <<EOF
 Usage: leadv2-codex-planner.sh --task-id <id> (--mission "<text>" | --mission-file <path>) [--effort <medium|high|xhigh>=high]
+       leadv2-codex-planner.sh --task-id <id> --mode <quick-verify|diagnose|reconfirm> [--out <file>]
+                                [--diff-paths <str>] [--log-path <file>] [--prior-verdict <file>]
 
-  --mission "<text>"     Inline mission text (passed directly via CLI).
+  --mission "<text>"     Inline mission text (passed directly via CLI). --mode plan only.
   --mission-file <path>  Path to mission file; read early for race protection.
-                         Mutually exclusive with --mission.
+                         Mutually exclusive with --mission. --mode plan only.
+  --mode <m>             plan (default, current behavior) | quick-verify | diagnose | reconfirm.
+                         Non-plan modes assemble a short mode-specific prompt and imply --wait.
+  --out <file>           Write findings here instead of the default handoff path (non-plan modes).
+  --diff-paths <str>     quick-verify: paths to review. diagnose: diff content/path (optional).
+  --log-path <file>      diagnose: log file (tail -100 used as prompt input).
+  --prior-verdict <file> reconfirm: prior verdict file content used as prompt input.
 
 Codex model is the codex-companion default (gpt-5.5 on plugin >=1.0.4).
 The --model flag is intentionally not exposed; spark is banned project-wide.
@@ -31,14 +39,20 @@ EOF
 }
 
 TASK_ID=""; MISSION=""; MISSION_FILE=""; EFFORT="high"; WAIT=0
+MODE="plan"; OUT_FILE=""; DIFF_PATHS=""; LOG_PATH=""; PRIOR_VERDICT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --task-id)      TASK_ID="$2"; shift 2 ;;
-    --mission)      MISSION="$2"; shift 2 ;;
-    --mission-file) MISSION_FILE="$2"; shift 2 ;;
-    --effort)       EFFORT="$2"; shift 2 ;;
-    --wait)         WAIT=1; shift ;;
+    --task-id)       TASK_ID="$2"; shift 2 ;;
+    --mission)       MISSION="$2"; shift 2 ;;
+    --mission-file)  MISSION_FILE="$2"; shift 2 ;;
+    --effort)        EFFORT="$2"; shift 2 ;;
+    --wait)          WAIT=1; shift ;;
+    --mode)          MODE="$2"; shift 2 ;;
+    --out)           OUT_FILE="$2"; shift 2 ;;
+    --diff-paths)    DIFF_PATHS="$2"; shift 2 ;;
+    --log-path)      LOG_PATH="$2"; shift 2 ;;
+    --prior-verdict) PRIOR_VERDICT="$2"; shift 2 ;;
     --model)
       echo "[leadv2-codex-planner] --model is no longer accepted (gpt-5.5 default, spark banned)" >&2
       usage
@@ -47,27 +61,59 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Validate: task-id required; exactly one of --mission / --mission-file required.
-[[ -z "$TASK_ID" ]] && { echo "[leadv2-codex-planner] --task-id is required" >&2; usage; }
-if [[ -n "$MISSION" && -n "$MISSION_FILE" ]]; then
-  echo "[leadv2-codex-planner] --mission and --mission-file are mutually exclusive" >&2; usage
-fi
-if [[ -z "$MISSION" && -z "$MISSION_FILE" ]]; then
-  echo "[leadv2-codex-planner] one of --mission or --mission-file is required" >&2; usage
-fi
+case "$MODE" in
+  plan|quick-verify|diagnose|reconfirm) ;;
+  *) echo "[leadv2-codex-planner] unknown --mode: $MODE (expected plan|quick-verify|diagnose|reconfirm)" >&2; usage ;;
+esac
 
-# Resolve --mission-file: realpath, readable, non-empty. Read NOW for race protection.
-if [[ -n "$MISSION_FILE" ]]; then
-  RESOLVED=$(realpath "$MISSION_FILE" 2>/dev/null) || {
-    echo "[leadv2-codex-planner] cannot resolve path: $MISSION_FILE" >&2; exit 1
+# Validate: task-id always required.
+[[ -z "$TASK_ID" ]] && { echo "[leadv2-codex-planner] --task-id is required" >&2; usage; }
+
+if [[ "$MODE" == "plan" ]]; then
+  # Exactly one of --mission / --mission-file required (unchanged legacy behavior).
+  if [[ -n "$MISSION" && -n "$MISSION_FILE" ]]; then
+    echo "[leadv2-codex-planner] --mission and --mission-file are mutually exclusive" >&2; usage
+  fi
+  if [[ -z "$MISSION" && -z "$MISSION_FILE" ]]; then
+    echo "[leadv2-codex-planner] one of --mission or --mission-file is required" >&2; usage
+  fi
+
+  # Resolve --mission-file: realpath, readable, non-empty. Read NOW for race protection.
+  if [[ -n "$MISSION_FILE" ]]; then
+    RESOLVED=$(realpath "$MISSION_FILE" 2>/dev/null) || {
+      echo "[leadv2-codex-planner] cannot resolve path: $MISSION_FILE" >&2; exit 1
+    }
+    [[ -r "$RESOLVED" ]] || {
+      echo "[leadv2-codex-planner] mission file not readable: $RESOLVED" >&2; exit 1
+    }
+    MISSION=$(< "$RESOLVED")
+    [[ -n "$MISSION" ]] || {
+      echo "[leadv2-codex-planner] mission file is empty: $RESOLVED" >&2; exit 1
+    }
+  fi
+else
+  # Non-plan modes: mission not required from the caller -- assemble a short
+  # mode-specific prompt instead, and imply synchronous --wait.
+  WAIT=1
+  _read_or_literal() {
+    local val="$1"
+    [[ -n "$val" && -f "$val" ]] && cat "$val" 2>/dev/null || printf '%s' "$val"
   }
-  [[ -r "$RESOLVED" ]] || {
-    echo "[leadv2-codex-planner] mission file not readable: $RESOLVED" >&2; exit 1
-  }
-  MISSION=$(< "$RESOLVED")
-  [[ -n "$MISSION" ]] || {
-    echo "[leadv2-codex-planner] mission file is empty: $RESOLVED" >&2; exit 1
-  }
+  case "$MODE" in
+    quick-verify)
+      MISSION="review ONLY these paths for Critical/High: ${DIFF_PATHS}. Max 3 findings, one sentence each"
+      ;;
+    diagnose)
+      LOG_CONTENT=""
+      [[ -n "$LOG_PATH" && -f "$LOG_PATH" ]] && LOG_CONTENT="$(tail -100 "$LOG_PATH" 2>/dev/null || true)"
+      DIFF_CONTENT="$(_read_or_literal "$DIFF_PATHS")"
+      MISSION="independent root-cause hypothesis. Log: ${LOG_CONTENT}. Diff: ${DIFF_CONTENT}. Max 3 hypotheses, one sentence each"
+      ;;
+    reconfirm)
+      PRIOR_CONTENT="$(_read_or_literal "$PRIOR_VERDICT")"
+      MISSION="re-review your prior verdict (${PRIOR_CONTENT}): APPROVE or REVISE with 1-sentence reason"
+      ;;
+  esac
 fi
 
 # Test-mode short-circuit: set LEADV2_TEST_MODE=1 to skip codex dispatch.
@@ -82,7 +128,8 @@ mkdir -p "$HANDOFF_DIR"
 
 PROMPT_FILE="/tmp/codex-plan-${TASK_ID}.md"
 
-cat > "$PROMPT_FILE" <<EOF
+if [[ "$MODE" == "plan" ]]; then
+  cat > "$PROMPT_FILE" <<EOF
 Outcome: a 2nd-opinion plan for the task below, ready for the lead orchestrator to synthesize against an Opus architect's plan.
 
 Mission: $MISSION
@@ -102,6 +149,14 @@ Decision rules:
 
 text.verbosity: low.
 EOF
+else
+  # Non-plan modes: short mode-specific prompt assembled above (no 5-section plan boilerplate).
+  cat > "$PROMPT_FILE" <<EOF
+$MISSION
+
+text.verbosity: low.
+EOF
+fi
 
 STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
@@ -112,7 +167,7 @@ fi
 if [[ "$WAIT" == "1" ]]; then
   # Synchronous path: block until codex completes, write findings to a file.
   # `task` is synchronous by default; no --wait flag needed (nor accepted by codex-companion).
-  FINDINGS_FILE="$HANDOFF_DIR/codex-plan-output.txt"
+  FINDINGS_FILE="${OUT_FILE:-$HANDOFF_DIR/codex-plan-output.txt}"
   CODEX_ARGS=(task --effort "$EFFORT")
   CODEX_ARGS+=("$(cat "$PROMPT_FILE")")
   DISPATCH_EXIT=0

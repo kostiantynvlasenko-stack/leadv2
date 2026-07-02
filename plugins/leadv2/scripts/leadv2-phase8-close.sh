@@ -29,7 +29,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+PROJECT_ROOT="${CLAUDE_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
 cd "$PROJECT_ROOT"
 
 SCRIPTS_DIR="${SCRIPT_DIR}"
@@ -303,7 +303,7 @@ fi
 
 # ── Scorecard: non-blocking write on close ────────────────────────────────────
 # Gated by LEADV2_SCORECARD_ON_CLOSE=1. Failures log to stderr but never abort close.
-if [[ "${LEADV2_SCORECARD_ON_CLOSE:-0}" == "1" ]]; then
+if [[ "${LEADV2_SCORECARD_ON_CLOSE:-1}" == "1" ]]; then
   SCORECARD_WRITE_SCRIPT="${SCRIPTS_DIR}/leadv2-scorecard-write.sh"
   COST_FLUSH_SCRIPT="${SCRIPTS_DIR}/leadv2-cost-flush.sh"
   if [[ -x "$COST_FLUSH_SCRIPT" ]]; then
@@ -392,24 +392,17 @@ fi
 # LEADV2_LEARN_EVERY_N tunes the interval (default 5; was 10, halved for faster feedback).
 if [[ "${LEADV2_LEARN_ON_CLOSE:-1}" == "1" ]]; then
   _learn_n="${LEADV2_LEARN_EVERY_N:-5}"
-  # Use PROJECT_ROOT-relative path (phase8 always cd'd to PROJECT_ROOT above)
-  _sc_file="${PROJECT_ROOT}/docs/leadv2/scorecard.jsonl"
-  # Primary: scorecard line count (enabled by default now).
-  # Fallback: persistent close-counter so trigger fires even without scorecard.
-  _close_count=0
-  if [[ "${LEADV2_SCORECARD_ON_CLOSE:-0}" == "1" && -f "$_sc_file" ]]; then
-    _close_count=$(wc -l < "$_sc_file" 2>/dev/null || echo 0)
-    _close_count=$(( _close_count + 0 ))   # strip whitespace
-  fi
-  # Fallback counter: only when scorecard is explicitly disabled (not just empty).
-  if [[ "${LEADV2_SCORECARD_ON_CLOSE:-0}" != "1" ]]; then
-    _counter_file="${PROJECT_ROOT}/docs/leadv2/.close-count"
-    mkdir -p "${PROJECT_ROOT}/docs/leadv2"
-    _prev=$(cat "$_counter_file" 2>/dev/null || echo 0)
-    [[ "$_prev" =~ ^[0-9]+$ ]] || _prev=0   # M1: validate before arithmetic (shell-injection guard)
-    _close_count=$(( (_prev + 1) % 1000000 ))
-    printf -- '%d\n' "$_close_count" > "${_counter_file}.tmp" && mv "${_counter_file}.tmp" "$_counter_file"  # H1: atomic write
-  fi
+  # Monotonic persistent counter — independent of LEADV2_SCORECARD_ON_CLOSE.
+  # PLUGIN-REVIEW-FIX-01 fix3: scorecard-line-count was the primary source, but
+  # scorecard.jsonl was frozen (default-OFF for weeks) which froze this trigger
+  # too. Always increment the counter file so learn-trigger fires regardless of
+  # scorecard state.
+  _counter_file="${PROJECT_ROOT}/docs/leadv2/.learn-close-counter"
+  mkdir -p "${PROJECT_ROOT}/docs/leadv2"
+  _prev=$(cat "$_counter_file" 2>/dev/null || echo 0)
+  [[ "$_prev" =~ ^[0-9]+$ ]] || _prev=0   # M1: validate before arithmetic (shell-injection guard)
+  _close_count=$(( (_prev + 1) % 1000000 ))
+  printf -- '%d\n' "$_close_count" > "${_counter_file}.tmp" && mv "${_counter_file}.tmp" "$_counter_file"  # H1: atomic write
   if [[ $_learn_n -gt 0 && $(( _close_count % _learn_n )) -eq 0 && $_close_count -gt 0 ]]; then
     _trigger_dir="${PROJECT_ROOT}/docs/leadv2"
     mkdir -p "$_trigger_dir"
@@ -491,7 +484,9 @@ fi
 
 # ── [MEMORY-ARCHIVE-01] Memory GC sweep on close ─────────────────────────────
 # Non-fatal: archives RESOLVED/FIXED/✅ lines from MEMORY.md hot index.
-# Dry-run by default; set MEMORY_GC_APPLY=1 to move entries to archive/.
+# NOTE: this call always runs in APPLY mode (MEMORY_GC_APPLY=1 is hardcoded
+# below) — it is NOT a dry-run gate. The archiver's own pending-guard is the
+# safety mechanism, not MEMORY_GC_APPLY.
 # Resolution logic mirrors memory-size-guard.sh (CLAUDE_PROJECT_DIR → PWD → slug scan).
 _ARCHIVER="${HOME}/.claude/hooks/memory-archive-resolved.sh"
 if [[ -x "$_ARCHIVER" ]]; then
@@ -511,7 +506,9 @@ if [[ -x "$_ARCHIVER" ]]; then
     log_info "[memory-gc] could not resolve memory dir — archiver skipped"
   else
     log_info "[memory-gc] running archiver on ${_mem_dir} (APPLY mode — pending guard active)"
-    MEMORY_GC_APPLY=1 bash "$_ARCHIVER" "$_mem_dir" >/dev/null 2>&1 || true
+    _memgc_log="/tmp/lv2-memgc-close-$(date +%s).log"
+    MEMORY_GC_APPLY=1 bash "$_ARCHIVER" "$_mem_dir" >"${_memgc_log}" 2>&1 \
+      || log_info "[memory-gc] archiver exited non-zero — see ${_memgc_log}"
   fi
 else
   log_info "[memory-gc] archiver not found at ${_ARCHIVER} — skipped"

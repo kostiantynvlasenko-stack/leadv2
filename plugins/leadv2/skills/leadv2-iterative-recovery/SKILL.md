@@ -45,7 +45,7 @@ If `bash ~/.claude/scripts/codex-task.sh status >/dev/null 2>&1` succeeds, fire 
 ```bash
 bash .claude/scripts/lv2 leadv2-codex-planner.sh \
   --task-id "<task-id>" --mode diagnose --effort medium \
-  --log-path "<failure-log-path>" --diff-path "<last-diff>" \
+  --log-path "<failure-log-path>" --diff-paths "<last-diff>" \
   --out "docs/handoff/<task-id>/codex-iter-${N}-hypothesis.md" &
 ```
 

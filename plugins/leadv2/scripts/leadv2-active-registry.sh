@@ -217,7 +217,7 @@ PYEOF
 # drops any session whose pid is dead at next SessionStart. Registering with the
 # durable claude process PID keeps the session alive until the real session ends.
 _lv2_durable_pid() {
-  python3 - "$PPID" 2>/dev/null <<'PYEOF' || printf -- '%s' "$PPID"
+  python3 - "$PPID" <<'PYEOF' || printf -- '%s' "$PPID"
 import sys, subprocess
 from typing import Optional
 

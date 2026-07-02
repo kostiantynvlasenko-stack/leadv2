@@ -71,7 +71,7 @@ for root in \
   "${CLAUDE_PROJECT_DIR:-$PWD}/.claude/agents" \
   "$HOME/.claude/agents" \
   "$HOME/.claude/plugins"/*/agents \
-  "$HOME/Projects/leadv2/plugins"/*/agents ; do
+  ${CLAUDE_PLUGIN_ROOT:+"$CLAUDE_PLUGIN_ROOT/agents"} ; do
   cand="$root/$SUBTYPE.md"
   [ -f "$cand" ] && { AGENT_FILE="$cand"; break; }
 done
@@ -80,7 +80,7 @@ done
 [ -z "$AGENT_FILE" ] && exit 0
 
 # Found: frontmatter model: pins the model regardless of caller → safe, pass silently.
-head -15 "$AGENT_FILE" | grep -qiE "^model:" && exit 0
+head -30 "$AGENT_FILE" | grep -qiE "^model:" && exit 0
 
 # Found AND no frontmatter model → it would inherit the caller ($SESSION_MODEL). DENY.
 deny "model-guard DENY: agent '$SUBTYPE' ($AGENT_FILE) has NO frontmatter model: and the spawn passed no model= -> it inherits the caller ($SESSION_MODEL). Fix: add 'model: sonnet' (or haiku) to the agent frontmatter, or pass model= on the spawn."

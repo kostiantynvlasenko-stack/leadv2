@@ -59,7 +59,10 @@ MISSING=""
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
 
+# NOTE: exit 2 takes its reason from STDERR per hook protocol -- stdout JSON
+# needs exit 0 or the reason is silently lost. Use the deny-JSON/exit-0 style
+# (same as leadv2-codex-nopoll-guard.sh) instead of {decision:"block"}+exit 2.
 jq -cn \
   --arg reason "Close ritual not complete for ${TASK_ID}. Missing:${MISSING}. Run: bash \"${PLUGIN_ROOT}/scripts/leadv2-phase8-close.sh\" ${TASK_ID} (writes scorecard/ledger/reflect + gates verify). To override: LEADV2_SKIP_CLOSE_GUARD=1" \
-  '{decision:"block", reason:$reason}'
-exit 2
+  '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}'
+exit 0

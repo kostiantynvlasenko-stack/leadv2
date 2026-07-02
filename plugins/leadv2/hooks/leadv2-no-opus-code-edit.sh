@@ -11,6 +11,10 @@ case "$MODE" in
 esac
 
 INPUT=$(cat)
+# Subagents (e.g. developer-sonnet) must not be blocked by this lead-only gate;
+# hook input carries agent_type only when invoked from within a subagent.
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // ""' 2>/dev/null)
+[ -n "$AGENT_TYPE" ] && exit 0
 FILE=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.path // ""' 2>/dev/null)
 [ -z "$FILE" ] && exit 0
 

@@ -11,8 +11,8 @@ case "$MODE" in
   *) exit 0 ;;
 esac
 
-COUNTER="/tmp/.pe-opus-reads-$PPID"
-DELEGATED="/tmp/.pe-delegated"
+COUNTER="/tmp/.lv2-opus-reads-$PPID"
+DELEGATED="/tmp/.lv2-delegated-$PPID"
 GRAPH_MARKER="/tmp/cbm-graph-used-$PPID"
 
 [ -f "$DELEGATED" ] && exit 0
@@ -36,5 +36,5 @@ echo "$COUNT" > "$COUNTER"
 
 [ "$COUNT" -le "$BUDGET" ] && exit 0
 
-printf '%s' "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"additionalContext\":\"opus-read-budget: $COUNT code reads, budget $BUDGET ($MODE). Use graph-first (search_graph/trace_path) or delegate: Agent(subagent_type=Explore, model=haiku). To lift: multi-model.sh mode \$(pwd) CLAUDE\"}}"
+printf '%s' "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"opus-read-budget: $COUNT code reads, budget $BUDGET ($MODE). Use graph-first (search_graph/trace_path) or delegate: Agent(subagent_type=Explore, model=haiku). To lift: multi-model.sh mode \$(pwd) CLAUDE\"}}"
 exit 0

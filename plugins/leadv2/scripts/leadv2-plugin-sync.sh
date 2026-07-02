@@ -166,7 +166,7 @@ done
 USER_SCRIPTS_TARGET="${HOME}/.claude/scripts"
 log "Syncing -> user-global scripts (e): ${USER_SCRIPTS_TARGET} [leadv2-* only, additive, no --delete]"
 _rsync_or_dry "user-scripts" "${PLUGIN_ROOT}/scripts/" "${USER_SCRIPTS_TARGET}" \
-  --include='leadv2-*' --exclude='*'
+  --include='leadv2-*' --exclude='*' -d
 changed_summary+=("user-scripts")
 
 # ── (c)/(d) Per-project .claude/scripts + .claude/contracts ──────────────────

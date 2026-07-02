@@ -204,3 +204,24 @@ if [[ $RC -ne 0 ]]; then
 fi
 
 printf -- '[%s] %s (task=%s)\n' "$SCRIPT_NAME" "$RESULT" "$TASK_ID" >&2
+
+# ── [PHASE-SYNC-01] Best-effort active.yaml phase update ─────────────────────
+# When the atomic write records a "phase" field, mirror it into active.yaml so
+# the session row's phase stays current (not frozen at "intake" all session).
+# Non-fatal: runs in a subshell; errors emit WARN to stderr; never changes the
+# parent script's exit code or stdout (script has no stdout output).
+if [[ "$FIELD" == "phase" ]]; then
+  (
+    _PHASE_REGISTRY="$(dirname "${BASH_SOURCE[0]}")/leadv2-active-registry.sh"
+    if [[ ! -f "$_PHASE_REGISTRY" ]]; then
+      printf -- '[%s] WARN: registry not found at %s — phase not mirrored to active.yaml\n' \
+        "$SCRIPT_NAME" "$_PHASE_REGISTRY" >&2
+      exit 0
+    fi
+    LEADV2_PROJECT_ROOT="$REPO"
+    # shellcheck source=/dev/null
+    source "$_PHASE_REGISTRY"
+    leadv2_active_update_phase "$TASK_ID" "$VALUE"
+  ) || printf -- '[%s] WARN: active.yaml phase update failed (non-fatal)\n' "$SCRIPT_NAME" >&2
+fi
+# ── end phase sync ────────────────────────────────────────────────────────────

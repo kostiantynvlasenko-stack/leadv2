@@ -32,7 +32,21 @@ done
 [[ -z "$TASK_BRANCH" ]] && { echo "no task branch (task/ or worktree-) for $LEADV2_TASK_ID" >&2; exit 1; }
 # Rebase the task branch onto origin/main if it is not already a fast-forward (handles stale local main)
 if ! git merge-base --is-ancestor origin/main "$TASK_BRANCH"; then
-  git rebase origin/main "$TASK_BRANCH" || { echo "rebase onto origin/main conflict — resolve manually" >&2; exit 1; }
+  # Phase 6 ExitWorktree keeps the task branch checked out in a worktree ->
+  # `git rebase origin/main "$TASK_BRANCH"` from this (main) checkout fails with
+  # "already checked out". Detect that worktree and rebase in-place instead.
+  WT_PATH=""
+  while IFS= read -r _line; do
+    case "$_line" in
+      "worktree "*) _cur="${_line#worktree }" ;;
+      "branch refs/heads/$TASK_BRANCH") WT_PATH="$_cur" ;;
+    esac
+  done < <(git worktree list --porcelain)
+  if [[ -n "$WT_PATH" ]]; then
+    git -C "$WT_PATH" rebase origin/main || { echo "rebase onto origin/main conflict — resolve manually" >&2; exit 1; }
+  else
+    git rebase origin/main "$TASK_BRANCH" || { echo "rebase onto origin/main conflict — resolve manually" >&2; exit 1; }
+  fi
 fi
 git checkout main 2>/dev/null || true
 git pull --ff-only origin main || { echo "main moved during task — manual rebase needed"; exit 1; }

@@ -29,13 +29,28 @@ esac
 CWD="$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
 [[ -z "$CWD" ]] && CWD="$PWD"
 
-PROJECT_ROOT="${CLAUDE_PROJECT_ROOT:-$(cd "$CWD" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || echo "$CWD")}"
+PROJECT_ROOT="${CLAUDE_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-$(cd "$CWD" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || echo "$CWD")}}"
 POLICY="$PROJECT_ROOT/.claude/leadv2-overrides/codex-policy.yaml"
 
 # No policy file, or codex_enabled not true -> stay silent (this repo hasn't opted in).
 [[ -f "$POLICY" ]] || exit 0
 grep -qE '^[[:space:]]*codex_enabled:[[:space:]]*true' "$POLICY" 2>/dev/null || exit 0
 
-echo "[leadv2-codex-first-nudge] REMINDER: codex_enabled: true in $POLICY -- consider routing this task (subagent_type=$SUBTYPE) to Codex first (codex-task.sh) before Claude quota. See docs/model-routing.md." >&2
+REMINDER="[leadv2-codex-first-nudge] REMINDER: codex_enabled: true in $POLICY -- consider routing this task (subagent_type=$SUBTYPE) to Codex first (codex-task.sh) before Claude quota. See docs/model-routing.md."
+echo "$REMINDER" >&2
+
+# ALSO emit stdout JSON: a stderr-only line on an allow decision is never
+# injected into model context (its "audience" was never actually the model).
+# additionalContext on an allow decision IS surfaced to the model.
+python3 -c "
+import json, sys
+print(json.dumps({
+    'hookSpecificOutput': {
+        'hookEventName': 'PreToolUse',
+        'permissionDecision': 'allow',
+        'additionalContext': sys.argv[1],
+    }
+}))
+" "$REMINDER"
 
 exit 0

@@ -18,7 +18,8 @@ Usage: $SCRIPT_NAME --name <worktree-name> [--force]
   --force          Remove even if worktree has uncommitted or untracked changes
   --sweep-merged   Remove all .claude/worktrees/agent-<hex> worktrees whose
                    branches are fully merged into the default branch.
-                   Unmerged worktrees and the current CWD worktree are kept.
+                   Unmerged, dirty (uncommitted changes), and the current CWD
+                   worktree are kept. Dirty worktrees print KEPT (dirty-uncommitted).
 EOF
   exit 1
 }
@@ -86,6 +87,14 @@ if [[ "$SWEEP_MERGED" -eq 1 ]]; then
 
     # Check if branch is fully merged into default branch
     if git -C "$REPO_ROOT" merge-base --is-ancestor "$wt_branch" "$DEFAULT_BRANCH" 2>/dev/null; then
+      # Dirty-guard: never destroy uncommitted files in a merged worktree.
+      # These are exactly the worktrees that pile up — dirty = not cleanly closed.
+      _dirty="$(git -C "$wt_path" status --porcelain 2>/dev/null || true)"
+      if [[ -n "$_dirty" ]]; then
+        log_info "KEPT (dirty-uncommitted): $wt_path  branch=${wt_branch}"
+        kept=$(( kept + 1 ))
+        continue
+      fi
       log_info "REMOVED (merged): $wt_path  branch=${wt_branch}"
       git -C "$REPO_ROOT" worktree remove --force "$wt_path" 2>/dev/null || true
       git -C "$REPO_ROOT" branch -D "$wt_branch" 2>/dev/null || true
