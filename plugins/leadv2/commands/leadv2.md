@@ -156,6 +156,19 @@ deliverable as `<name>.full.md` instead of `<name>.md`.
 
 ---
 
+# Session durability — journal discipline (LONG-SESSION-01)
+
+Principle: **context is cache, disk is truth.** Sessions run for days with many tasks and many /compact; every open thread must be restorable from disk in one read.
+
+1. **Per-task journal** `docs/leadv2/tasks/<task-id>/journal.md` — append ONE line at every decision, finding, or error:
+   `bash ${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-journal.sh append <task-id> <decision|finding|error|note> "one sentence"`.
+   Phase entries are automatic (state-atomic-write pulse). Cheap: 1 line per event, not prose.
+2. **Non-task threads** (founder follow-ups, pending questions, live bg jobs) → maintain `docs/leadv2/open-threads.md` (lead-editable md, one line per thread). Prune resolved lines at every Phase 8 close.
+3. **Compact is free**: PreCompact snapshots ALL open tasks (journal tails → pre-compact-resume.md each); PostCompact re-injects active task + journal tail + other open tasks + open-threads (capped 60 lines). Trust the reinject — don't re-derive state from scratch after compact.
+4. **Soft norm**: ≥2 task closes in one session → start a NEW session for the next task (phase8-close prints the SESSION-HYGIENE advisory). A 4th-generation compact summary degrades even with perfect journals.
+
+---
+
 # Hard bans
 
 - **No code** on `.py`/`.sh`/`.ts`/`.tsx`/`.sql`/migrations. Ever.

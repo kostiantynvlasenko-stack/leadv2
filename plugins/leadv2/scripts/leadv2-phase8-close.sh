@@ -529,5 +529,37 @@ else
 fi
 # ── end worktree sweep ────────────────────────────────────────────────────────
 
+# ── [LONG-SESSION-01] Session-close advisory ─────────────────────────────────
+# Tracks closes-per-session via a durable-pid counter file (mirrors the
+# .learn-close-counter tmp+mv pattern). At 2+ closes in one session, recommend
+# starting a fresh session — the journal layer makes resume free, so there is
+# no reason to keep compacting a long-running session. Non-fatal; never blocks close.
+_SESSION_PID="$(
+  {
+    if [[ -f "$_REGISTRY" ]]; then
+      # shellcheck source=/dev/null
+      source "$_REGISTRY" 2>/dev/null || true
+    fi
+    if declare -F _lv2_durable_pid >/dev/null 2>&1; then
+      _lv2_durable_pid
+    else
+      printf -- '%s' "$PPID"
+    fi
+  } || printf -- '%s' "$PPID"
+)"
+[[ "$_SESSION_PID" =~ ^[0-9]+$ ]] || _SESSION_PID="$PPID"
+_SESSION_STATE_DIR="${HOME}/.claude/state/leadv2"
+mkdir -p "$_SESSION_STATE_DIR" 2>/dev/null || true
+_SESSION_COUNTER_FILE="${_SESSION_STATE_DIR}/session-${_SESSION_PID}.closes"
+_session_prev=$(cat "$_SESSION_COUNTER_FILE" 2>/dev/null || echo 0)
+[[ "$_session_prev" =~ ^[0-9]+$ ]] || _session_prev=0
+_session_close_count=$(( _session_prev + 1 ))
+printf -- '%d\n' "$_session_close_count" > "${_SESSION_COUNTER_FILE}.tmp" \
+  && mv "${_SESSION_COUNTER_FILE}.tmp" "$_SESSION_COUNTER_FILE" || true
+if [[ "$_session_close_count" -ge 2 ]]; then
+  log_info "SESSION-HYGIENE: ${_session_close_count} closes this session — recommend starting a NEW session for the next task (journal layer makes resume free)"
+fi
+# ── end session-close advisory ────────────────────────────────────────────────
+
 log_info "Phase 8 close complete for ${TASK_ID} (YAML: ${YAML_PATH})"
 exit 0

@@ -222,6 +222,8 @@ if [[ "$FIELD" == "phase" ]]; then
     # shellcheck source=/dev/null
     source "$_PHASE_REGISTRY"
     leadv2_active_update_phase "$TASK_ID" "$VALUE"
+    # [LONG-SESSION-01] Auto phase journal entry — non-fatal, never affects exit code.
+    bash "${BASH_SOURCE[0]%/*}/leadv2-journal.sh" append "$TASK_ID" phase "$VALUE" || true
   ) || printf -- '[%s] WARN: active.yaml phase update failed (non-fatal)\n' "$SCRIPT_NAME" >&2
 fi
 # ── end phase sync ────────────────────────────────────────────────────────────
