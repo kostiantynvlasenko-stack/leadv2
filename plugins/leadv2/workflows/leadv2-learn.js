@@ -203,9 +203,22 @@ if (aboveThreshold.length === 0) {
   }
 }
 
+// synth stages: try top model, fall back on null/error (fable sunsets ~2026-07-07)
+async function synthAgent(prompt, opts = {}) {
+  const chain = [...new Set([opts.model || 'fable', 'opus', 'sonnet'])]
+  for (const m of chain) {
+    try {
+      const r = await agent(prompt, { ...opts, model: m })
+      if (r !== null) return r
+    } catch (e) { /* fall through */ }
+    log(`synthAgent: ${m} unavailable, falling back`)
+  }
+  return null
+}
+
 phase('Propose')
 await emitLedger('phase_enter', { phase: 'Propose', above_threshold: aboveThreshold.length })
-const proposal = await agent(
+const proposal = await synthAgent(
   `Given these recurring leadv2 signals (all have count >= ${SYNTH_THRESHOLD} — threshold enforced), propose CONCRETE, minimal tuning. ` +
   `Recurring (above threshold): ${JSON.stringify(aboveThreshold)}.\n` +
   `Top-K exemplars from solutions archive (use as positive examples — don't repeat what worked): ${JSON.stringify(safeExemplars.exemplars)}.\n` +
@@ -215,7 +228,7 @@ const proposal = await agent(
   `Include class_key in each proposal (same as the signal's class_key) for threshold-tracking. ` +
   `Then WRITE the proposal to ${OUT} as a governance markdown ` +
   `(status: pending — NOT auto-applied; founder or auto-approve decides). Return the proposals[].`,
-  { label: 'propose', phase: 'Propose', model: 'sonnet', effort: 'medium', schema: PROPOSAL_SCHEMA })
+  { label: 'propose', phase: 'Propose', model: 'fable', effort: 'medium', schema: PROPOSAL_SCHEMA })
 await emitLedger('phase_exit', { phase: 'Propose', proposals_count: (proposal && proposal.proposals) ? proposal.proposals.length : 0 })
 
 // ── Shadow-Emit phase (D3 / G3c + C1/C2 dual-memory) ────────────────────────

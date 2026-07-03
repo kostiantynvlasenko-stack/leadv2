@@ -60,6 +60,19 @@ async function emitLedger(event, extra) {
   try { await bash(`_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`) } catch (_) {}
 }
 
+// synth stages: try top model, fall back on null/error (fable sunsets ~2026-07-07)
+async function synthAgent(prompt, opts = {}) {
+  const chain = [...new Set([opts.model || 'fable', 'opus', 'sonnet'])]
+  for (const m of chain) {
+    try {
+      const r = await agent(prompt, { ...opts, model: m })
+      if (r !== null) return r
+    } catch (e) { /* fall through */ }
+    log(`synthAgent: ${m} unavailable, falling back`)
+  }
+  return null
+}
+
 phase('Generate')
 await emitLedger('phase_enter', { phase: 'Generate' })
 const gens = []
@@ -76,13 +89,13 @@ log(`Generate: ${ideas.length}/${N} candidate ideas`)
 
 phase('Judge')
 await emitLedger('phase_enter', { phase: 'Judge' })
-let judged = await agent(
+let judged = await synthAgent(
   `Score and cluster these ${ideas.length} candidate solutions for task ${TASK_ID}. ` +
   `Score each 0-10 (10=best): feasibility(0-4) + novelty(0-3) + blast-radius(0-3, higher=safer). ` +
   `Flag traps (plausible-but-doomed, trap=true). Recommend ONE (or a synthesis) and say why. ` +
   `Also write a short divergence.md to ${OUT} with the ranked set.\n` +
   `Candidates: ${JSON.stringify(ideas)}`,
-  { label: 'judge', phase: 'Judge', agentType: 'critic', model: 'sonnet', effort: 'high', schema: JUDGE_SCHEMA })
+  { label: 'judge', phase: 'Judge', agentType: 'critic', model: 'fable', effort: 'high', schema: JUDGE_SCHEMA })
 if (judged === null) {
   log('Judge returned null — generating fallback summary via haiku')
   judged = await agent(

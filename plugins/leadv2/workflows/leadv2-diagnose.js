@@ -110,15 +110,28 @@ const traceResults = (await parallel(evidenceAgents)).filter(Boolean)
 const allHypotheses = traceResults.flatMap(r => r.hypotheses || [])
 log(`Trace: ${traceResults.length}/${clusters.length} clusters returned, ${allHypotheses.length} total hypotheses`)
 
+// synth stages: try top model, fall back on null/error (fable sunsets ~2026-07-07)
+async function synthAgent(prompt, opts = {}) {
+  const chain = [...new Set([opts.model || 'fable', 'opus', 'sonnet'])]
+  for (const m of chain) {
+    try {
+      const r = await agent(prompt, { ...opts, model: m })
+      if (r !== null) return r
+    } catch (e) { /* fall through */ }
+    log(`synthAgent: ${m} unavailable, falling back`)
+  }
+  return null
+}
+
 // [D4] Phase 3: sonnet synthesizer (unchanged interface — backward-compat)
 phase('Reduce')
 await emitLedger('phase_enter', { phase: 'Reduce' })
-const result = await agent(
+const result = await synthAgent(
   `Merge and reduce these ${allHypotheses.length} hypotheses from ${traceResults.length} symptom clusters into a single root cause verdict for bug: ${BUG_BRIEF}.\n` +
   `Hypotheses: ${JSON.stringify(allHypotheses)}\n` +
   `Pick the most likely root_cause (high-confidence wins; corroboration across clusters upgrades confidence). ` +
   `Set evidence_files to specific files/tables implicated. Provide a concrete fix_hint. List alternates for any competing hypotheses.`,
-  { label: 'reduce', phase: 'Reduce', model: 'sonnet', effort: 'medium', schema: ROOT_CAUSE_SCHEMA })
+  { label: 'reduce', phase: 'Reduce', model: 'fable', effort: 'medium', schema: ROOT_CAUSE_SCHEMA })
 
 return result || {
   root_cause: 'Reduce agent returned null — review raw hypotheses manually',

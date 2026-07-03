@@ -26,7 +26,7 @@ const TS = a.ts || (await bash("date -u +%Y-%m-%dT%H:%M:%SZ")).trim()
 // args.models absent (or LEADV2_ROUTE_BANDIT != 1) => falls back to existing pinned defaults.
 // Flag-off guarantee: if args.models is not provided, model values are identical to pre-BANDIT-WIRE-01.
 const _MODELS = (a.models && typeof a.models === 'object') ? a.models : {}
-const CRITIC_MODEL = _MODELS.critic || (SAFETY ? 'opus' : 'sonnet')
+const CRITIC_MODEL = _MODELS.critic || (SAFETY ? 'fable' : 'sonnet')
 const VERIFY_MODEL = _MODELS.verify || 'sonnet'
 const FINDINGS_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -69,12 +69,25 @@ async function emitLedger(event, extra) {
   try { await bash(`_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`) } catch (_) {}
 }
 
+// synth stages: try top model, fall back on null/error (fable sunsets ~2026-07-07)
+async function synthAgent(prompt, opts = {}) {
+  const chain = [...new Set([opts.model || 'fable', 'opus', 'sonnet'])]
+  for (const m of chain) {
+    try {
+      const r = await agent(prompt, { ...opts, model: m })
+      if (r !== null) return r
+    } catch (e) { /* fall through */ }
+    log(`synthAgent: ${m} unavailable, falling back`)
+  }
+  return null
+}
+
 phase('Review')
 await emitLedger('phase_enter', { phase: 'Review' })
 // [COST-LEVERS-01] Codex is the PRIMARY adversarial brain for Review (Lever 3). Agent critic is the fallback when CODEX_ON=false.
 // Codex runs first (unshifted to front) for highest signal-to-token ratio; critic always present as fallback.
 const reviewers = [
-  () => agent(
+  () => synthAgent(
     `Adversarial code review of the diff at ${DIFF}. Brief: ${MISSION}. Read the diff yourself (git diff ${BASE}). Report findings: correctness bugs, type/RLS gaps, N+1, missing tests, design-system violations. Severity-tag each. Minimal-diff context only.`,
     { label: 'critic', phase: 'Review', agentType: 'critic', model: CRITIC_MODEL, effort: 'high', schema: FINDINGS_SCHEMA }),
   () => agent(

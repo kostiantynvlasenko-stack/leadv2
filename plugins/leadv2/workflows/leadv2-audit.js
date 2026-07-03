@@ -16,6 +16,16 @@ else { a = args }
 a = a || {}
 if (a.probe) return { probe_ok: true, parsed_args: a }
 
+const GLM_OK = (args && args.glmInWorkflows) !== false
+async function glmBuild(missionText, label, phase) {
+  const r = await agent(
+    `You are a GLM dispatch driver. Steps: (1) write the mission below to a temp file; (2) run: ~/.claude/scripts/glm-coder.sh run <tempfile> (blocking; read the script's usage first with head -40 if unsure of arg order); (3) report. Return JSON {glm_ok: boolean, summary: string (<=80 words), out_file: string}. glm_ok=false if the script is missing, exits non-zero, or produced no edits.\n---MISSION---\n${missionText}`,
+    { model: 'haiku', effort: 'low', label, phase,
+      schema: { type: 'object', properties: { glm_ok: {type:'boolean'}, summary: {type:'string'}, out_file: {type:'string'} }, required: ['glm_ok','summary'] } }
+  )
+  return r
+}
+
 const MODE = a.mode || 'personas'
 const REPO_DIR = a.repoDir || '.'
 const MAX_JUDGE = typeof a.maxJudge === 'number' ? a.maxJudge : 8
@@ -137,8 +147,8 @@ Return: real (true=confirmed bug, false=probe artifact/race condition), root_cau
     await emitLedger('phase_enter', { phase: 'Fix' })
     const fixCandidates = confirmed.slice(0, 4)
 
-    const fixResults = (await parallel(fixCandidates.map(item => () => agent(
-      `You are a developer fixing a confirmed persona-engine bug.
+    const fixResults = (await parallel(fixCandidates.map(item => async () => {
+      const missionText = `You are a developer fixing a confirmed persona-engine bug.
 Persona: ${item.row.persona_id}
 Invariant: ${item.row.invariant}
 Root cause: ${item.verdict.root_cause}
@@ -146,9 +156,15 @@ Evidence: ${item.verdict.evidence}
 Fix hint: ${item.verdict.fix_hint}
 
 Apply a minimal-diff fix. Read the relevant file(s) first. Do NOT commit.
-Return a one-sentence summary of what you changed.`,
-      { label: `fix:${item.row.persona_id}:${item.row.invariant}`, phase: 'Fix', model: 'sonnet', effort: 'medium' })
-    ))).filter(Boolean)
+Return a one-sentence summary of what you changed.`
+      const label = `fix:${item.row.persona_id}:${item.row.invariant}`
+      if (GLM_OK) {
+        const g = await glmBuild(missionText, label, 'Fix')
+        if (g && g.glm_ok) return g.summary
+        log(`glmBuild fallback: GLM unavailable for ${label}`)
+      }
+      return agent(missionText, { label, phase: 'Fix', model: 'sonnet', effort: 'medium' })
+    }))).filter(Boolean)
 
     const reprobeResult = await agent(
       `Re-run the persona audit for the specific invariants that were just fixed.

@@ -16,6 +16,16 @@ else { a = args }
 a = a || {}
 if (a.probe) return { probe_ok: true, parsed_args: a }
 
+const GLM_OK = (args && args.glmInWorkflows) !== false
+async function glmBuild(missionText, label, phase) {
+  const r = await agent(
+    `You are a GLM dispatch driver. Steps: (1) write the mission below to a temp file; (2) run: ~/.claude/scripts/glm-coder.sh run <tempfile> (blocking; read the script's usage first with head -40 if unsure of arg order); (3) report. Return JSON {glm_ok: boolean, summary: string (<=80 words), out_file: string}. glm_ok=false if the script is missing, exits non-zero, or produced no edits.\n---MISSION---\n${missionText}`,
+    { model: 'haiku', effort: 'low', label, phase,
+      schema: { type: 'object', properties: { glm_ok: {type:'boolean'}, summary: {type:'string'}, out_file: {type:'string'} }, required: ['glm_ok','summary'] } }
+  )
+  return r
+}
+
 const TASK_ID = a.taskId || 'adhoc'
 const FEATURE = a.featureName || 'feature'
 const PREPROD_URL = a.preprodUrl || ''
@@ -154,8 +164,8 @@ const fileGroups = [...fileMap.entries()].slice(0, MAX_BUILD_GROUPS)
 const buildResults = fileGroups.length > 0
   ? (await parallel(fileGroups.map(([file, findings], idx) => {
       const offLimits = fileGroups.filter((_, i) => i !== idx).map(([f]) => f)
-      return () => agent(
-        `You are a developer fixing UI issues for task ${TASK_ID}, ${FEATURE}.
+      return async () => {
+        const missionText = `You are a developer fixing UI issues for task ${TASK_ID}, ${FEATURE}.
 Your assigned file: ${file}
 Your findings to fix:
 ${findings.map(f => `  [${f.severity}] ${f.id}: ${f.title} — element: ${f.element} — fix: ${f.fix} (effort: ${f.effort})`).join('\n')}
@@ -167,8 +177,15 @@ Instructions:
 1. Read the file(s) in your scope first.
 2. Apply each fix with minimal diff.
 3. Run type-check on your subset: npx tsc --noEmit (or pnpm type-check if available in ${REPO_DIR}).
-4. Do NOT commit. Return a summary of changes made per finding_id.`,
-        { label: `build:group-${idx}`, phase: 'Build', model: 'sonnet' })
+4. Do NOT commit. Return a summary of changes made per finding_id.`
+        const label = `build:group-${idx}`
+        if (GLM_OK) {
+          const g = await glmBuild(missionText, label, 'Build')
+          if (g && g.glm_ok) return g.summary
+          log(`glmBuild fallback: GLM unavailable for ${label}`)
+        }
+        return agent(missionText, { label, phase: 'Build', model: 'sonnet' })
+      }
     }
   ))).filter(Boolean)
   : []
@@ -206,15 +223,25 @@ while (round <= MAX_ROUNDS) {
   const failedIds = new Set(failedChecks.map(c => c.finding_id))
   const failedFindings = p0p1.filter(f => failedIds.has(f.id))
 
-  await agent(
-    `You are a developer fixing remaining FAIL items for task ${TASK_ID}, ${FEATURE}, iteration round ${round}.
+  {
+    const missionText = `You are a developer fixing remaining FAIL items for task ${TASK_ID}, ${FEATURE}, iteration round ${round}.
 ${round >= 2 ? 'ROUND 2 HINT: these items failed re-verify — investigate more deeply. Check if the selector is correct, the component is actually rendering, or if there is a Vercel cache issue. Read the relevant source files before assuming the fix was applied.' : ''}
 
 Failed items to fix:
 ${failedFindings.map(f => `  [${f.severity}] ${f.id}: ${f.title} — element: ${f.element} — fix: ${f.fix}`).join('\n')}
 
-Apply targeted minimal-diff fixes. Do NOT commit. Return summary per finding_id.`,
-    { label: `iterate-fix:round-${round}`, phase: 'Iterate', model: 'sonnet' })
+Apply targeted minimal-diff fixes. Do NOT commit. Return summary per finding_id.`
+    const label = `iterate-fix:round-${round}`
+    if (GLM_OK) {
+      const g = await glmBuild(missionText, label, 'Iterate')
+      if (!g || !g.glm_ok) {
+        log(`glmBuild fallback: GLM unavailable for ${label}`)
+        await agent(missionText, { label, phase: 'Iterate', model: 'sonnet' })
+      }
+    } else {
+      await agent(missionText, { label, phase: 'Iterate', model: 'sonnet' })
+    }
+  }
 
   const reVerify = await agent(
     `Re-verify only the previously-failed items for task ${TASK_ID}, ${FEATURE} at ${PREPROD_URL}.
