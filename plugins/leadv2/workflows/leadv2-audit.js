@@ -16,7 +16,7 @@ else { a = args }
 a = a || {}
 if (a.probe) return { probe_ok: true, parsed_args: a }
 
-const GLM_OK = (args && args.glmInWorkflows) !== false
+const GLM_OK = (a && a.glmInWorkflows) !== false
 async function glmBuild(missionText, label, phase) {
   const r = await agent(
     `You are a GLM dispatch driver. Steps: (1) write the mission below to a temp file; (2) run: ~/.claude/scripts/glm-coder.sh run <tempfile> (blocking; read the script's usage first with head -40 if unsure of arg order); (3) report. Return JSON {glm_ok: boolean, summary: string (<=80 words), out_file: string}. glm_ok=false if the script is missing, exits non-zero, or produced no edits.\n---MISSION---\n${missionText}`,

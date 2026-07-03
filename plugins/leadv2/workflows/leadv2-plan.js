@@ -135,7 +135,7 @@ await emitLedger('phase_enter', { phase: 'Plan' })
 // [F5+F8] Dynamic spawns from recommended_roles + context envelope injected into architect prompt
 const spawns = []
 if (recommendedRoles.includes('architect')) {
-  spawns.push(() => agent(
+  spawns.push(() => synthAgent(
     `Architect the plan for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. Read ${MISSION_PATH} + the repo. ` +
     `Produce decisions[], plan_steps[] (minimal-diff oriented), off_limits[], risks[]. No code, no full-file rewrites.` +
     contextEnvelope,
