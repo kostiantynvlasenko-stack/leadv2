@@ -168,11 +168,12 @@ suggested_action: "spawn_developer_retry | spawn_architect_alt | propose_escalat
 - RETRY_SAME after 2 failures (recovery mode). That's a loop.
 - ESCALATE without a specific founder question (recovery mode).
 
-## Legacy skills
+## Legacy skills (removed)
 
-`leadv2-judge-review`, `leadv2-judge-question`, `leadv2-judge-recovery` are
-deprecated since 2026-05-04 (PO-063). They remain as stubs for 2 weeks.
-Prefer this skill with the appropriate `--mode` flag.
+`leadv2-judge-review` and `leadv2-judge-recovery` were deprecated 2026-05-04
+(PO-063) and deleted 2026-07-03 once all callers were migrated. `leadv2-judge-question`
+never existed as a separate skill (dangling reference, fixed same date).
+All callers now use this skill with the appropriate `mode` flag.
 
 To migrate a caller:
 1. Replace `Skill(leadv2-judge-<X>)` with `Skill(leadv2-judge)` + `mode: <X>` in mission context.

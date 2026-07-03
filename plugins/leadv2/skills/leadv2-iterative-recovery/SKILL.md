@@ -17,7 +17,7 @@ allowed-tools:
 - ≥3 sequential hotfixes already applied to the same symptom
 
 ## Hard caps
-- **Max 5 iterations** per task. Iteration 6 → mandatory `leadv2-judge-recovery` escalation with `reason: iteration_cap_reached`. Lead does NOT decide to continue itself.
+- **Max 5 iterations** per task. Iteration 6 → mandatory `Skill(leadv2-judge) mode=recovery` escalation with `reason: iteration_cap_reached`. Lead does NOT decide to continue itself.
 - Each blocker gets its own commit. Never batch fixes targeting different layers in one commit.
 - Iteration N+1 cannot start until verify-probe for iteration N returns GREEN or the blocker is conclusively named.
 
@@ -81,7 +81,7 @@ bash scripts/leadv2-noprogress-check.sh \
 ```
 
 - Exit 0 (`PROGRESS`) → continue to next iteration normally.
-- Exit 1 (`STALLED`) → stop layer-peel immediately; escalate to founder via `ask-lead.sh <task-id> "iterative-recovery stalled: same root_cause <slug> repeated <N> times with no progress. Recommend: escalate to leadv2-judge-recovery or abort."`. Do NOT attempt another fix iteration.
+- Exit 1 (`STALLED`) → stop layer-peel immediately; escalate to founder via `ask-lead.sh <task-id> "iterative-recovery stalled: same root_cause <slug> repeated <N> times with no progress. Recommend: escalate to Skill(leadv2-judge) mode=recovery or abort."`. Do NOT attempt another fix iteration.
 
 > **Signature independence:** the `root_cause` slug passed here is distinct from the `dimension:severity` signature used by the review workflow's stall-check. Always use separate JSONL paths per tracker: `recovery-sig.jsonl` for this recovery loop, and a different file for the review workflow — mixing them produces false STALLED/PROGRESS signals.
 
@@ -105,5 +105,5 @@ bash scripts/leadv2-noprogress-check.sh \
 ## Escape hatch
 After 5 iterations OR 3h wall-clock (whichever comes first), even if blockers remain:
 1. Write `iterative-blockers.yaml` with the full chain found
-2. Call `Skill(skill="leadv2-judge-recovery")` with the chain as context
+2. Call `Skill(leadv2-judge)` with `mode=recovery` and the chain as context
 3. Judge decides: continue / architect-alt / abort. Lead does not self-decide.

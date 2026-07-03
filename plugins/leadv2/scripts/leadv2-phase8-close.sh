@@ -314,7 +314,19 @@ if [[ "${LEADV2_SCORECARD_ON_CLOSE:-1}" == "1" ]]; then
   fi
   if [[ -x "$SCORECARD_WRITE_SCRIPT" ]]; then
     log_info "Writing scorecard row for ${TASK_ID}..."
+    _SC_FILE="${PROJECT_ROOT}/docs/leadv2/scorecard.jsonl"
+    _SC_LINES_BEFORE=$(wc -l < "$_SC_FILE" 2>/dev/null || echo 0)
     LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" bash "$SCORECARD_WRITE_SCRIPT" --task-id "$TASK_ID"       || log_error "[scorecard] scorecard-write failed — continuing (non-blocking)"
+    _SC_LINES_AFTER=$(wc -l < "$_SC_FILE" 2>/dev/null || echo 0)
+    # LOUD non-growth check (frozen-scorecard incident: script exited 0/logged-and-swallowed
+    # while scorecard.jsonl stayed byte-identical for weeks). Idempotent re-close of an
+    # already-scored task_id is a legitimate no-growth case, so this is a log, not a gate.
+    if [[ "$_SC_LINES_AFTER" -le "$_SC_LINES_BEFORE" ]]; then
+      log_error "[scorecard] scorecard.jsonl did NOT grow for ${TASK_ID} (before=${_SC_LINES_BEFORE} after=${_SC_LINES_AFTER}) — write may have silently failed or task_id was already recorded"
+      _SC_FAILURES="${PROJECT_ROOT}/docs/leadv2/.scorecard-write-failures"
+      mkdir -p "$(dirname "$_SC_FAILURES")" 2>/dev/null || true
+      printf -- '%s %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$TASK_ID" "no_growth:before=${_SC_LINES_BEFORE}:after=${_SC_LINES_AFTER}" >> "$_SC_FAILURES" 2>/dev/null || true
+    fi
   else
     log_info "[skip] leadv2-scorecard-write.sh not found — skipping scorecard write"
   fi

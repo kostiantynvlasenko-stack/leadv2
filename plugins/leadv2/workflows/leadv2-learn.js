@@ -1,17 +1,4 @@
-// ── C3: Ledger emit helper ────────────────────────────────────────────────────
-// Fire-and-forget: never throws, never blocks workflow on failure.
-// emit(event, extra) appends one JSON line to docs/leadv2/ledger.jsonl.
-async function emitLedger(event, extra) {
-  const ev = Object.assign({ event, task_id: TASK_ID || 'unknown' }, extra || {})
-  const projRoot = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
-  try {
-    await bash(
-      `_EMIT="${projRoot}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`
-    )
-  } catch (_) { /* fire-and-forget */ }
-}
-
-export const meta = {
+export const meta = { // MUST be first statement — runtime rejects file otherwise
   name: 'leadv2-learn',
   description: 'Learning-aggregation workflow: consume accumulated review/plan signatures + immune patterns, detect recurring failure modes, propose concrete tuning (prompts/routing/skill-promotion). Writes a GOVERNANCE proposal — never auto-applies. Model-pinned.',
   whenToUse: 'Periodically or at Phase 8 Close. Turns per-task signatures into compounding system improvement ("the system gets smarter"). Founder/auto-approve applies proposals.',
@@ -21,6 +8,7 @@ export const meta = {
     { title: 'Shadow-Emit', detail: 'classify risk_level + emit shadow proposals to docs/leadv2/shadow/proposals/' },
   ],
 }
+
 let a
 if (typeof args === 'string') { try { a = JSON.parse(args) } catch { a = { problem: args } } }
 else { a = args }
@@ -30,8 +18,22 @@ const TASK_ID = a.task_id || ''
 const OUT = `docs/leadv2/learning-proposals/${LABEL}.md`
 // C-1: task_class from args; avoids undefined cap-result reference
 const TASK_CLASS = a.task_class || 'general'
-// H-1: single init-time timestamp — replay-safe on workflow resume
-const TS = a.ts || new Date().toISOString()
+// H-1: single init-time timestamp — replay-safe on workflow resume.
+// Workflow runtime throws on Date.now()/argless new Date() — derive stamp via bash() instead.
+const TS = a.ts || (await bash("date -u +%Y-%m-%dT%H:%M:%SZ")).trim()
+
+// ── C3: Ledger emit helper ────────────────────────────────────────────────────
+// Defined AFTER const declarations so TASK_ID is initialized before this closure captures it.
+// Fire-and-forget: never throws, never blocks workflow on failure.
+async function emitLedger(event, extra) {
+  const ev = Object.assign({ event, task_id: TASK_ID || 'unknown' }, extra || {})
+  const projRoot = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
+  try {
+    await bash(
+      `_EMIT="${projRoot}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`
+    )
+  } catch (_) { /* fire-and-forget */ }
+}
 
 // ── B1: SkillOpt threshold (LEADV2_SKILL_SYNTH_THRESHOLD) ────────────────────
 // Env var already defined in settings.json. This wires it mechanically.

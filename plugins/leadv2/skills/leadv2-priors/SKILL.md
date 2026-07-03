@@ -1,6 +1,6 @@
 ---
 name: leadv2-priors
-description: "[internal] Injects relevant slice of leadv2-priors.yaml into classify/plan/build/premortem/llm-judge;…"
+description: "[internal] Use whenever classify, plan, build, review/premortem, or llm-judge needs contextual defaults: loads docs/leadv2-priors.yaml, checks freshness (stale after 7 days), and injects the relevant slice of operator-intuition priors. Not for use during active code writes or mid-task file edits, or on trivial tasks where the injection overhead outweighs the benefit."
 allowed-tools:
   - Read
   - Bash

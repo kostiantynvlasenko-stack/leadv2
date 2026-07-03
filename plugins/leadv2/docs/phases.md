@@ -283,7 +283,7 @@ review_result=$(Workflow('leadv2-review', {
 `Workflow('leadv2-review')` returns `{blocking_count, verdict, findings_path}`. Lead reads `blocking_count`:
 - `blocking_count == 0` → ACCEPT, append findings to followups.md, proceed to Phase 6.
 - `blocking_count >= 1` → spawn developer fix round (same as inline path), call Workflow again (round 2, max).
-- Round cap is enforced by LEAD, not workflow. Round 3+ → `Skill(skill="leadv2-judge-review")`.
+- Round cap is enforced by LEAD, not workflow. Round 3+ → `Skill(leadv2-judge) mode=review`.
 
 **Schema-death fallback (null-check on Workflow return — MANDATORY):** If `review_result` is null/undefined → log to pulse `review-workflow: schema-death, falling back to inline` and fall through to the inline path below.
 
@@ -305,10 +305,10 @@ Parallel in one message:
 **Round cap (HARD):**
 
 - Max 2 codex rounds with developer iteration. Round 3+ is FORBIDDEN.
-- After Round 2 still blocking → **mandatory** `Skill(skill="leadv2-judge-review")`. Judge returns one of: `accept-with-caveats` (move to Deploy with caveats logged) / `architect-alt-approach` (Phase 7 Recovery) / `abort-task` (circuit break + AskUserQuestion).
+- After Round 2 still blocking → **mandatory** `Skill(leadv2-judge) mode=review`. Judge returns one of: `accept-with-caveats` (move to Deploy with caveats logged) / `architect-alt-approach` (Phase 7 Recovery) / `abort-task` (circuit break + AskUserQuestion).
 - Lead does NOT decide between these itself. Lead just dispatches the skill and reads its verdict.
 
-If the lead has already produced `developer-r3.md` or `codex-review-r3.md` for this task, the cap was already missed — call `leadv2-judge-review` immediately and stop spawning developer.
+If the lead has already produced `developer-r3.md` or `codex-review-r3.md` for this task, the cap was already missed — call `Skill(leadv2-judge) mode=review` immediately and stop spawning developer.
 
 
 ---

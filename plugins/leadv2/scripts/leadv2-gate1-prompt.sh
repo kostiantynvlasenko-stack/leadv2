@@ -24,6 +24,21 @@ plan_summary="${3:?plan_summary required}"
 
 log() { printf -- '[gate1] %s\n' "$*" >&2; }
 
+# [D-2] Ledger emit: gate1_decision event — fire-and-forget, never breaks the caller.
+# lv2-ledger-emit.py itself never raises; the `|| true` here is belt-and-suspenders around
+# the python3 invocation and payload build so a missing script/python never blocks Gate 1.
+_gate1_emit_ledger() {
+  local _rc="$1"
+  local _root="${LEADV2_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  local _emit="${_root}/.claude/scripts/lv2-ledger-emit.py"
+  [[ -f "$_emit" ]] || _emit="$HOME/.claude/scripts/lv2-ledger-emit.py"
+  [[ -f "$_emit" ]] || return 0
+  local _payload
+  _payload=$(python3 -c 'import json,sys; print(json.dumps({"event":"gate1_decision","task_id":sys.argv[1],"rc":int(sys.argv[2])}))' "$task_id" "$_rc" 2>/dev/null) || return 0
+  [[ -n "$_payload" ]] && { LEADV2_PROJECT_ROOT="$_root" python3 "$_emit" "$_payload" 2>/dev/null || true; }
+  return 0
+}
+
 # Register task into active.yaml so recovery hooks and pre-compact checkpoint can find it.
 # Uses the active-registry source-able script; falls back to direct YAML write on error.
 _gate1_register_active() {
@@ -127,6 +142,7 @@ if [[ "${LEADV2_DRY_RUN:-0}" == "1" ]]; then
   log "DRY_RUN mode — auto-accepted immediately"
   printf -- 'план: %s. [DRY-RUN — авто-принятие]\n' "$plan_summary"
   _gate1_accept
+  _gate1_emit_ledger 2
   exit 2
 fi
 
@@ -135,6 +151,7 @@ if [[ "${LEADV2_BOT_MODE:-0}" == "1" ]]; then
   log "BOT_MODE — auto-accepted immediately"
   printf -- 'Gate 1: auto-accepted (bot mode). plan: %s\n' "$plan_summary"
   _gate1_accept
+  _gate1_emit_ledger 2
   exit 2
 fi
 
@@ -149,10 +166,12 @@ case "${cls,,}" in
       да|go|y|yes|d)
         log "accepted by founder (heavy)"
         _gate1_accept
+        _gate1_emit_ledger 0
         exit 0
         ;;
       *)
         log "declined by founder"
+        _gate1_emit_ledger 1
         exit 1
         ;;
     esac
@@ -186,14 +205,17 @@ if read -r -t "$timeout_sec" answer 2>/dev/null; then
     да|go|y|yes|d)
       log "accepted by founder"
       _gate1_accept
+      _gate1_emit_ledger 0
       exit 0
       ;;
     n|no|нет)
       log "declined by founder"
+      _gate1_emit_ledger 1
       exit 1
       ;;
     *)
       log "unrecognized input '$answer' — treating as declined"
+      _gate1_emit_ledger 1
       exit 1
       ;;
   esac
@@ -202,5 +224,6 @@ else
   printf -- '\n'
   log "Gate 1 auto-accepted (timeout ${timeout_sec}s)"
   _gate1_accept
+  _gate1_emit_ledger 2
   exit 2
 fi

@@ -32,6 +32,16 @@ log_error() { log "ERROR: $*"; }
 
 : "${LEADV2_PROJECT_ROOT:=$(git -C "$(dirname "$SCRIPT_DIR")" rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
+# FAILURES_FILE lives in the CONSUMING repo (LEADV2_PROJECT_ROOT), never the plugin dir —
+# so a frozen scorecard.jsonl is visible from the same repo whose closes are failing.
+FAILURES_FILE="${LEADV2_PROJECT_ROOT}/docs/leadv2/.scorecard-write-failures"
+log_write_failure() {
+  local _reason="$1"
+  local _tid="${TASK_ID:-unknown}"
+  mkdir -p "$(dirname "$FAILURES_FILE")" 2>/dev/null || true
+  printf -- '%s %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$_tid" "$_reason" >> "$FAILURES_FILE" 2>/dev/null || true
+}
+
 MODE="append"
 TASK_ID=""
 DRY_RUN=0
@@ -47,11 +57,11 @@ while [[ $# -gt 0 ]]; do
       printf -- 'Usage: %s --task-id <id> [--dry-run]\n' "$(basename "$0")" >&2
       printf -- '       %s --task-id <id> --patch --post-deploy-regression 0|1\n' "$(basename "$0")" >&2
       exit 0 ;;
-    *) log_error "unknown arg: $1"; exit 1 ;;
+    *) log_error "unknown arg: $1"; log_write_failure "unknown_arg:$1"; exit 1 ;;
   esac
 done
 
-[[ -z "$TASK_ID" ]] && { log_error "--task-id is required"; exit 1; }
+[[ -z "$TASK_ID" ]] && { log_error "--task-id is required"; log_write_failure "missing_task_id_arg"; exit 1; }
 
 # D6 guard: absent LEADV2_SCORECARD_ON_CLOSE leaves existing flow byte-identical
 if [[ "$MODE" == "append" && "${LEADV2_SCORECARD_ON_CLOSE:-0}" != "1" && "$DRY_RUN" != "1" ]]; then
@@ -70,9 +80,9 @@ ROUTE_DECISIONS_YAML="${HANDOFF_DIR}/route-decisions.yaml"  # [BANDIT-01]
 
 # ── PATCH mode ────────────────────────────────────────────────────────────────
 if [[ "$MODE" == "patch" ]]; then
-  [[ -z "$PATCH_POST_DEPLOY_REGRESSION" ]] && { log_error "--patch requires --post-deploy-regression 0|1"; exit 1; }
+  [[ -z "$PATCH_POST_DEPLOY_REGRESSION" ]] && { log_error "--patch requires --post-deploy-regression 0|1"; log_write_failure "patch_missing_arg"; exit 1; }
   if [[ "$PATCH_POST_DEPLOY_REGRESSION" != "0" && "$PATCH_POST_DEPLOY_REGRESSION" != "1" ]]; then
-    log_error "--post-deploy-regression must be 0 or 1, got: ${PATCH_POST_DEPLOY_REGRESSION}"; exit 4
+    log_error "--post-deploy-regression must be 0 or 1, got: ${PATCH_POST_DEPLOY_REGRESSION}"; log_write_failure "patch_invalid_value:${PATCH_POST_DEPLOY_REGRESSION}"; exit 4
   fi
   PATCH_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   PATCH_JSON="{\"task_id\":\"${TASK_ID}\",\"post_deploy_regression\":${PATCH_POST_DEPLOY_REGRESSION},\"patch_at\":\"${PATCH_AT}\"}"
@@ -81,12 +91,12 @@ if [[ "$MODE" == "patch" ]]; then
     flock -x 9 || { log_error "could not acquire scorecard lock — aborting patch"; exit 1; }
     printf -- '%s\n' "$PATCH_JSON" >> "$SCORECARD_FILE"
     log "patch record appended: task_id=${TASK_ID} post_deploy_regression=${PATCH_POST_DEPLOY_REGRESSION}"
-  ) 9>"$SCORECARD_LOCK"
+  ) 9>"$SCORECARD_LOCK" || { log_write_failure "patch_lock_failed"; exit 1; }
   exit 0
 fi
 
 # ── APPEND mode ───────────────────────────────────────────────────────────────
-[[ ! -f "$SCHEMA_FILE" ]] && { log_error "schema file not found: ${SCHEMA_FILE}"; exit 1; }
+[[ ! -f "$SCHEMA_FILE" ]] && { log_error "schema file not found: ${SCHEMA_FILE}"; log_write_failure "schema_file_missing"; exit 1; }
 
 # Build JSON row via Python; exits 4 on schema violation (D2)
 _py_build_row() {
@@ -117,23 +127,41 @@ def enum_values(n):
     return schema['properties'].get(n, {}).get('enum')
 
 ctx = {}
-if Path(context_path).exists():
+ctx_exists = Path(context_path).exists()
+if ctx_exists:
     try:
         ctx = yaml.safe_load(Path(context_path).read_text()) or {}
     except Exception as e:
         errors.append(f'context.yaml: {e}')
+        ctx_exists = False
 
-task_class = ctx.get('task_class') or ctx.get('class') or 'Standard'
-if isinstance(ctx.get('classification'), dict):
-    task_class = ctx['classification'].get('class', task_class)
+if ctx_exists:
+    task_class = ctx.get('task_class') or ctx.get('class') or 'Standard'
+    if isinstance(ctx.get('classification'), dict):
+        task_class = ctx['classification'].get('class', task_class)
+    arm = ctx.get('arm', None)
+    founder_int = 0
+    if ctx.get('decision_override'):
+        founder_int += 1
+else:
+    # context.yaml missing (worktree-merged closes drop the handoff dir) — fall back to
+    # docs/leadv2/closed/<TASK_ID>.yaml, which exists on every close. Only 'class' overlaps
+    # between the two sources; arm/founder_interventions/cost_estimate exist ONLY in
+    # context.yaml and are left null rather than guessed.
+    errors.append('context.yaml: missing — falling back to closed yaml for task_class')
+    task_class = 'Standard'
+    if Path(closed_path).exists():
+        try:
+            _closed_fb = yaml.safe_load(Path(closed_path).read_text()) or {}
+            task_class = _closed_fb.get('class') or 'Standard'
+        except Exception as e:
+            errors.append(f'closed yaml (fallback): {e}')
+    arm = None
+    founder_int = 0
 
-arm = ctx.get('arm', None)
 if arm not in ('A', 'B', None):
     arm = None
 
-founder_int = 0
-if ctx.get('decision_override'):
-    founder_int += 1
 if env_fi.isdigit():
     founder_int = int(env_fi)
 
@@ -326,8 +354,8 @@ ROW_JSON=$(_py_build_row \
   "$CONTEXT_YAML" "$COSTS_YAML" "$CLOSED_YAML" "$SCHEMA_FILE" \
 ) || {
   rc=$?
-  [[ $rc -eq 4 ]] && { log_error "Schema violation (exit 4) — row not appended"; exit 4; }
-  log_error "Row build failed (exit ${rc})"; exit 1
+  [[ $rc -eq 4 ]] && { log_error "Schema violation (exit 4) — row not appended"; log_write_failure "schema_violation"; exit 4; }
+  log_error "Row build failed (exit ${rc})"; log_write_failure "row_build_failed:rc=${rc}"; exit 1
 }
 
 # R3: WARN when bandit active but no route phases were captured (bandit got no pick)
@@ -349,7 +377,7 @@ fi
 mkdir -p "$(dirname "$SCORECARD_FILE")"
 
 (
-  flock -x 9 || { log_error "could not acquire scorecard lock — aborting"; exit 1; }
+  flock -x 9 || { log_error "could not acquire scorecard lock — aborting"; log_write_failure "append_lock_failed"; exit 1; }
 
   if [[ -f "$SCORECARD_FILE" ]]; then
     if python3 -c "

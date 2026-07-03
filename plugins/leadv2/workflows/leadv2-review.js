@@ -19,8 +19,9 @@ const MISSION = a.missionPath || `docs/handoff/${TASK_ID}/review-mission.md`
 const DIFF = a.diffPath || `/tmp/leadv2-review-${TASK_ID}.diff`
 const CODEX_ON = a.codexEnabled !== false
 const TASK_CLASS = a.taskClass || 'general'
-// H-1: single init-time timestamp — replay-safe on workflow resume
-const TS = a.ts || new Date().toISOString()
+// H-1: single init-time timestamp — replay-safe on workflow resume.
+// Workflow runtime throws on Date.now()/argless new Date() — derive stamp via bash() instead.
+const TS = a.ts || (await bash("date -u +%Y-%m-%dT%H:%M:%SZ")).trim()
 // [BANDIT-WIRE-01] Consume bandit model selections from args.models (set by lead before Workflow call).
 // args.models absent (or LEADV2_ROUTE_BANDIT != 1) => falls back to existing pinned defaults.
 // Flag-off guarantee: if args.models is not provided, model values are identical to pre-BANDIT-WIRE-01.

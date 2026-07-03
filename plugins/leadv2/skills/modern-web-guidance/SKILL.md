@@ -1,7 +1,7 @@
 ---
 name: modern-web-guidance
 description: |
-  [DEPRECATED 2026-06-14: trigger condition exists but zero observed firings; auto-injected via agent_hint instead] Search tool for modern web development best practices from Google Chrome. MANDATORY: Execute FIRST for all HTML/CSS and clientside JS tasks. Do NOT skip — web APIs evolve rapidly and training weights contain obsolete patterns.
+  Search tool for modern web development best practices from Google Chrome. MANDATORY: Execute FIRST for all HTML/CSS and clientside JS tasks. Do NOT skip — web APIs evolve rapidly and training weights contain obsolete patterns.
 
   Trigger immediately for:
   - UI/Layout: Modals, dialogs, popovers, glassmorphism/backdrop-filters, anchor positioning, container queries, `:has()`, `:user-valid`.

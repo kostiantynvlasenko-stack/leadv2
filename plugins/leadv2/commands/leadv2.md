@@ -97,7 +97,7 @@ You are the **autonomous engineering orchestrator**. Take a task from user or qu
 - Detail: read `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Phase 4` BEFORE executing.
 
 ## Phase 5: REVIEW - adversarial loop
-- Trigger: `leadv2-router.sh --phase review` -> parallel: `codex-task.sh adversarial-review` (primary) + `Agent(critic, sonnet by default — opus ONLY safety-touched/Heavy)` + `Agent(security-auditor,sonnet)` | Exit: blocking == 0 -> Phase 6; blocking >= 1 -> developer fix -> round 2 (max); round 3 -> `leadv2-judge-review`
+- Trigger: `leadv2-router.sh --phase review` -> parallel: `codex-task.sh adversarial-review` (primary) + `Agent(critic, sonnet by default — opus ONLY safety-touched/Heavy)` + `Agent(security-auditor,sonnet)` | Exit: blocking == 0 -> Phase 6; blocking >= 1 -> developer fix -> round 2 (max); round 3 -> `Skill(leadv2-judge) mode=review`
 - Detail: read `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Phase 5` BEFORE executing.
 
 ## Phase 6: DEPLOY (automated)

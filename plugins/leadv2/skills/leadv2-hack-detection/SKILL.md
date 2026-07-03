@@ -1,6 +1,6 @@
 ---
 name: leadv2-hack-detection
-description: "[internal] Scans git diff for band-aids (TODO, magic numbers, broad except, hardcoded creds); emits YAML…"
+description: "[internal] Use when Phase 5 Review runs (parallel with Codex/critic): scans the review diff for band-aid patterns (todo-no-ticket, magic-number, broad-except, disabled-test, special-case, commented-code, hardcoded-credential) and writes severity-tagged findings to docs/handoff/<task-id>/hack-findings.yaml. Not for standalone code review outside /leadv2, or security auditing (use security-auditor instead)."
 allowed-tools:
   - Read
   - Write

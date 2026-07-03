@@ -191,7 +191,7 @@ _check_lead_read_guard() {
 
 Lead's job: dispatch. Spawn one of:
   - Agent(subagent_type=Explore, model=haiku) for explanation
-  - Skill(leadv2-judge-question) for "should I" questions
+  - Skill(leadv2-judge) mode=question for "should I" questions
   - leadv2-phase-advance.sh for state transitions
 
 Override: \`unset LEADV2_LEAD_GUARD\` if this is genuinely a Phase 0 graph-warm read.

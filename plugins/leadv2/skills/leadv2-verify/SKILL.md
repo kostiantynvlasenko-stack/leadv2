@@ -1,6 +1,6 @@
 ---
 name: leadv2-verify
-description: "[internal] Phase 7 — waits for concrete production signal (log/endpoint/supabase/file) via…"
+description: "[internal] Use after Deploy completes cleanly (Phase 7): blocks close until a concrete production signal (DB row, log line, HTTP response, or metric delta) is captured with an unmasked exit code, and forces mandatory layer-by-layer re-probing on any 0/null/empty result before treating it as a real negative. Not for use when Deploy itself circuit-broke — that goes straight to Recovery instead."
 allowed-tools:
   - Read
   - Write

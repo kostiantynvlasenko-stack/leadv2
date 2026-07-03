@@ -1,6 +1,6 @@
 ---
 name: leadv2-signatures
-description: "[internal] Closed-vocab schema for lead-reflect signatures; aggregates phase/failure_class tuples,…"
+description: "[internal] Use after lead-reflect writes a signature block, or when running aggregation at task close: defines the closed-vocabulary schema (phase, task_class, failure_class, and related tuples) that all lead-reflect signatures must use, and aggregates those tuples across history for trend analysis. Not for use mid-task or during active plan/build phases — never write aggregation results while a task is still open."
 allowed-tools:
   - Read
   - Write

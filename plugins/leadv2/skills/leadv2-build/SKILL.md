@@ -494,7 +494,7 @@ When invoked, `leadv2-po-feedback-loop` orchestrates:
 3. **Verify** — `Agent(09-nextjs-pro, sonnet)` + Playwright → PASS/FAIL table
 4. **Iterate** — fix-round if FAILs, max 2 rounds, then log to `po-followups.md`
 
-Skill returns: `passed`, `partial`, or `escalate`. On `passed` / `partial` → proceed to Phase 5. On `escalate` → invoke `leadv2-judge-review`.
+Skill returns: `passed`, `partial`, or `escalate`. On `passed` / `partial` → proceed to Phase 5. On `escalate` → invoke `Skill(leadv2-judge) mode=review`.
 
 Founder is informed of audit P0 count + verify PASS/FAIL summary between phases. No narration mid-phase (silence protocol).
 

@@ -1,6 +1,6 @@
 ---
 name: leadv2-recovery
-description: "[internal] Phase 7 circuit-breaker: rollback or architect alt-approach, max 2 attempts, then escalates to…"
+description: "[internal] Use when Phase 7 verify fails: circuit-breaker that decides between rollback and architect alt-approach, capped at 2 attempts before escalating to the founder via AskUserQuestion. Not for use during Plan/Build/Review — those phases use their own escalation paths, not this skill."
 allowed-tools:
   - Read
   - Write

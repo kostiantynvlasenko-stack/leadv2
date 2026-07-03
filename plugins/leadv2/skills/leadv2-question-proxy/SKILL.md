@@ -1,6 +1,6 @@
 ---
 name: leadv2-question-proxy
-description: "[internal] IPC bridge: subagent writes question to handoff/questions/; lead proxies via AskUserQuestion…"
+description: "[DORMANT — zero production firings as of 2026-07-03; e2e-test before relying on it] [internal] Use during any phase with an active claude-subsession.sh in flight (Phase 2/4/5/7): IPC bridge where a subagent writes its question to docs/handoff/<task-id>/questions/, a Monitor watches the _signal file, and lead proxies the question to the founder via AskUserQuestion (or silently auto-resolves graph: queries via MCP). Not for use when no subsessions are active."
 allowed-tools:
   - Read
   - Write

@@ -1,4 +1,9 @@
-// leadv2-ledger.js — append-only event ledger (C3 / F2)
+export const meta = { // leadv2-ledger.js — append-only event ledger (C3 / F2). MUST be first statement.
+  name: 'leadv2-ledger',
+  description: 'Append-only event ledger for leadv2 phase transitions and task lifecycle. Enables crash-recovery via last-committed-phase detection. DO NOT invoke as a standalone workflow.',
+  whenToUse: 'Internal — called by emit() helper in other workflows. Never invoke directly.',
+  phases: [],  // no phases — this is a library module
+}
 // Exports: emit(event, payload) — called from workflow phase transitions.
 // Ledger file: docs/leadv2/ledger.jsonl (per-worktree; DO NOT share across worktrees).
 // Each line is a complete JSON object — POSIX append is atomic for lines < PIPE_BUF.
@@ -10,13 +15,6 @@
 //
 // This file is the Workflow interface — it does NOT run standalone as a workflow.
 // It is sourced/imported by other workflows or called via the bash helper below.
-
-export const meta = {
-  name: 'leadv2-ledger',
-  description: 'Append-only event ledger for leadv2 phase transitions and task lifecycle. Enables crash-recovery via last-committed-phase detection. DO NOT invoke as a standalone workflow.',
-  whenToUse: 'Internal — called by emit() helper in other workflows. Never invoke directly.',
-  phases: [],  // no phases — this is a library module
-}
 
 // ── Event schema ──────────────────────────────────────────────────────────────
 // Every event: { ts, event, task_id, phase, payload }

@@ -159,7 +159,7 @@ else:
         fi
         if [[ "${ITER_ROUNDS:-0}" -ge 2 ]]; then
           PHASE_HINT="$PHASE_HINT
-[ROUND_CAP_REACHED] STRICT: ${ITER_ROUNDS} iterations done — DO NOT spawn another developer round. Call Skill(leadv2-judge-review) NOW. Judge will: accept-with-caveats / scope-cut / abort. Lead just dispatches."
+[ROUND_CAP_REACHED] STRICT: ${ITER_ROUNDS} iterations done — DO NOT spawn another developer round. Call Skill(leadv2-judge) mode=review NOW. Judge will: accept-with-caveats / scope-cut / abort. Lead just dispatches."
         fi
         CTX_PARTS+=("$PHASE_HINT")
       fi

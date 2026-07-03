@@ -34,7 +34,7 @@ if [[ "$ROUND_COUNT" -ge 2 ]]; then
 Per leadv2-review SKILL.md: max 2 rounds → architect escape → judge → founder.
 Do NOT launch codex round $((ROUND_COUNT + 1)). Options:
   (a) Spawn architect(opus) with alt-approach
-  (b) Invoke leadv2-judge-review skill for ship/revise/abort verdict
+  (b) Invoke Skill(leadv2-judge) mode=review for ship/revise/abort verdict
   (c) Escalate to founder via AskUserQuestion
 Set ROUND_GATE_OVERRIDE=1 to force (logged + flagged for retro).
 MSG
