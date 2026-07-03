@@ -3,7 +3,7 @@ name: critic
 description: "Use after developer/frontend-developer finishes a diff — adversarial review for correctness, type safety, missing tests, and design violations."
 tools: Read, Write, Bash, Glob, Grep
 model: claude-sonnet-5
-effort: max
+effort: high
 skills:
   - leadv2-subagent-protocol
   - code-review-patterns

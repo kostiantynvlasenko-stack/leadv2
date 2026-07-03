@@ -95,7 +95,7 @@ let judged = await synthAgent(
   `Flag traps (plausible-but-doomed, trap=true). Recommend ONE (or a synthesis) and say why. ` +
   `Also write a short divergence.md to ${OUT} with the ranked set.\n` +
   `Candidates: ${JSON.stringify(ideas)}`,
-  { label: 'judge', phase: 'Judge', agentType: 'critic', model: 'fable', effort: 'high', schema: JUDGE_SCHEMA })
+  { label: 'judge', phase: 'Judge', agentType: 'critic', model: 'fable', effort: 'xhigh', schema: JUDGE_SCHEMA })
 if (judged === null) {
   log('Judge returned null — generating fallback summary via haiku')
   judged = await agent(

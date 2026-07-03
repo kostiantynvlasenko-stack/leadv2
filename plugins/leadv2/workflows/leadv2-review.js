@@ -89,7 +89,7 @@ await emitLedger('phase_enter', { phase: 'Review' })
 const reviewers = [
   () => synthAgent(
     `Adversarial code review of the diff at ${DIFF}. Brief: ${MISSION}. Read the diff yourself (git diff ${BASE}). Report findings: correctness bugs, type/RLS gaps, N+1, missing tests, design-system violations. Severity-tag each. Minimal-diff context only.`,
-    { label: 'critic', phase: 'Review', agentType: 'critic', model: CRITIC_MODEL, effort: 'high', schema: FINDINGS_SCHEMA }),
+    { label: 'critic', phase: 'Review', agentType: 'critic', model: CRITIC_MODEL, effort: (SAFETY && CRITIC_MODEL !== 'sonnet') ? 'xhigh' : 'high', schema: FINDINGS_SCHEMA }),
   () => agent(
     `Run hack-detection on the diff at ${DIFF}: TODO/FIXME band-aids, magic numbers, broad except, hardcoded creds/secrets, silent fallbacks. Return each as a finding (dimension="hack").`,
     { label: 'hack-detect', phase: 'Review', model: 'haiku', effort: 'low', schema: FINDINGS_SCHEMA }),

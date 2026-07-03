@@ -31,9 +31,18 @@ token count. Route on QUOTA PRESSURE, not sticker price.
 | Lead decisions / routing | **Fable** (or the repo's pinned lead model) | thin router, not a thinker |
 
 Rule: **VOLUME -> cheap lane (Codex/Sonnet/Haiku); HARDNESS -> smart lane (Opus/Fable).**
-Codex-first for anything code-shaped, in any repo that has opted in. Never run Sonnet
-above `low` effort without escalating — if it needs more, it needs Opus/Fable or Codex,
-not a longer Sonnet run.
+Codex-first for anything code-shaped, in any repo that has opted in. Sonnet's effort
+cap is `high`, and `high` is reserved for gate/verdict roles (critic, security-auditor,
+verify) — build spawns run `medium`, reads `low`. If a sonnet spawn seems to need
+`xhigh`, escalate the MODEL (Opus/Fable or Codex), never the effort.
+Canonical two-axis matrix (model × effort, per class × phase):
+`plugins/leadv2/docs/model-effort-matrix.md`.
+
+**GLM lane (second zero-Claude-quota pool):** GLM-5.2 ≈ Sonnet 5 on coding benchmarks
+(SWE-bench Pro 62.1 vs 63.2) at zero Claude quota. Route background latency-class work
+(bulk/mechanical transforms, mass audits, standard code nobody waits on) to GLM where
+the repo has a GLM lane configured. Banned for architecture/design/safety. Priority per
+spawn: Codex → GLM → Claude ladder.
 
 ## Per-agent defaults (template — tune per repo)
 

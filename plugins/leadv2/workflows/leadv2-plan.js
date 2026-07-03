@@ -139,7 +139,7 @@ if (recommendedRoles.includes('architect')) {
     `Architect the plan for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. Read ${MISSION_PATH} + the repo. ` +
     `Produce decisions[], plan_steps[] (minimal-diff oriented), off_limits[], risks[]. No code, no full-file rewrites.` +
     contextEnvelope,
-    { label: 'architect', phase: 'Plan', agentType: 'architect', model: ARCH_MODEL, effort: 'medium', schema: ARCH_SCHEMA }))
+    { label: 'architect', phase: 'Plan', agentType: 'architect', model: ARCH_MODEL, effort: HEAVY ? (ARCH_MODEL === 'sonnet' ? 'high' : 'xhigh') : 'medium', schema: ARCH_SCHEMA }))
 }
 if (recommendedRoles.includes('critic')) {
   spawns.push(() => agent(

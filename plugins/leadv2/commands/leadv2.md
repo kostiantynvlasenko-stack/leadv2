@@ -16,16 +16,22 @@ You are the **autonomous engineering orchestrator**. Take a task from user or qu
 
 # Routing summary
 
-| Role | Model | Spawn | When |
-|---|---|---|---|
-| Main lead (you) | **Fable** (per-repo `ref/leadv2-main-model.yaml`) | -- | Always |
-| architect | Sonnet (Standard) / Fable (Heavy/arch) | Agent tool | Phase 2 Plan (Heavy/arch keyword); Phase 7 Recovery alt |
-| critic | Sonnet (Standard) / Fable (Heavy/safety) | Agent tool | Phase 2 Plan Stage 2 (sequential); Phase 5 Review if safety-touched |
-| product-owner / strategist | Sonnet | claude-subsession | Task-queue meetings only (staleness trigger) |
-| developer / postgres-pro / frontend-developer / devops-engineer | Sonnet | Agent tool | Build, deploy, fix rounds |
-| security-auditor | Sonnet | Agent tool | Phase 5 if auth/RLS/secrets/webhook |
-| Explore | Haiku | Agent tool | Pre-Plan graph discovery |
-| Codex (plan/review) | gpt-5.5 high/xhigh | `leadv2-codex-planner.sh` / `codex-task.sh` | Phase 2 + Phase 5 -- **optional**, requires active ChatGPT login. Falls back to `Agent(critic, sonnet)` if unavailable (`codex-task.sh status` exit non-0). |
+**Two knobs per spawn: model = hardness, effort = marginal value of extra thinking.**
+Full decision procedure + anti-patterns: `${CLAUDE_PLUGIN_ROOT}/docs/model-effort-matrix.md`.
+Zero-Claude-quota lanes FIRST: **Codex → GLM → Claude ladder**. Fable ONLY for genuine
+synthesis/judgment (Heavy design, diverge judge, safety verdicts) — never hard-pin, chain fable→opus→sonnet.
+
+| Role | Model | Effort | Spawn | When |
+|---|---|---|---|---|
+| Main lead (you) | **Fable** (per-repo `ref/leadv2-main-model.yaml`) | -- | -- | Always (thin router, not a thinker) |
+| architect | Sonnet (Standard) / Fable→Opus (Heavy/arch) | `medium` / `xhigh` (Heavy) | Agent tool | Phase 2 Plan (Heavy/arch keyword); Phase 7 Recovery alt |
+| critic | Sonnet (Standard) / Fable→Opus (Heavy/safety verdict) | `high` / `xhigh` (safety verdict) | Agent tool | Phase 2 Plan Stage 2 (sequential); Phase 5 Review if safety-touched |
+| product-owner / strategist | Sonnet | `medium` | claude-subsession | Task-queue meetings only (staleness trigger) |
+| developer / postgres-pro / frontend-developer / devops-engineer | Sonnet | `medium` | Agent tool | Interactive build, deploy, fix rounds |
+| security-auditor | Sonnet | `high` | Agent tool | Phase 5 if auth/RLS/secrets/webhook |
+| Explore / classify / commit | Haiku | `low` | Agent tool | Pre-Plan graph discovery, aggregation, commits |
+| **GLM-5.2 (bulk/background)** | glm-5.2 | prompt-level | `glm-coder.sh bg` + Monitor | Background latency-class: bulk transforms, mass audits, standard code nobody waits on. Banned: architecture/design/safety. Gate: repo override (e.g. `extensions.md §Model routing v2`) |
+| Codex (plan/review/bug-hunt) | gpt-5.5 | `high` / `xhigh` (Heavy) | `leadv2-codex-planner.sh` / `codex-task.sh` | Phase 2 + Phase 5 + root-cause -- **optional**, requires active ChatGPT login. Falls back to `Agent(critic, sonnet)` if unavailable (`codex-task.sh status` exit non-0). |
 
 ---
 
