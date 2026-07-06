@@ -20,8 +20,8 @@ thinking tokens AND fails the task.
 | Reads, classify, greps, commits, aggregation | haiku | `low` | Explore, capability-classifier, quality-scorer, archive-write |
 | Standard build / synthesis | sonnet | `medium` | developer, plan-synthesize, context.yaml writes |
 | Adversarial gate / verdict | sonnet | `high` | critic, security-auditor, verify-blocking (Codex is primary; this is the 2nd voice) |
-| Heavy design synthesis / judge | **fable → opus → sonnet** | `xhigh` | Heavy/Strategic architect, diverge judge, safety-touched review verdict |
-| One-shot irreversible / Strategic gate | **fable → opus → sonnet** | `max` | Strategic plan synthesis, final deploy verdict on Heavy+safety |
+| Heavy design synthesis / judge | **opus → sonnet** | `xhigh` | Heavy/Strategic architect, diverge judge, safety-touched review verdict |
+| One-shot irreversible / Strategic gate | **opus → sonnet** | `max` | Strategic plan synthesis, final deploy verdict on Heavy+safety |
 
 ## Effort ladder semantics
 
@@ -36,12 +36,12 @@ thinking tokens AND fails the task.
 
 **Escalation direction rule:** when a task outgrows its tier, escalate the MODEL, not
 the effort. Sonnet's effort cap is `high` — if a sonnet spawn seems to need `xhigh`,
-it needs fable/opus (or Codex), not a longer sonnet run. Thinking tokens are output
+it needs opus (or Codex), not a longer sonnet run. Thinking tokens are output
 tokens — the most quota-expensive thing a spawn emits.
 
-## Fable — only the hardest thinking (founder directive 2026-07-03)
+## Opus — only the hardest thinking (founder directive 2026-07-03; FABLE-RETIRE-01 2026-07-06: fable sunset, opus absorbs its slots)
 
-Fable (or the repo's top-tier pin) is allowed ONLY where genuinely novel reasoning or
+Opus (the repo's top-tier lead/heavy model) is allowed ONLY where genuinely novel reasoning or
 judgment happens:
 
 - Heavy/Strategic plan **synthesis** (not discovery — discovery is haiku/Explore)
@@ -49,17 +49,17 @@ judgment happens:
 - Safety-touched review **verdict** (not the scan — scans are Codex/sonnet/haiku)
 - Root-cause **synthesis** after cheap models gathered the evidence
 
-Fable is BANNED for: evidence gathering, file reads, bulk transforms, classification,
+Opus is BANNED for: evidence gathering, file reads, bulk transforms, classification,
 mechanical edits, commit messages, status aggregation, anything a checklist could do.
 
-**Never hard-pin fable.** Always the chain `fable → opus → sonnet` (fable sunset risk;
-opus is first-class for design/synthesis/verdicts). In workflows:
-`model: MODELS.think || 'fable'` with opus fallback on refusal/absence.
+**Chain on refusal/absence, never hard-pin.** Always `opus → sonnet` (opus is
+first-class for design/synthesis/verdicts). In workflows:
+`model: MODELS.think || 'opus'` with sonnet fallback on refusal/absence.
 
 ## Zero-Claude-quota lanes come FIRST (founder: "GLM и Codex по максимуму")
 
 Priority order for any spawn: **Codex → GLM → Claude ladder.** Both external lanes run
-on separate subscription pools; every task routed there protects the Fable/Opus weekly
+on separate subscription pools; every task routed there protects the Opus weekly
 cap for the few spawns that truly need it.
 
 | Lane | Carries | Effort control | Gate |
@@ -77,8 +77,8 @@ Surface every fallback to the founder — never degrade silently.
 | Trivial | skip | haiku `low` inline | skip |
 | Light | sonnet `medium` single-pass | sonnet `medium` (GLM if background) | skip (low-risk) or Codex `medium` |
 | Standard | architect sonnet `medium` + Codex `high` + critic sonnet `high` | sonnet `medium` / GLM bulk | Codex `high` + critic sonnet `high` |
-| Heavy | architect fable→opus `xhigh` + Codex `xhigh` + critic sonnet `high` | sonnet `medium` parallel fan-out / GLM bulk | Codex `xhigh` + verdict fable→opus `xhigh` (safety) |
-| Strategic | fable→opus `max` + Codex `xhigh` | as Heavy | as Heavy, verdict `max` |
+| Heavy | architect opus `xhigh` + Codex `xhigh` + critic sonnet `high` | sonnet `medium` parallel fan-out / GLM bulk | Codex `xhigh` + verdict opus `xhigh` (safety) |
+| Strategic | opus `max` + Codex `xhigh` | as Heavy | as Heavy, verdict `max` |
 
 ## Anti-patterns (each one observed in production before this doc)
 
@@ -86,8 +86,8 @@ Surface every fallback to the founder — never degrade silently.
    thinking regardless of class. Frontmatter default is `high` for adversarial roles,
    `medium` otherwise; workflows override per-class via `opts.effort`.
 2. **Cranking effort instead of escalating model** — sonnet `xhigh` on a Heavy design
-   task. Wrong axis: use fable/opus `xhigh`.
-3. **Fable/opus for discovery** — evidence gathering is haiku; synthesis is fable.
+   task. Wrong axis: use opus `xhigh`.
+3. **Opus for discovery** — evidence gathering is haiku; synthesis is opus.
 4. **Haiku for verdicts** — a `low`-effort judge on a gate decision (acceptable only as
    an explicit degraded-mode fallback, logged as such).
 5. **Ignoring the external lanes** — running sonnet review when Codex is available, or
@@ -103,3 +103,5 @@ Surface every fallback to the founder — never degrade silently.
 
 Benchmark sources (2026-07): benchlm.ai claude-sonnet-5-vs-glm-5-2, codingfleet.com
 glm-5.2 comparison, semgrep.dev GLM-5.2 cyber benchmarks.
+
+Sonnet spawns with thinking OFF under-trigger tools — missions must name expected tools explicitly.

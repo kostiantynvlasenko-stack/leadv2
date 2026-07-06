@@ -78,6 +78,9 @@ You have the Agent tool for NESTED helper spawns, policy-gated by leadv2-routing
 - Stronger models/types ONLY with lead-issued `docs/handoff/<task-id>/escalation-budget.yaml` + a §2.6 deadlock.
 - Do NOT nest for work doable in <5 of your own tool calls.
 
+## Pre-finalize contradiction scan
+Before finalizing, run an explicit contradiction scan: env-var names vs settings, flag semantics vs other usages, path existence. Output findings or 'none'.
+
 ## Completion contract
 - Last line of `<role>.full.md` MUST be `DELIVERABLE_COMPLETE` (or `DELIVERABLE_BLOCKED: <one-sentence-reason>`).
 - Lead's parser checks this exact string. Missing marker = treated as failed = same task re-spawned.

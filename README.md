@@ -7,7 +7,7 @@
 ## Features
 
 - **Phased orchestration** — `intake → classify → plan → build → review → deploy → verify → reflect → close`.
-- **Multi-model routing** — thin lead brain (Fable 5 / Opus) that decides and dispatches; Sonnet specialists for build/review, Haiku for discovery via Explore, optional Codex GPT-5.5 as 2nd-brain reviewer. A Thompson-sampling route bandit (`LEADV2_ROUTE_BANDIT=1`) learns the best model per phase within a guardrailed allowed-set.
+- **Multi-model routing** — thin lead brain (Opus) that decides and dispatches; Sonnet specialists for build/review, Haiku for discovery via Explore, optional Codex GPT-5.5 as 2nd-brain reviewer. A Thompson-sampling route bandit (`LEADV2_ROUTE_BANDIT=1`) learns the best model per phase within a guardrailed allowed-set.
 - **Workflow-first heavy phases** — Plan, Review, Diverge, Learn, Diagnose, Audit, and PO-feedback-loop run as deterministic multi-agent `Workflow` scripts with pinned cheap models; the lead stays a router, not a thinker.
 - **One gate, then autopilot** — only the initial plan needs your approval. Every later step is gated by automated checks (tests, review verdict, security audit, verify-probe) with a circuit breaker on failure.
 - **Self-learning** — captures corrections and successful patterns into `immune memory`, pre-filters future approaches against past failures.

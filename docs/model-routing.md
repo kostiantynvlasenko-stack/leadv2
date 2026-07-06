@@ -26,15 +26,15 @@ token count. Route on QUOTA PRESSURE, not sticker price.
 | Workload | Lane | Why |
 |---|---|---|
 | Code (any volume) | **Codex** (where `codex_enabled: true`) | off Claude quota entirely; more volume = more saved |
-| High-volume Claude bulk (fan-out, reads, mechanical) | **Sonnet-low / Haiku** | light quota weight; protects the Opus/Fable cap at volume |
-| Hard / high-value minority (architecture, root-cause, tricky logic, safety) | **Opus / Fable** | few turns, quality pays for itself |
-| Lead decisions / routing | **Fable** (or the repo's pinned lead model) | thin router, not a thinker |
+| High-volume Claude bulk (fan-out, reads, mechanical) | **Sonnet-low / Haiku** | light quota weight; protects the Opus cap at volume |
+| Hard / high-value minority (architecture, root-cause, tricky logic, safety) | **Opus** | few turns, quality pays for itself |
+| Lead decisions / routing | **Opus** (or the repo's pinned lead model) | thin router, not a thinker |
 
-Rule: **VOLUME -> cheap lane (Codex/Sonnet/Haiku); HARDNESS -> smart lane (Opus/Fable).**
+Rule: **VOLUME -> cheap lane (Codex/Sonnet/Haiku); HARDNESS -> smart lane (Opus).**
 Codex-first for anything code-shaped, in any repo that has opted in. Sonnet's effort
 cap is `high`, and `high` is reserved for gate/verdict roles (critic, security-auditor,
 verify) — build spawns run `medium`, reads `low`. If a sonnet spawn seems to need
-`xhigh`, escalate the MODEL (Opus/Fable or Codex), never the effort.
+`xhigh`, escalate the MODEL (Opus or Codex), never the effort.
 Canonical two-axis matrix (model × effort, per class × phase):
 `plugins/leadv2/docs/model-effort-matrix.md`.
 
@@ -48,10 +48,10 @@ spawn: Codex → GLM → Claude ladder.
 
 | Subagent | Model | Codex? |
 |---|---|---|
-| lead (orchestrator) | repo's pinned lead model (e.g. Fable) | -- |
+| lead (orchestrator) | repo's pinned lead model (e.g. Opus) | -- |
 | **developer** | Codex-first where enabled; Sonnet fallback (parallel fan-out) | YES |
 | **critic / review** | Codex-primary + Sonnet/Opus critic as second opinion | YES |
-| architect | Sonnet (Opus/Fable on Heavy classification) | -- |
+| architect | Sonnet (Opus on Heavy classification) | -- |
 | postgres-pro | Sonnet | opt |
 | frontend-developer | Sonnet | rare |
 | devops-engineer | Sonnet (commits on Haiku) | no |
@@ -89,16 +89,16 @@ fails (login down OR quota exhausted — `codex-task.sh` exits non-zero / rate-l
 1. **SURFACE to founder** ("Codex unavailable: `<login|quota>` — falling back to
    Claude"). Never degrade silently.
 2. **Fall back by task type onto Claude quota:**
-   - code, hard → Opus/Fable (low/med effort)
+   - code, hard → Opus (low/med effort)
    - code, bulk → Sonnet (low effort)
-   - review/critic → Sonnet critic (Opus/Fable if safety-touched)
-3. This loads the Claude quota — watch the Opus/Fable weekly cap. A `downgrade_chain`
-   (e.g. `fable->sonnet`) should auto-catch cap strain; Haiku is the last-resort floor.
+   - review/critic → Sonnet critic (Opus if safety-touched)
+3. This loads the Claude quota — watch the Opus weekly cap. A `downgrade_chain`
+   (e.g. `opus->sonnet`) should auto-catch cap strain; Haiku is the last-resort floor.
 4. Codex caps are a ROLLING window — retry Codex-first on the next session/task; don't
    stay parked on the Claude fallback once Codex recovers.
 
 **Full ladder:**
-`Codex -> [hard: Opus/Fable | bulk: Sonnet | review: Sonnet-critic] -> Sonnet (cap valve) -> Haiku`
+`Codex -> [hard: Opus | bulk: Sonnet | review: Sonnet-critic] -> Sonnet (cap valve) -> Haiku`
 
 ## Per-repo concrete copies
 

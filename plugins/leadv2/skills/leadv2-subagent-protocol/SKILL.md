@@ -83,7 +83,7 @@ Agent(subagent_type="general-purpose",  model="claude-sonnet-5",  ...)  # light 
 - Max **1 nesting level** — your nested spawn must not itself spawn further agents.
 - Max **3 nested spawns per task** across your entire run.
 - `model=` is **mandatory and explicit** — never omit it (inherit-guard DENIES unrouted agents).
-- Allowed models: any `*haiku*` or `*sonnet*` variant. Never `*opus*` or `*fable*`.
+- Allowed models: any `*haiku*` or `*sonnet*` variant. Never `*opus*`.
 - Allowed subagent_type: `Explore` or `general-purpose` only.
 - **Never spawn** `developer`, `critic`, `architect`, `security-auditor`, or any build/review role.
 - `run_in_background=true` recommended for non-blocking probes.
@@ -106,7 +106,7 @@ Agent(subagent_type="Explore",   ...)                              # model= omit
 
 ## 2.6. Escalation token — when and how
 
-An escalation token allows a single nested spawn of a type/model outside the base allowlist (e.g. `critic+fable` for a deadlock decision). Lead issues the token by writing `docs/handoff/<task-id>/escalation-budget.yaml` at Phase 4 spawn time; it is NOT a right subagents can self-grant.
+An escalation token allows a single nested spawn of a type/model outside the base allowlist (e.g. `critic+opus` for a deadlock decision). Lead issues the token by writing `docs/handoff/<task-id>/escalation-budget.yaml` at Phase 4 spawn time; it is NOT a right subagents can self-grant.
 
 **Spend the token ONLY when ALL of the following hold:**
 1. You have made **2 failed attempts** at the same blocker (concrete evidence: loop counter, logged attempts).
@@ -303,3 +303,4 @@ Every `Agent(run_in_background=true)` call MUST be immediately followed by `Moni
 - Asking founder "how should I do X?" when X is clearly an engineering decision (your role).
 - **VPS SSH direct ops** — `ssh + git checkout`, `ssh + scp`, `ssh + git pull` bypassing `deploy-latest.sh`. V4 restore incident: one agent did `ssh + git checkout` on one VPS only, causing fleet drift and a prod incident. **VPS modifications ONLY via `deploy-latest.sh` (or `deploy.sh` in `.claude/leadv2-overrides/`).** If your deliverable mentions `ssh.*git checkout` or `ssh.*scp` to modify VPS code → BLOCK yourself and use ask-lead.sh. This is a Critical protocol violation.
 - Ignoring MD-XX self-checks because "I'm sure it's fine". The checks are exactly when confidence is wrong.
+- **Do exactly what was asked**: no drive-by refactors, no unrequested files; propose extras in one line, don't do them. State INTENT + acceptance criteria, not keystrokes — Sonnet 5 executes literally, so strip stale/contradictory constraints before spawn.

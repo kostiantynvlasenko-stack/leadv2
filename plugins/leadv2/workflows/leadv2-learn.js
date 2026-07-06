@@ -203,9 +203,9 @@ if (aboveThreshold.length === 0) {
   }
 }
 
-// synth stages: try top model, fall back on null/error (fable sunsets ~2026-07-07)
+// synth stages: try top model, fall back on null/error
 async function synthAgent(prompt, opts = {}) {
-  const chain = [...new Set([opts.model || 'fable', 'opus', 'sonnet'])]
+  const chain = [...new Set([opts.model || 'opus', 'sonnet'])]
   for (const m of chain) {
     try {
       const r = await agent(prompt, { ...opts, model: m })
@@ -228,7 +228,7 @@ const proposal = await synthAgent(
   `Include class_key in each proposal (same as the signal's class_key) for threshold-tracking. ` +
   `Then WRITE the proposal to ${OUT} as a governance markdown ` +
   `(status: pending — NOT auto-applied; founder or auto-approve decides). Return the proposals[].`,
-  { label: 'propose', phase: 'Propose', model: 'fable', effort: 'medium', schema: PROPOSAL_SCHEMA })
+  { label: 'propose', phase: 'Propose', model: 'opus', effort: 'medium', schema: PROPOSAL_SCHEMA })
 await emitLedger('phase_exit', { phase: 'Propose', proposals_count: (proposal && proposal.proposals) ? proposal.proposals.length : 0 })
 
 // ── Shadow-Emit phase (D3 / G3c + C1/C2 dual-memory) ────────────────────────

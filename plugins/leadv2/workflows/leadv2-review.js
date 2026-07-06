@@ -26,7 +26,7 @@ const TS = a.ts || (await bash("date -u +%Y-%m-%dT%H:%M:%SZ")).trim()
 // args.models absent (or LEADV2_ROUTE_BANDIT != 1) => falls back to existing pinned defaults.
 // Flag-off guarantee: if args.models is not provided, model values are identical to pre-BANDIT-WIRE-01.
 const _MODELS = (a.models && typeof a.models === 'object') ? a.models : {}
-const CRITIC_MODEL = _MODELS.critic || (SAFETY ? 'fable' : 'sonnet')
+const CRITIC_MODEL = _MODELS.critic || (SAFETY ? 'opus' : 'sonnet')
 const VERIFY_MODEL = _MODELS.verify || 'sonnet'
 const FINDINGS_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -69,9 +69,9 @@ async function emitLedger(event, extra) {
   try { await bash(`_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`) } catch (_) {}
 }
 
-// synth stages: try top model, fall back on null/error (fable sunsets ~2026-07-07)
+// synth stages: try top model, fall back on null/error
 async function synthAgent(prompt, opts = {}) {
-  const chain = [...new Set([opts.model || 'fable', 'opus', 'sonnet'])]
+  const chain = [...new Set([opts.model || 'opus', 'sonnet'])]
   for (const m of chain) {
     try {
       const r = await agent(prompt, { ...opts, model: m })

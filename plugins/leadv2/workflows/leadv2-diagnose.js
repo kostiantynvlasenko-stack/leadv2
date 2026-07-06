@@ -110,9 +110,9 @@ const traceResults = (await parallel(evidenceAgents)).filter(Boolean)
 const allHypotheses = traceResults.flatMap(r => r.hypotheses || [])
 log(`Trace: ${traceResults.length}/${clusters.length} clusters returned, ${allHypotheses.length} total hypotheses`)
 
-// synth stages: try top model, fall back on null/error (fable sunsets ~2026-07-07)
+// synth stages: try top model, fall back on null/error
 async function synthAgent(prompt, opts = {}) {
-  const chain = [...new Set([opts.model || 'fable', 'opus', 'sonnet'])]
+  const chain = [...new Set([opts.model || 'opus', 'sonnet'])]
   for (const m of chain) {
     try {
       const r = await agent(prompt, { ...opts, model: m })
@@ -131,7 +131,7 @@ const result = await synthAgent(
   `Hypotheses: ${JSON.stringify(allHypotheses)}\n` +
   `Pick the most likely root_cause (high-confidence wins; corroboration across clusters upgrades confidence). ` +
   `Set evidence_files to specific files/tables implicated. Provide a concrete fix_hint. List alternates for any competing hypotheses.`,
-  { label: 'reduce', phase: 'Reduce', model: 'fable', effort: 'medium', schema: ROOT_CAUSE_SCHEMA })
+  { label: 'reduce', phase: 'Reduce', model: 'opus', effort: 'medium', schema: ROOT_CAUSE_SCHEMA })
 
 return result || {
   root_cause: 'Reduce agent returned null — review raw hypotheses manually',

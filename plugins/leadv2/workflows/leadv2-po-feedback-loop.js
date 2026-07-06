@@ -1,9 +1,9 @@
 export const meta = {
   name: 'leadv2-po-feedback-loop',
-  description: 'PO feedback loop: 4-phase orchestration (Audit → Build → Verify → Iterate) for UI-heavy features. Architect-fable audits preprod vs benchmarks+baseline, parallel Sonnet developers fix by file ownership, Playwright auto-verify, up to maxRounds iteration. LOCAL-9 lessons encoded: baseline-for-comparisons P0 rule, screenshot-required for numeric/format items, FloorDelta critic trap.',
+  description: 'PO feedback loop: 4-phase orchestration (Audit → Build → Verify → Iterate) for UI-heavy features. Architect-opus audits preprod vs benchmarks+baseline, parallel Sonnet developers fix by file ownership, Playwright auto-verify, up to maxRounds iteration. LOCAL-9 lessons encoded: baseline-for-comparisons P0 rule, screenshot-required for numeric/format items, FloorDelta critic trap.',
   whenToUse: 'After initial build push for class >= Standard with >= 2 .tsx UI files changed. Lead invokes with preprodUrl + taskId + designBaseline. Returns p0/p1/pass/fail counts, followups, audit_path.',
   phases: [
-    { title: 'Audit', detail: 'architect(fable) Playwright walk of preprodUrl all states + mobile 375x812, compare vs benchmarks+designBaseline+modern-web; parallel critic(sonnet) checks findings for semantic traps (FloorDelta class, baseline-for-comparisons)' },
+    { title: 'Audit', detail: 'architect(opus) Playwright walk of preprodUrl all states + mobile 375x812, compare vs benchmarks+designBaseline+modern-web; parallel critic(sonnet) checks findings for semantic traps (FloorDelta class, baseline-for-comparisons)' },
     { title: 'Build', detail: 'group P0+P1 by file, parallel developer(sonnet) agents with disjoint ownership, type-check subset, no commit' },
     { title: 'Verify', detail: 'sonnet Playwright-assert each P0/P1; numeric/format items require screenshot path' },
     { title: 'Iterate', detail: 'loop while FAIL>0 and round<=maxRounds: developer fix then re-verify; cap remaining to followups' },
@@ -128,7 +128,7 @@ If any of these 3 are missing for a delta/ratio column, classify that finding as
 
 Output schema must include: working[] (what to preserve), findings[] (P0 max 5, P1 max 6, P2 max 4; each with id, severity, title, specific element, concrete fix, effort S/M/L, file if known), screenshots[].
 Also write a markdown report to ${TASK_DIR}/po-audit.md summarizing the same findings.`,
-    { label: 'audit', phase: 'Audit', agentType: 'architect', model: 'fable', schema: AUDIT_SCHEMA }),
+    { label: 'audit', phase: 'Audit', agentType: 'architect', model: 'opus', schema: AUDIT_SCHEMA }),
   () => agent(
     `You are an adversarial critic. You will receive the findings list from a UI audit of ${FEATURE} (${PREPROD_URL}).
 Wait for the audit agent to complete, then review the findings for semantic traps (LOCAL-9 FloorDelta class).

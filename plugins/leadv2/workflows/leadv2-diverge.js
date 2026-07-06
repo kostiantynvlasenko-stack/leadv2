@@ -60,9 +60,9 @@ async function emitLedger(event, extra) {
   try { await bash(`_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`) } catch (_) {}
 }
 
-// synth stages: try top model, fall back on null/error (fable sunsets ~2026-07-07)
+// synth stages: try top model, fall back on null/error
 async function synthAgent(prompt, opts = {}) {
-  const chain = [...new Set([opts.model || 'fable', 'opus', 'sonnet'])]
+  const chain = [...new Set([opts.model || 'opus', 'sonnet'])]
   for (const m of chain) {
     try {
       const r = await agent(prompt, { ...opts, model: m })
@@ -95,7 +95,7 @@ let judged = await synthAgent(
   `Flag traps (plausible-but-doomed, trap=true). Recommend ONE (or a synthesis) and say why. ` +
   `Also write a short divergence.md to ${OUT} with the ranked set.\n` +
   `Candidates: ${JSON.stringify(ideas)}`,
-  { label: 'judge', phase: 'Judge', agentType: 'critic', model: 'fable', effort: 'xhigh', schema: JUDGE_SCHEMA })
+  { label: 'judge', phase: 'Judge', agentType: 'critic', model: 'opus', effort: 'xhigh', schema: JUDGE_SCHEMA })
 if (judged === null) {
   log('Judge returned null — generating fallback summary via haiku')
   judged = await agent(
