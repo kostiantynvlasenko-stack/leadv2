@@ -166,8 +166,21 @@ log(`Quality score: ${qualityScore}/10 — ${diffSummary}`)
 // [F6] Write scored entry to solutions-archive.yaml (append-safe via python3)
 // Only write on ACCEPT; REVISE/ESCALATE entries have incomplete solutions — skip to avoid polluting archive
 if (verdict === 'ACCEPT' && qualityScore !== null) {
+  // MEM-WRITE-PATH-FIX-01: a bare relative path resolves inside the task's worktree
+  // cwd, and solutions-archive.yaml is intentionally gitignored (local state, never
+  // committed) -- so a worktree-local write is silently lost on worktree sweep.
+  // Anchor to the shared main-repo root (git-common-dir, same .git for every worktree).
+  // MEM-WRITE-PATH-FIX-01 round2: marker-check hardening. Ambient bash() cwd is
+  // unverified (no platform contract found -- see build.md Fix round 2 finding #1);
+  // if bash() ever ran from an unrelated git repo (e.g. plugin-cache dir), a bare
+  // git-common-dir resolve would silently land in the WRONG repo's docs/leadv2.
+  // Require the resolved root to actually contain docs/leadv2/ before trusting it;
+  // otherwise fail safe to ambient pwd rather than writing into a foreign repo.
+  const _archiveRoot = (await bash(
+    `_r="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null)"; [ -n "$_r" ] && [ -d "$_r/docs/leadv2" ] && printf '%s' "$_r" || pwd`
+  )).trim() || '.'
   await agent(
-    `Append a new entry to docs/leadv2/solutions-archive.yaml. ` +
+    `Append a new entry to ${_archiveRoot}/docs/leadv2/solutions-archive.yaml. ` +
     `Create the file with an empty YAML list if it does not exist. ` +
     `Read the file first, append this entry to the list, then write the full file back:\n` +
     `  - task_id: "${TASK_ID}"\n` +

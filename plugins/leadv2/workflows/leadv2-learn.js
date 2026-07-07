@@ -22,6 +22,18 @@ const TASK_CLASS = a.task_class || 'general'
 // Workflow runtime throws on Date.now()/argless new Date() — derive stamp via bash() instead.
 const TS = a.ts || (await bash("date -u +%Y-%m-%dT%H:%M:%SZ")).trim()
 
+// MEM-WRITE-PATH-FIX-01: this workflow runs during an in-flight task -- cwd is the
+// task worktree, not the main checkout. solutions-archive.yaml (gitignored, never
+// merged) only ever exists at the shared main-repo root. Read from there so
+// exemplars are found regardless of which worktree/session invoked /learn.
+// MEM-WRITE-PATH-FIX-01 round2: marker-check hardening -- see leadv2-review.js
+// for the identical rationale (ambient bash()-cwd contract is unverified; the
+// docs/leadv2/ marker check refuses to trust a resolved root that isn't
+// actually this project, failing safe to pwd instead of a foreign repo).
+const DURABLE_ROOT = (await bash(
+  `_r="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null)"; [ -n "$_r" ] && [ -d "$_r/docs/leadv2" ] && printf '%s' "$_r" || pwd`
+)).trim() || '.'
+
 // ── C3: Ledger emit helper ────────────────────────────────────────────────────
 // Defined AFTER const declarations so TASK_ID is initialized before this closure captures it.
 // Fire-and-forget: never throws, never blocks workflow on failure.
@@ -145,7 +157,7 @@ const [patterns, rejectedResult, exemplarResult] = await parallel([
 
   // B2 fan-out leg 3: solutions-archive exemplar reader (model=haiku)
   () => agent(
-    `Read docs/leadv2/solutions-archive.yaml. ` +
+    `Read ${DURABLE_ROOT}/docs/leadv2/solutions-archive.yaml. ` +
     `Group entries by task_class. For each task_class, keep only the top-K=3 entries by score (descending). ` +
     `Return those as exemplars[]. If file does not exist or solutions is empty, return exemplars=[].`,
     { label: 'gather-exemplars', phase: 'Gather', model: 'haiku', effort: 'low', schema: EXEMPLAR_SCHEMA }),

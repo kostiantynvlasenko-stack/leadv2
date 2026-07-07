@@ -15,6 +15,13 @@
 #   3. no double-fire at N+1
 #   4. LEADV2_SCORECARD_ON_CLOSE=1 + non-empty scorecard -> uses scorecard line-count path
 #   5. bash -n syntax check
+#   6. [MEM-WRITE-PATH-FIX-01 round2] REAL _durable_root resolution, extracted live from
+#      leadv2-phase8-close.sh (not a hand-duplicated copy), run from inside a real linked
+#      git worktree -> must resolve to the MAIN repo root, not the worktree.
+#   7. [MEM-WRITE-PATH-FIX-01 round2] REAL JS-side one-liner, extracted live from
+#      leadv2-review.js, run from (a) main repo (b) linked worktree (c) an unrelated
+#      git repo with no docs/leadv2/ marker -> (a)/(b) resolve to main repo, (c) fails
+#      safe to pwd instead of silently landing in the wrong repo.
 #
 # Run: bash scripts/tests/test-leadv2-phase8-learn-counter.sh
 # Exit 0 = all pass; non-zero = failures found.
@@ -23,6 +30,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PHASE8_SH="${SCRIPT_DIR}/../leadv2-phase8-close.sh"
+JS_FILE="${SCRIPT_DIR}/../../workflows/leadv2-review.js"
 # phase8-close.sh will resolve PROJECT_ROOT=$(dirname PHASE8_SH)/.. = plugin root
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LEADV2_DIR="${PLUGIN_ROOT}/docs/leadv2"
@@ -200,6 +208,111 @@ test_5_syntax() {
   bash -n "$PHASE8_SH" 2>/dev/null && pass "Test 5: bash -n OK" || fail "Test 5: bash -n FAILED"
 }
 
+# -- Test 6: REAL _durable_root resolution from inside a linked worktree ------
+_extract_durable_root_snippet() {
+  sed -n '/_durable_root="\$(git rev-parse --path-format=absolute --git-common-dir/,/\[\[ -d "\$_durable_root" \]\] || _durable_root="\$PROJECT_ROOT"/p' "$PHASE8_SH"
+}
+
+test_6_durable_root_worktree() {
+  log "Test 6: REAL _durable_root resolution resolves to MAIN repo from inside a worktree"
+  local snippet
+  snippet="$(_extract_durable_root_snippet)"
+  if [[ -z "$snippet" ]]; then
+    fail "Test 6: could not extract _durable_root snippet from $PHASE8_SH (source moved/renamed?)"
+    return
+  fi
+
+  local tmp_main tmp_wt
+  tmp_main="$(mktemp -d /tmp/mw-fix-main-XXXXXX)"
+  tmp_wt="$(mktemp -d /tmp/mw-fix-wt-XXXXXX)"
+  rmdir "$tmp_wt"
+
+  (
+    cd "$tmp_main"
+    git init -q
+    git config user.email t@t.local; git config user.name t
+    mkdir -p docs/leadv2
+    echo x > f.txt
+    git add -A && git commit -qm init
+    git worktree add -q "$tmp_wt" -b mw-fix-test-branch >/dev/null 2>&1
+  )
+
+  local resolved
+  resolved="$(cd "$tmp_wt" && PROJECT_ROOT="$tmp_wt" bash -c "$snippet"'; printf "%s" "$_durable_root"')"
+
+  (cd "$tmp_main" && git worktree remove --force "$tmp_wt" >/dev/null 2>&1) || true
+  rm -rf "$tmp_main" "$tmp_wt" 2>/dev/null || true
+
+  if [[ -n "$resolved" && "$resolved" != "$tmp_wt" ]]; then
+    pass "Test 6: _durable_root resolved to '$resolved' (main repo), not worktree '$tmp_wt'"
+  else
+    fail "Test 6: _durable_root resolved to '$resolved' (expected main repo, got worktree or empty)"
+  fi
+}
+
+# -- Test 7: REAL JS one-liner across main / worktree / unrelated-repo cwds --
+_extract_js_resolve_snippet() {
+  # Must anchor on the git-common-dir marker -- the file has multiple
+  # `await bash(...)` call sites (e.g. emitLedger); a bare first-match would
+  # silently grab the wrong one.
+  python3 -c "
+import re, sys
+text = open(sys.argv[1]).read()
+m = re.search(r'await bash\(\s*\`([^\`]*git-common-dir[^\`]*)\`', text)
+print(m.group(1) if m else '')
+" "$JS_FILE"
+}
+
+test_7_js_resolution_three_cwds() {
+  log "Test 7: REAL JS resolution one-liner across main/worktree/unrelated cwds"
+  local snippet
+  snippet="$(_extract_js_resolve_snippet)"
+  if [[ -z "$snippet" ]]; then
+    fail "Test 7: could not extract JS resolution one-liner from $JS_FILE (source moved/renamed?)"
+    return
+  fi
+
+  local tmp_main tmp_wt tmp_unrelated
+  tmp_main="$(mktemp -d /tmp/mw-fix-jsmain-XXXXXX)"
+  tmp_wt="$(mktemp -d /tmp/mw-fix-jswt-XXXXXX)"
+  tmp_unrelated="$(mktemp -d /tmp/mw-fix-unrel-XXXXXX)"
+  rmdir "$tmp_wt"
+
+  (
+    cd "$tmp_main"
+    git init -q
+    git config user.email t@t.local; git config user.name t
+    mkdir -p docs/leadv2
+    echo x > f.txt
+    git add -A && git commit -qm init
+    git worktree add -q "$tmp_wt" -b mw-fix-js-branch >/dev/null 2>&1
+  )
+  ( cd "$tmp_unrelated" && git init -q )
+
+  local r_main r_wt r_unrelated
+  r_main="$(cd "$tmp_main" && bash -c "$snippet")"
+  r_wt="$(cd "$tmp_wt" && bash -c "$snippet")"
+  r_unrelated="$(cd "$tmp_unrelated" && bash -c "$snippet")"
+
+  # Canonicalize expected paths the same way git does (resolves macOS /tmp ->
+  # /private/tmp symlink) -- otherwise a correct resolution false-fails on path
+  # form alone (bash-scripting skill: "Path comparison -- normalize first").
+  local tmp_main_real
+  tmp_main_real="$(cd "$tmp_main" 2>/dev/null && pwd -P || printf '%s' "$tmp_main")"
+  # tmp_unrelated stays raw/uncanonicalized: its resolution falls through to the
+  # bare `pwd` fallback (no docs/leadv2 marker), which does not resolve symlinks
+  # the way `git rev-parse` does for the main/worktree branches above.
+
+  (cd "$tmp_main" && git worktree remove --force "$tmp_wt" >/dev/null 2>&1) || true
+  rm -rf "$tmp_main" "$tmp_wt" "$tmp_unrelated" 2>/dev/null || true
+
+  if [[ "$r_main" == "$tmp_main_real" && "$r_wt" == "$tmp_main_real" && "$r_unrelated" == "$tmp_unrelated" ]]; then
+    pass "Test 7: main->main ('$r_main'), worktree->main ('$r_wt'), unrelated->fails-safe-to-own-pwd ('$r_unrelated')"
+  else
+    fail "Test 7: expected main='$tmp_main_real' wt='$tmp_main_real' unrelated='$tmp_unrelated'; got main='$r_main' wt='$r_wt' unrelated='$r_unrelated'"
+  fi
+}
+
 main() {
   log "=== leadv2-phase8-learn-counter unit tests (RUN_ID=${RUN_ID}) ==="
   log "Script: $PHASE8_SH"
@@ -209,6 +322,8 @@ main() {
   test_2_trigger_at_boundary
   test_3_no_double_fire
   test_4_scorecard_path
+  test_6_durable_root_worktree
+  test_7_js_resolution_three_cwds
   echo ""
   log "=== Results: PASS=$PASS FAIL=$FAIL ==="
   if [[ "${#ERRORS[@]}" -gt 0 ]]; then

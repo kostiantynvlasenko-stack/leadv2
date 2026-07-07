@@ -22,6 +22,15 @@ except Exception:
 " 2>/dev/null || true)"
 [[ -z "$CWD" ]] && CWD="${CLAUDE_PROJECT_DIR:-${PWD:-}}"
 
+# MEM-WRITE-PATH-FIX-01 round2 (finding #6): the writer (phase8-close.sh) anchors
+# .learn-trigger to the durable main-repo root (git-common-dir), not the worktree
+# cwd. This reader used the hook's raw session cwd, which "works" only because a
+# fresh session usually starts at the main repo -- unproven if it ever starts
+# inside a leftover worktree. Re-anchor CWD the same way, marker-checked, before
+# resolving the trigger path, so writer and reader always agree.
+_durable_cwd="$(git -C "$CWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null || true)"
+[[ -n "$_durable_cwd" && -d "${_durable_cwd}/docs/leadv2" ]] && CWD="$_durable_cwd"
+
 # Resolve leadv2_dir (mirror pattern from leadv2-postcompact-goal-reinject.sh)
 _sp_yaml="${CWD}/.claude/leadv2-overrides/state-paths.yaml"
 _leadv2_dir=$(python3 -c "

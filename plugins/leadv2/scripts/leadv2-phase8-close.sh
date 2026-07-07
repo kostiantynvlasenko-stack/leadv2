@@ -409,14 +409,27 @@ if [[ "${LEADV2_LEARN_ON_CLOSE:-1}" == "1" ]]; then
   # scorecard.jsonl was frozen (default-OFF for weeks) which froze this trigger
   # too. Always increment the counter file so learn-trigger fires regardless of
   # scorecard state.
-  _counter_file="${PROJECT_ROOT}/docs/leadv2/.learn-close-counter"
-  mkdir -p "${PROJECT_ROOT}/docs/leadv2"
+  # MEM-WRITE-PATH-FIX-01: PROJECT_ROOT resolves via `git rev-parse --show-toplevel`,
+  # which returns the CURRENT WORKTREE (not the main checkout) when close runs inside
+  # an in-flight task worktree. A worktree-local counter evaporates on worktree sweep,
+  # freezing this trigger forever (proven: counter stuck at 1 across 237 real closes).
+  # git-common-dir is the one .git shared by every worktree -- anchor the durable
+  # counter/trigger there so it survives regardless of which worktree ran close.
+  # NOTE (round2 finding #4, comment-only -- counter/trigger logic below is
+  # untouched, live-proven across 237 closes): outside a git repo the pipe exits 0
+  # with EMPTY stdout, so `|| true` here never actually fires for that case. The
+  # real protection is the downstream `[[ -d ]]` check on the next line, which
+  # correctly falls back to $PROJECT_ROOT on an empty/invalid result either way.
+  _durable_root="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null || true)"
+  [[ -d "$_durable_root" ]] || _durable_root="$PROJECT_ROOT"
+  _counter_file="${_durable_root}/docs/leadv2/.learn-close-counter"
+  mkdir -p "${_durable_root}/docs/leadv2"
   _prev=$(cat "$_counter_file" 2>/dev/null || echo 0)
   [[ "$_prev" =~ ^[0-9]+$ ]] || _prev=0   # M1: validate before arithmetic (shell-injection guard)
   _close_count=$(( (_prev + 1) % 1000000 ))
   printf -- '%d\n' "$_close_count" > "${_counter_file}.tmp" && mv "${_counter_file}.tmp" "$_counter_file"  # H1: atomic write
   if [[ $_learn_n -gt 0 && $(( _close_count % _learn_n )) -eq 0 && $_close_count -gt 0 ]]; then
-    _trigger_dir="${PROJECT_ROOT}/docs/leadv2"
+    _trigger_dir="${_durable_root}/docs/leadv2"
     mkdir -p "$_trigger_dir"
     _trigger_file="${_trigger_dir}/.learn-trigger"
     # Read task_class from context.yaml; default to 'general' if absent.

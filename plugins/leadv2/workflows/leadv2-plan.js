@@ -20,6 +20,11 @@ const CTX = `docs/handoff/${TASK_ID}/context.yaml`
 const CODEX_ON = a.codexEnabled !== false
 // M-3: task_class enum passed from lead; avoids BRIEF.slice(0,50) non-match
 const TASK_CLASS = a.taskClass || 'general'
+// MEM-WRITE-PATH-FIX-01 round2: solutions-archive.yaml is gitignored, worktree-
+// local-by-default; a bare relative read here was one of the two stale consumers
+// left behind after the review.js/learn.js round-1 fix (finding #3). Anchor to the
+// same durable main-repo root, marker-checked (see leadv2-review.js for rationale).
+const _ARCHIVE_ROOT = (await bash(`_r="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null)"; [ -n "$_r" ] && [ -d "$_r/docs/leadv2" ] && printf '%s' "$_r" || pwd`)).trim() || '.'
 // [BANDIT-WIRE-01] Consume bandit model selections from args.models (set by lead before Workflow call).
 // args.models absent (or LEADV2_ROUTE_BANDIT != 1) => falls back to existing pinned defaults.
 // Flag-off guarantee: if args.models is not provided, model values are identical to pre-BANDIT-WIRE-01.
@@ -108,7 +113,7 @@ const [capResult, sharedMemRaw, archiveRaw] = await Promise.all([
     `If the file does not exist, return the string "EMPTY". Do not analyze, just return the content.`,
     { label: 'shared-mem-read', phase: 'Classify', model: 'haiku', effort: 'low' }),
   agent(
-    `Read docs/leadv2/solutions-archive.yaml if it exists. ` +
+    `Read ${_ARCHIVE_ROOT}/docs/leadv2/solutions-archive.yaml if it exists. ` +
     `Find entries where task_class matches "${TASK_CLASS}". ` +
     `Return top-3 by score as JSON array [{task_id,score,diff_summary}] or [] if none match or file absent.`,
     { label: 'archive-read', phase: 'Classify', model: 'haiku', effort: 'low' }),
