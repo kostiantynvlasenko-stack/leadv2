@@ -15,7 +15,7 @@ LEADV2_SEMANTIC_COLLECTION="${LEADV2_SEMANTIC_COLLECTION:-leadv2_memory}"
 # Fix round (H2): bounded curl timeout, same rationale as leadv2-semantic-index.sh.
 QDRANT_CURL_MAX_TIME="${LEADV2_QDRANT_CURL_MAX_TIME:-5}"
 
-REPO_ROOT"${1:?usage: leadv2-semantic-backfill.sh <repo_root>}"
+REPO_ROOT="${1:?usage: leadv2-semantic-backfill.sh <repo_root>}"
 REPO_NAME="$(basename "$REPO_ROOT")"
 
 if [[ "${LEADV2_SEMANTIC_RECALL_ENABLED:-0}" != "1" || -z "${LEADV2_RECALL_HELPER:-}" ]]; then
