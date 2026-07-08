@@ -620,6 +620,24 @@ _append_status_warn() {
 _check_cost_ceiling
 
 # ---------------------------------------------------------------------------
+# T8 latent-bug fix (Critical, UNCONDITIONAL — no flag): rebuild the --model
+# element of CLAUDE_ARGS now that _check_cost_ceiling has had its final say
+# on $MODEL. Bash arrays copy the VALUE of $MODEL at construction time (line
+# ~261) — mutating $MODEL afterwards (the pre-existing 60%-cost-ceiling
+# downgrade) could never reach the already-frozen array element without this
+# rebuild (Codex + critic, fix-round-1 Critical finding — confirmed dead
+# wire: the 60%-downgrade only ever affected subsequent spawns, never the
+# current one, before this fix). Self-locating (finds "--model" by value,
+# not a magic index) so it stays correct if CLAUDE_ARGS is ever reordered.
+for _cargs_i in "${!CLAUDE_ARGS[@]}"; do
+  if [[ "${CLAUDE_ARGS[$_cargs_i]}" == "--model" ]]; then
+    CLAUDE_ARGS[_cargs_i + 1]="$MODEL"
+    break
+  fi
+done
+unset _cargs_i
+
+# ---------------------------------------------------------------------------
 # warm_chain() — materialise cache prefix for a list of role-model pairs in
 # parallel before a chain of spawns. Waits max 3 seconds then proceeds.
 #
