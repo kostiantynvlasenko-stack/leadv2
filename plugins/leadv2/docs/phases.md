@@ -157,6 +157,8 @@ plan_result=$(Workflow('leadv2-plan', {
 
 `Workflow('leadv2-plan')` handles: Codex background launch + Monitor watchdog, parallel architect/critic spawns, synthesis into `docs/handoff/<id>/context.yaml`. Returns `{decisions_count, steps_count, blocking_concerns, context_path}`.
 
+**Code map pre-fetch (CODEMAP-CONTEXT-01, flag-gated, default OFF):** When `LEADV2_CODEMAP=1` (unset/`0` = full no-op — skip this paragraph entirely, no MCP call, no extra Workflow args, output byte-identical to pre-CODEMAP-CONTEXT-01), BEFORE calling `Workflow('leadv2-plan', ...)` lead makes ONE bounded `get_architecture` MCP call (optionally one follow-up `search_graph` for task-relevant symbols) against the project, catches any error/timeout/empty result, and builds a compact code_map string (architecture summary + key modules + dependency edges — target ≤2000 chars, never the full graph). Pass it as `codeMap: "<text>", codemapEnabled: true` in the Workflow args. On MCP failure: omit both fields and proceed — never block or retry Phase 2 on this. `leadv2-plan.js` size-caps `codeMap` again defensively (2000 chars, deterministic truncation note) and folds it into the architect's context envelope + `context.yaml.code_map`.
+
 **Schema-death fallback (null-check on Workflow return — MANDATORY):** If `plan_result` is null/undefined or `context_path` is missing → log to pulse `plan-workflow: schema-death, falling back to inline` and fall through to the inline path below.
 
 **Inline path (flag off or Workflow schema-death):**
@@ -188,6 +190,7 @@ Wait via Monitor on output files. When complete: read deliverables via `bash "${
 - Hard cap ≤100 lines: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-mission-lint.sh" <file>` exit 0 required.
 - Lead's spawn prompt ≤300 words: pipe the prompt body through `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-prompt-lint.sh"` before invoking Agent. Lead orients (worktree path, branch, project hint, deliverable path, word cap); the subagent reads context.yaml + mission itself.
 - Mission template: `.claude/templates/mission-template.md`. Always includes `No extended thinking unless context.yaml.explicit_reason_required=true` and `Output: minimal-diff sections only — never full-file rewrites`.
+- **Code map (CODEMAP-CONTEXT-01):** if `context.yaml.code_map` is present (only when `LEADV2_CODEMAP=1` was set at Plan time), include it verbatim under a `## Graph context` heading in the mission file — this is exactly what mission-template.md's "Graph context" section and the subagent protocol's §2/§6.5 expect subagents to read first instead of re-discovering the repo. Absent field → omit the heading entirely, no behavior change. Applies to Plan-stage AND Build-stage mission files alike (same field, no separate Build-phase fetch).
 
 **Auto-compact before Phase 4 (Heavy/Standard tasks):**
 After Gate 1 accepted and context.yaml written, trigger compaction if ctx > 120K:
@@ -221,6 +224,8 @@ Update `docs/leadv2/tasks/<id>/STATE.md` gate_1.status=confirmed. `leadv2_active
 **Pre-condition:** `docs/handoff/$TASK_ID/.gate1-passed` MUST exist before any developer spawn. The Gate 1 approval path (`leadv2-gate1-prompt.sh`) writes this sentinel on every accept path. The `leadv2-gate-artifact-guard.sh` hook (C2) enforces this mechanically — if the sentinel is absent, the spawn is hard-blocked. Lead MUST also write `current_blocker: <one-line description>` to `context.yaml` before each Build spawn if a blocker is active (empty string = no blocker). This field drives the `leadv2-blocker-drift-guard.sh` (C3) drift counter.
 
 **Route first:** `eval "$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-router.sh" --phase build --step <step> --task-id <id> --class <class> --signals '{"total_lines":<N>,"change_kind":"<kind>"}' 2>/dev/null)" || true`. Honor `ceiling_status`: `warn_60pct` log warning, `hard_stop_95pct` exit 1.
+
+**Code map in Build missions (CODEMAP-CONTEXT-01):** reuses the same `context.yaml.code_map` snapshot captured at Plan time (see §Phase 2 "Code map pre-fetch" + "Mission file builder rule") — no separate Build-phase MCP fetch. Field absent (flag was off, or MCP failed at Plan time) → mission files simply have no `## Graph context` heading, no behavior change.
 
 **Autonomous completion loop:**
 After Gate 1 is confirmed, set the `/goal` loop based on session mode:

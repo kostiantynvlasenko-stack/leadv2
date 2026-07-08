@@ -60,4 +60,33 @@ if [[ "$_lv2_db" == "supabase" ]]; then
   fi
 fi
 
+# [CODEMAP-CONTEXT-01, fix-round-1 #5] Real Build-side enforcement (not prose-only): if
+# LEADV2_CODEMAP=1 and the sibling context.yaml has a non-empty code_map, this mission file
+# MUST carry it forward under a '## Graph context' heading (per mission-template.md / the
+# subagent protocol §2/§6.5) — otherwise Build-phase subagents silently re-discover the repo
+# instead of reusing the already-fetched map. Flag-gated + fail-open + default-off
+# byte-identical: LEADV2_CODEMAP unset/0 => this whole block never runs (identical to
+# pre-CODEMAP-CONTEXT-01 mission-lint behavior). Any error reading/parsing context.yaml, or
+# code_map simply absent, is a silent no-op — this check never blocks on a dependency it
+# doesn't own.
+if [[ "${LEADV2_CODEMAP:-0}" == "1" ]]; then
+  _cm_ctx_file="$(dirname "$file")/context.yaml"
+  if [[ -f "$_cm_ctx_file" ]]; then
+    _cm_has_code_map=$(python3 -c "
+import yaml, sys
+try:
+    d = yaml.safe_load(open('$_cm_ctx_file')) or {}
+except Exception:
+    d = {}
+v = d.get('code_map')
+print('1' if isinstance(v, str) and v.strip() else '0')
+" 2>/dev/null || echo "0")
+    if [[ "$_cm_has_code_map" == "1" ]] && ! grep -q '^## Graph context' "$file" 2>/dev/null; then
+      echo "MISSION_MISSING_GRAPH_CONTEXT file=$file"
+      echo "→ context.yaml.code_map is present (LEADV2_CODEMAP=1) but this mission file has no '## Graph context' heading. Copy context.yaml's code_map verbatim under a '## Graph context' heading before spawning (see mission-template.md)."
+      exit 6
+    fi
+  fi
+fi
+
 exit 0
