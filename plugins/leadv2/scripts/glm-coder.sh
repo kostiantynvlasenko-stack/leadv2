@@ -9,14 +9,72 @@
 # watchdog. `status`/`tail`/`watch`/`list` mirror codex-task.sh UX.
 #
 # GLM-ROUTING-V2-01 (design.md Part 2 + Codex review resolutions R1-R5).
+#
+# GLM-RELIABILITY-529-01 (2026-07-08, fix-round-4 RADICAL SIMPLIFY): the
+# `claude` CLI's own Anthropic-SDK HTTP client retries provider-overload
+# (HTTP 529/503/429) up to `max_retries: 300` with exponential backoff,
+# emitting `{"type":"system","subtype":"api_retry",...}` events into the
+# stream-json journal but NOTHING into progress.log -- so a sustained-529 run
+# sat silent for up to ~1h (the old GLM_TIMEOUT), indistinguishable from
+# "still working". Three prior fix rounds tried increasingly careful
+# per-poll overload-detection heuristics (streak/grace, then progress-based,
+# then unresolved-window-scoped) -- each review round caught a new subtle
+# race in the same fundamentally fragile shape. Founder decision: RIP OUT
+# the whole detection primitive; rely on the existing GLM_TIMEOUT watchdog as
+# the single bound, now lowered to 900s.
+#
+# NET BEHAVIOR: sustained overload -> SDK retries happen inside the `claude`
+# binary -> each is logged as a `PROVIDER_RETRY status=<n> attempt=<n>` line
+# in progress.log (visible, not silent) -> the run is bounded by the 900s
+# GLM_TIMEOUT -> the existing timeout watchdog touches `.timed_out` FIRST,
+# before TERM/KILL -> two-sentinel contract emits `GLM_FALLBACK_TO_SONNET` +
+# exit 76. No 1-hour hang (900s worst case). Zero race-prone detection logic.
+# `cmd_bg` still returns immediately; callers still grep progress.log
+# sentinels + meta.yaml exit_code.
+#
+# Two-sentinel contract on run end (mutually exclusive), written to
+# progress.log + meta.yaml's exit_code field:
+#   - GLM_FALLBACK_TO_SONNET / exit GLM_FALLBACK_EXIT_CODE (76): `.timed_out`
+#     fired, OR the run produced no coherent/parseable result at all
+#     (garbage/unparsable output, or an ERROR terminal result -- FIX2) --
+#     a provider/infra problem or ambiguity either way, fail-safe treats it
+#     as "try sonnet". The real/diagnostic exit code is still logged via
+#     RUN_FAILED for debugging.
+#   - GLM_PERMANENT_FAILURE: the child ran to completion with a COHERENT,
+#     NON-error result but a genuine non-zero exit and NO timeout marker --
+#     a real task failure, not a provider problem; sonnet would hit the same
+#     wall. meta.yaml exit_code PRESERVES the real child exit code (never
+#     overridden). A genuine exit-0 + coherent non-error result is
+#     unconditionally SUCCESS regardless of a stale marker (FIX3, explicit
+#     precedence).
+# glm-coder.sh does NOT invoke sonnet itself -- it only signals; the
+# caller/Monitor decides what to do with each sentinel.
+#
+# GLM_CLAUDE_BIN/GLM_RUNS_DIR/GLM_SECRETS_FILE are test seams (default to the
+# exact prior hardcoded values) so tests can stub the `claude` binary and
+# isolate run/lock state without touching prod.
 set -euo pipefail
 umask 077
 
-readonly SECRETS_FILE="${HOME}/.claude/secrets/zai.env"
+readonly SECRETS_FILE="${GLM_SECRETS_FILE:-${HOME}/.claude/secrets/zai.env}"
 readonly ZAI_BASE_URL="https://api.z.ai/api/anthropic"
-readonly RUNS_DIR="${HOME}/.claude/cache/glm-runs"
-readonly GLM_TIMEOUT="${GLM_TIMEOUT:-3600}"
+readonly RUNS_DIR="${GLM_RUNS_DIR:-${HOME}/.claude/cache/glm-runs}"
+# GLM_TIMEOUT: was 3600s (1h) -- the silent-hang window this task fixes.
+# Lowered to 900s (15min) as fix-round-4's RADICAL SIMPLIFY: this is now the
+# SOLE bound on a stuck run (the overload-specific detector was removed
+# entirely after 4 review rounds each found a new race in it).
+readonly GLM_TIMEOUT="${GLM_TIMEOUT:-900}"
 readonly GLM_MAX_TURNS="${GLM_MAX_TURNS:-40}"
+# Dedicated non-zero exit code for "GLM gave up, fall back to sonnet" —
+# distinct from 75 (lock busy, pre-existing) and from ordinary shell exit 1.
+readonly GLM_FALLBACK_EXIT_CODE="${GLM_FALLBACK_EXIT_CODE:-76}"
+readonly GLM_FALLBACK_SENTINEL="GLM_FALLBACK_TO_SONNET"
+# Emitted (real child exit code PRESERVED in meta.yaml) when the run produced
+# a coherent, non-error result but genuinely failed with no timeout marker —
+# sonnet would hit the same task-level failure.
+readonly GLM_PERMANENT_FAILURE_SENTINEL="GLM_PERMANENT_FAILURE"
+# Seam for tests to stub the `claude` binary entirely (no real network call).
+readonly GLM_CLAUDE_BIN="${GLM_CLAUDE_BIN:-claude}"
 readonly SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 # FINISH GUARD (2026-07-03): appended to every real mission prompt (cmd_bg and
@@ -57,7 +115,24 @@ Usage:
   list    Last N runs: id, status, repo, started_at. Default N=10.
   test    Self-test: sends a short prompt and prints the tail of the response.
 
-Env knobs: GLM_TIMEOUT (default 3600s), GLM_MAX_TURNS (default 40).
+Env knobs: GLM_TIMEOUT (default 900s), GLM_MAX_TURNS (default 40),
+  GLM_FALLBACK_EXIT_CODE (default 76).
+
+Terminal sentinels (GLM-RELIABILITY-529-01) — mutually exclusive, appended to
+progress.log, mirrored into meta.yaml's exit_code field:
+  GLM_FALLBACK_TO_SONNET   `.timed_out` fired, OR no coherent/non-error
+                           result at all (garbage/unparsable output, or an
+                           error terminal result) — ambiguous either way,
+                           fail-safe treats it as "try sonnet". meta.yaml
+                           exit_code = GLM_FALLBACK_EXIT_CODE (76).
+  GLM_PERMANENT_FAILURE    Coherent, non-error result but a genuine non-zero
+                           exit, no timeout marker: a real task failure
+                           sonnet would hit too. meta.yaml exit_code = the
+                           REAL child exit code (never overridden).
+Provider retries (HTTP 429/503/529) are logged as PROVIDER_RETRY lines in
+progress.log for visibility, but are NOT independently detected or acted on
+— the run is bounded solely by GLM_TIMEOUT. glm-coder.sh never invokes
+sonnet itself — callers/Monitor must react to whichever sentinel appears.
 EOF
 }
 
@@ -117,7 +192,7 @@ run_claude() {
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="glm-4.5-air"
     export DISABLE_MODEL_AVAILABILITY_CHECK=1
     export API_TIMEOUT_MS=3000000
-    command claude -p "${resolved_prompt}" \
+    command "${GLM_CLAUDE_BIN}" -p "${resolved_prompt}" \
       --dangerously-skip-permissions \
       --model sonnet
   ) >"${out_file}" 2>&1 || exit_code=$?
@@ -341,7 +416,8 @@ os.execvp(sys.argv[1], sys.argv[1:])
 }
 
 # Best-effort observability filter over stream-json (R3): never determines
-# run success/failure — only produces MODEL/TOOL/TOKENS lines for progress.log.
+# run success/failure — only produces MODEL/TOOL/TOKENS/PROVIDER_RETRY lines
+# for progress.log.
 parse_stream() {
   python3 -u -c '
 import sys, json
@@ -358,6 +434,20 @@ for raw in sys.stdin:
     try:
         if etype == "system" and ev.get("subtype") == "init":
             print("MODEL " + str(ev.get("model", "unknown")))
+        elif etype == "system" and ev.get("subtype") == "api_retry":
+            # GLM-RELIABILITY-529-01: surface provider retries (KEEP item
+            # from fix-round-4) so a human watching progress.log sees "it is
+            # retrying" instead of total silence during overload -- values
+            # are int()-sanitized (fall back to "?" on any failure), never
+            # eval/splice the untrusted error body. Purely observational:
+            # retries are NOT independently detected/acted on any more --
+            # the run is bounded solely by GLM_TIMEOUT.
+            def _num(v):
+                try:
+                    return str(int(v))
+                except Exception:
+                    return "?"
+            print("PROVIDER_RETRY status=" + _num(ev.get("error_status")) + " attempt=" + _num(ev.get("attempt")))
         elif etype == "assistant":
             msg = ev.get("message") or {}
             for block in (msg.get("content") or []):
@@ -392,6 +482,12 @@ for line in sys.stdin:
 }
 
 # Fallback result extraction (R3): last `result`-type event from journal.jsonl.
+# GLM-RELIABILITY-529-01 FIX2 (KEEP item from fix-round-4): also flags
+# whether that last result was an ERROR payload (is_error:true, or a subtype
+# starting with "error") via a sibling `.result_is_error` marker file --
+# cmd_supervise's has_result check excludes error results from counting as
+# "coherent success evidence", so a run that exits non-zero with an
+# overload/error result routes to FALLBACK, not PERMANENT_FAILURE.
 extract_result() {
   local run_dir="$1"
   python3 -c '
@@ -416,7 +512,9 @@ except FileNotFoundError:
     pass
 
 text = ""
+is_error = False
 if last_result is not None:
+    is_error = bool(last_result.get("is_error")) or str(last_result.get("subtype", "")).startswith("error")
     text = last_result.get("result") or last_result.get("text") or ""
     if not text:
         text = json.dumps(last_result)
@@ -424,6 +522,10 @@ if last_result is not None:
 out_path = os.path.join(run_dir, "result.md")
 with open(out_path, "w") as out:
     out.write(text if text else "(no result event found)\n")
+
+if is_error:
+    with open(os.path.join(run_dir, ".result_is_error"), "w") as f:
+        f.write("1\n")
 ' "${run_dir}"
 }
 
@@ -572,7 +674,7 @@ cmd_run_child() {
   # passing if a prompt near bash ARG_MAX is observed in practice.
 
   set +e
-  ( command claude -p "${prompt}" \
+  ( command "${GLM_CLAUDE_BIN}" -p "${prompt}" \
       --model sonnet \
       --output-format stream-json \
       --verbose \
@@ -589,12 +691,21 @@ watchdog_loop() {
   local waited=0 interval=2
   while [[ ! -f "${run_dir}/.done" ]]; do
     if [[ "${waited}" -ge "${timeout_s}" ]]; then
+      # fix-round-1 H1 (KEEP item from fix-round-4): touch the marker FIRST,
+      # before sending TERM. If touched last, cmd_supervise's
+      # `wait "$child_pid"` can return the instant TERM lands (process group
+      # dies fast), at which point cmd_supervise sends a bare `kill` to THIS
+      # subshell while it is still mid-`sleep 5` -- killing it before it
+      # ever reaches `touch`, so the marker never gets written and the
+      # downstream branch that reads it becomes dead code. Touching first
+      # makes the marker unconditionally reliable regardless of who wins
+      # that reap race.
+      touch "${run_dir}/.timed_out"
       printf '[%s] TIMEOUT after %ss -- killing process group %s\n' \
         "$(date '+%Y-%m-%d %H:%M:%S')" "${timeout_s}" "${child_pid}" >> "${run_dir}/progress.log"
       kill -TERM "-${child_pid}" 2>/dev/null || true
       sleep 5
       kill -KILL "-${child_pid}" 2>/dev/null || true
-      touch "${run_dir}/.timed_out"
       return 0
     fi
     sleep "${interval}"
@@ -637,11 +748,22 @@ cmd_supervise() {
   kill "${watchdog_pid}" 2>/dev/null || true
   wait "${watchdog_pid}" 2>/dev/null || true
 
-  local exit_code
-  if [[ -f "${run_dir}/exit_code" ]]; then
-    exit_code="$(cat "${run_dir}/exit_code")"
-  elif [[ -f "${run_dir}/.timed_out" ]]; then
+  # fix-round-1 H1/H3 (KEEP item): `.timed_out` is AUTHORITATIVE and checked
+  # FIRST, unconditionally -- watchdog_loop touches it BEFORE sending TERM
+  # (above), so by the time we reach here it reliably exists whenever the
+  # watchdog fired, regardless of whatever (possibly stale/racy) content the
+  # exit_code file happens to hold. child_exit_from_file is captured
+  # separately so the FIX3 genuine-success precedence check below can still
+  # recognize a real race-won completion even if `.timed_out` also exists.
+  local child_exit_from_file=""
+  [[ -f "${run_dir}/exit_code" ]] && child_exit_from_file="$(cat "${run_dir}/exit_code")"
+
+  local exit_code is_timeout=0
+  if [[ -f "${run_dir}/.timed_out" ]]; then
     exit_code=124
+    is_timeout=1
+  elif [[ -n "${child_exit_from_file}" ]]; then
+    exit_code="${child_exit_from_file}"
   else
     exit_code=1
   fi
@@ -662,9 +784,29 @@ cmd_supervise() {
   tokens_out="$(sum_tokens "${run_dir}" out)"
   turns="$(grep -c '^TOKENS ' "${run_dir}/progress.log" 2>/dev/null || echo 0)"
 
-  # Success = child exit code + result presence, never the parser (R3).
-  if [[ "${exit_code}" -eq 0 ]] && [[ -s "${run_dir}/result.md" ]] \
-     && ! grep -q '^(no result event found)$' "${run_dir}/result.md"; then
+  # FIX2 (KEEP item): an ERROR result payload (extract_result's
+  # .result_is_error marker -- is_error:true or an "error*" subtype on the
+  # last type:"result" journal event) does NOT count as coherent success
+  # evidence, even if result.md has non-empty text.
+  local has_result=0
+  if [[ -s "${run_dir}/result.md" ]] && ! grep -q '^(no result event found)$' "${run_dir}/result.md" \
+     && [[ ! -f "${run_dir}/.result_is_error" ]]; then
+    has_result=1
+  fi
+
+  # FIX3 (KEEP item) [insurance]: genuine-success precedence, made EXPLICIT.
+  # exit_code==0 from the child's OWN recorded exit_code file, combined with
+  # a coherent non-error result, is unconditionally SUCCESS -- regardless of
+  # a `.timed_out` marker that might also exist (e.g. touched microseconds
+  # before the child's own natural completion won the reap race).
+  if [[ -n "${child_exit_from_file}" ]] && [[ "${child_exit_from_file}" -eq 0 ]] && [[ "${has_result}" -eq 1 ]]; then
+    exit_code=0
+    is_timeout=0
+  fi
+
+  # Success = child exit code + coherent non-error result presence, never
+  # the parser (R3).
+  if [[ "${exit_code}" -eq 0 ]] && [[ "${has_result}" -eq 1 ]]; then
     status="complete"
     # Backward-compat: RUN_COMPLETE is always emitted on its own line first —
     # existing Monitor greps for this literal string keep working unchanged.
@@ -678,13 +820,28 @@ cmd_supervise() {
     fi
   else
     status="failed"
-    [[ "${exit_code}" -eq 0 ]] && exit_code=1
+    local original_exit="${exit_code}"
+    [[ "${original_exit}" -eq 0 ]] && original_exit=1
     {
-      echo "RUN_FAILED exit=${exit_code}"
+      echo "RUN_FAILED exit=${original_exit}"
       if [[ -f "${run_dir}/stderr.log" ]]; then
         echo "ERROR: $(tail -n 5 "${run_dir}/stderr.log" | tr '\n' ' ')"
       fi
     } >> "${run_dir}/progress.log"
+
+    # Two-sentinel contract (KEEP item): retryable-elsewhere (`.timed_out`
+    # fired, OR no coherent/non-error result at all -- garbage/unparsable or
+    # an error result, ambiguous either way) -> fallback. Otherwise the
+    # child ran to completion with a COHERENT, non-error result but
+    # genuinely exited non-zero -> a real task failure sonnet would hit too
+    # -- preserve the real exit code.
+    if [[ "${is_timeout}" -eq 1 ]] || [[ "${has_result}" -eq 0 ]]; then
+      exit_code="${GLM_FALLBACK_EXIT_CODE}"
+      echo "${GLM_FALLBACK_SENTINEL}" >> "${run_dir}/progress.log"
+    else
+      exit_code="${original_exit}"
+      echo "${GLM_PERMANENT_FAILURE_SENTINEL}" >> "${run_dir}/progress.log"
+    fi
   fi
 
   finalize_meta "${run_dir}" "${status}" "${exit_code}" "${duration}" "${tokens_in}" "${tokens_out}" "${turns}"
