@@ -88,13 +88,28 @@ fi
 RULES_LOAD_SCRIPT="$(dirname "$(readlink -f "$0")")/leadv2-rules-load.sh"
 
 RULES_JSON=""
+_rules_rc=0
 if [[ -f "$RULES_LOAD_SCRIPT" ]]; then
-  RULES_JSON=$("$RULES_LOAD_SCRIPT" 2>/dev/null || true)
+  RULES_JSON=$("$RULES_LOAD_SCRIPT" 2>/dev/null) || _rules_rc=$?
 else
   RULES_JSON='{"rules":[],"count":0,"warnings":["rules_load_script_missing"]}'
 fi
 
 if [[ -z "$RULES_JSON" ]]; then
+  if [[ "$_rules_rc" -ne 0 ]]; then
+    # FAIL-LOUD-FLAGS-01: loader crashed (rc!=0, empty stdout) — previously
+    # indistinguishable from a loader that legitimately returned zero rules.
+    # shellcheck disable=SC1091
+    source "$(dirname "$(readlink -f "$0")")/leadv2-strict.sh" 2>/dev/null || true
+    # FIX ROUND (C1): guard against strict_or_warn being undefined (helper
+    # missing/unreadable) — see leadv2-semantic-recall.sh for full rationale.
+    if command -v strict_or_warn >/dev/null 2>&1; then
+      if ! strict_or_warn "rules-load-crash" \
+          "leadv2-rules-load.sh exited ${_rules_rc} with no stdout -- quality-rules gate is falling back to an EMPTY ruleset, indistinguishable from a legitimate zero-rules result"; then
+        exit 3
+      fi
+    fi
+  fi
   RULES_JSON='{"rules":[],"count":0,"warnings":[]}'
 fi
 

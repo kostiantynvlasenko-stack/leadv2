@@ -17,7 +17,22 @@ readonly REPO_ROOT
 LEADV2_PROJECT_ROOT="$REPO_ROOT"
 export LEADV2_PROJECT_ROOT
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/leadv2-helpers.sh" 2>/dev/null || true
+if ! source "${SCRIPT_DIR}/leadv2-helpers.sh" 2>/dev/null; then
+  # FAIL-LOUD-FLAGS-01: helpers.sh failed to source -> the stack.yaml reader
+  # is unavailable below, so this gate may silently fall back to wrong-stack
+  # defaults (e.g. treating a non-Python repo as Python, or vice versa)
+  # instead of the visible "no src_roots configured" skip it already has.
+  # shellcheck disable=SC1091
+  source "${SCRIPT_DIR}/leadv2-strict.sh" 2>/dev/null || true
+  # FIX ROUND (C1): guard against strict_or_warn being undefined (helper
+  # missing/unreadable) — see leadv2-semantic-recall.sh for full rationale.
+  if command -v strict_or_warn >/dev/null 2>&1; then
+    if ! strict_or_warn "coverage-gate-helpers-source-fail" \
+        "leadv2-helpers.sh failed to source -- stack.yaml reader unavailable, coverage gate may use wrong-language defaults"; then
+      exit 2
+    fi
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Logging

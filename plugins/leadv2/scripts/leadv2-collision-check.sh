@@ -4,6 +4,11 @@
 #
 # Usage: leadv2-collision-check.sh
 # Exit 0 = no collision risk. Exit 2 = collision risk, stdout describes.
+# Exit 1 = LEADV2_REQUIRE_STRICT=1 config error (leadv2-helpers.sh failed to
+#          source) -- NOT a collision signal. leadv2-self-spawn.sh only ever
+#          treats rc==2 as a footprint collision, so this is safe to
+#          distinguish; never reuse 2 for this case (FAIL-LOUD-FLAGS-01 fix
+#          round, MEDIUM finding).
 
 set -euo pipefail
 
@@ -12,7 +17,22 @@ _COLLISION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 export LEADV2_PROJECT_ROOT
 # shellcheck disable=SC1091
-source "${_COLLISION_SCRIPT_DIR}/leadv2-helpers.sh" 2>/dev/null || true
+if ! source "${_COLLISION_SCRIPT_DIR}/leadv2-helpers.sh" 2>/dev/null; then
+  # FAIL-LOUD-FLAGS-01: helpers.sh failed to source -> _lv2_stack_list is
+  # undefined below, so the hot_paths check silently falls back to
+  # PE-specific hardcoded defaults on ANY repo (leadv2_memory is shared
+  # across persona-engine/m3/respiro-ios) — a real per-repo false-GREEN.
+  # shellcheck disable=SC1091
+  source "${_COLLISION_SCRIPT_DIR}/leadv2-strict.sh" 2>/dev/null || true
+  # FIX ROUND (C1): guard against strict_or_warn being undefined (helper
+  # missing/unreadable) — see leadv2-semantic-recall.sh for full rationale.
+  if command -v strict_or_warn >/dev/null 2>&1; then
+    if ! strict_or_warn "collision-check-helpers-source-fail" \
+        "leadv2-helpers.sh failed to source -- hot_paths check falls back to PE-only defaults, which may miss this repo's real hot paths"; then
+      exit 1
+    fi
+  fi
+fi
 
 active_yaml="docs/leadv2/active.yaml"
 risky=()

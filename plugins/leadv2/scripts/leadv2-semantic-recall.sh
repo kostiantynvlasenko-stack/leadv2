@@ -28,7 +28,26 @@ QDRANT_CURL_MAX_TIME="${LEADV2_QDRANT_CURL_MAX_TIME:-5}"
 
 _sem_enabled() {
   [[ "${LEADV2_SEMANTIC_RECALL_ENABLED:-0}" == "1" ]] || return 1
-  [[ -n "${LEADV2_RECALL_HELPER:-}" && -f "${LEADV2_RECALL_HELPER}" ]] || return 1
+  if [[ -z "${LEADV2_RECALL_HELPER:-}" || ! -f "${LEADV2_RECALL_HELPER:-}" ]]; then
+    # FAIL-LOUD-FLAGS-01: flag=1 but the enabling artifact is missing — a
+    # genuine misconfiguration, distinct from the flag=0 (disabled) case
+    # above, which stays a plain silent `return 1` in ALL modes.
+    # shellcheck disable=SC1091
+    source "$(dirname "${BASH_SOURCE[0]}")/leadv2-strict.sh" 2>/dev/null || true
+    # FIX ROUND (C1): strict_or_warn may be UNDEFINED if leadv2-strict.sh is
+    # missing/unreadable — a bare call would then be "command not found" (127),
+    # and `! cmd` on a 127 is true, firing `exit 1` UNCONDITIONALLY regardless
+    # of LEADV2_REQUIRE_STRICT. Guard with `command -v` first: helper-absent
+    # MUST degrade to the exact pre-diff behavior (silent `return 1`), never a
+    # surprise exit, in ANY mode.
+    if command -v strict_or_warn >/dev/null 2>&1; then
+      if ! strict_or_warn "semantic-recall-helper-missing" \
+          "LEADV2_SEMANTIC_RECALL_ENABLED=1 but LEADV2_RECALL_HELPER is unset/not-a-file (${LEADV2_RECALL_HELPER:-<unset>}) -- recall silently degrades to keyword-only"; then
+        exit 1
+      fi
+    fi
+    return 1
+  fi
   return 0
 }
 
