@@ -20,12 +20,18 @@
 #   3  proposal already in terminal state (idempotent skip)
 #   4  blocked_by_eval (eval-harness failed -- proposal status set)
 #   5  founder_gated (high-risk proposal, status set)
+#   6  held_by_regression_gate (T10: confirmed negmem match -- proposal NOT applied, status
+#      left unchanged so it can be retried once the negmem match no longer holds)
 #
 # ENV:
-#   LEADV2_PROJECT_ROOT       -- required; resolved from git toplevel when absent
-#   LEADV2_SHADOW_ON_CLOSE    -- must be "1" to enable shadow ops; absent = skip (D6)
-#   LEADV2_EVAL_HARNESS_ON    -- forwarded to eval-harness; "1" to run harness gate (D7)
-#   LEADV2_DRY_RUN            -- "1" = dry-run; skip mutations (D5)
+#   LEADV2_PROJECT_ROOT              -- required; resolved from git toplevel when absent
+#   LEADV2_SHADOW_ON_CLOSE           -- must be "1" to enable shadow ops; absent = skip (D6)
+#   LEADV2_EVAL_HARNESS_ON           -- forwarded to eval-harness; "1" to run harness gate (D7)
+#   LEADV2_DRY_RUN                   -- "1" = dry-run; skip mutations (D5)
+#   LEADV2_REGRESSION_GATE           -- T10: "1" to enable negmem regression gate on --promote;
+#                                        default 0 = byte-identical to pre-T10 behavior
+#   LEADV2_REGRESSION_GATE_THRESHOLD -- T10: negmem match score (0.0-1.0) required for a
+#                                        CONFIRMED match; default 0.5
 #
 # DECISIONS: D1 D3 D4 D5 D6 D7 D10; R4 flock; R8 snapshot; R9 risk_level
 
@@ -45,6 +51,7 @@ fi
 log()       { printf -- '[shadow-apply] %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 log_error() { log "ERROR: $*"; }
 log_ok()    { log "OK: $*"; }
+log_warn()  { log "WARN: $*"; }
 
 SHADOW_DIR="${LEADV2_PROJECT_ROOT}/docs/leadv2/shadow"
 PROPOSALS_DIR="${SHADOW_DIR}/proposals"
@@ -341,7 +348,7 @@ PYEOF
       "$TASKBENCH_GATE_SCRIPT" "$TB_BASE_RUN_ID" "$TB_CAND_RUN_ID" > "$TB_TMP" 2>/dev/null
     TB_GATE_RC=$?
     set -e
-    TB_GATE_JSON=$(cat "$TB_TMP" 2>/dev/null)
+    TB_GATE_JSON=$(cat "$TB_TMP" 2>/dev/null || true)
     rm -f "$TB_TMP"
 
     # `timeout`'s reported exit code for a killed child varies by platform/implementation:
@@ -370,6 +377,126 @@ PYEOF
         _taskbench_hold "gate misconfigured (empty/unparsable verdict, raw='${TB_GATE_JSON}')"
         ;;
     esac
+  fi
+
+  # T10 PROPOSAL-REGRESSION-GATE-01: THIRD, independent gate on the same apply flow (after
+  # T9's taskbench_gate above), keyed on negative-memory (immune-patterns.yaml) instead of a
+  # taskbench verdict. Reaching this point already means the high-risk/founder-gate
+  # short-circuit above did NOT fire for this proposal (see discovery.md #1) -- i.e. this
+  # gate runs strictly AFTER any founder-approval checkpoint the script performs. Fail-mode is
+  # therefore the OPPOSITE of T9: fail-OPEN-with-warn, not fail-safe -- a hard-hold on
+  # negmem-unavailable would freeze all governance for proposals that are already
+  # founder-gated by construction. LEADV2_REGRESSION_GATE unset/0 -> this entire block is
+  # skipped, byte-identical to pre-T10 behavior (flag default 0).
+  #
+  # HOLD (skip the mutation, exit 6) ONLY on a CONFIRMED negmem match (score >= threshold).
+  # Every other outcome -- no match, low score, empty/derivable-signature, lookup script
+  # missing, timeout, non-zero exit, unparsable YAML -- PROCEEDS with a loud log_warn.
+  #
+  # No injection: the proposal-derived signature and immune-lookup's YAML output are UNTRUSTED
+  # DATA -- passed as argv / read from a tempfile only, never spliced into a shell string /
+  # eval / backticks. Bounded with `timeout -k 5s 30s` and the tempfile-capture idiom (NOT
+  # `$(...)`) -- see T9's fix-round-2 comment above for why a stdout-inheriting grandchild can
+  # wedge a command-substitution pipe. Durable-root resolution is delegated entirely to
+  # leadv2-immune-lookup.sh's own resolver (LEADV2_PROJECT_ROOT-aware, never --show-toplevel);
+  # this block never re-derives a root itself.
+  REGRESSION_GATE_HELD=0
+  if [[ "${LEADV2_REGRESSION_GATE:-0}" == "1" ]]; then
+    REGRESSION_GATE_THRESHOLD="${LEADV2_REGRESSION_GATE_THRESHOLD:-0.5}"
+    IMMUNE_LOOKUP_SCRIPT="${SCRIPT_DIR}/leadv2-immune-lookup.sh"
+
+    # Derive pattern signature from proposal fields (discovery.md #3): representative_summary
+    # is the primary signature for cross-repo-pattern proposals; fall back through title /
+    # keywords / kind so non-cross-repo kinds (which lack these fields) degrade to an empty
+    # signature rather than erroring -- handled as the "no signature" fail-open case below.
+    RG_SIG=$(python3 -c "
+import sys, json
+d = json.loads(sys.argv[1])
+candidates = [
+    str(d.get('representative_summary') or ''),
+    str(d.get('title') or ''),
+    ' '.join(d.get('keywords') or []),
+    str(d.get('kind') or ''),
+]
+for c in candidates:
+    if c.strip():
+        print(c.strip())
+        break
+" "$PROPOSAL_JSON" 2>/dev/null || true)
+
+    if [[ -z "$RG_SIG" ]]; then
+      log_warn "regression-gate: no derivable pattern signature for proposal ${PROPOSAL_ID} -- proceeding"
+    elif [[ ! -f "$IMMUNE_LOOKUP_SCRIPT" ]]; then
+      log_warn "regression-gate: lookup unavailable (script not found: ${IMMUNE_LOOKUP_SCRIPT}) -- proceeding"
+    else
+      RG_TMP="$(mktemp 2>/dev/null)" || RG_TMP=""
+      if [[ -z "$RG_TMP" ]]; then
+        log_warn "regression-gate: lookup unavailable (mktemp failed) -- proceeding"
+      else
+        set +e
+        timeout -k 5s 30s bash "$IMMUNE_LOOKUP_SCRIPT" "$RG_SIG" > "$RG_TMP" 2>/dev/null
+        RG_RC=$?
+        set -e
+        RG_YAML=$(cat "$RG_TMP" 2>/dev/null || true)
+        rm -f "$RG_TMP"
+
+        if [[ $RG_RC -eq 124 || $RG_RC -eq 137 || $RG_RC -eq 143 ]]; then
+          log_warn "regression-gate: lookup unavailable (timeout -- immune-lookup did not return within 30s, force-killed via -k) -- proceeding"
+        elif [[ $RG_RC -ne 0 || -z "$RG_YAML" ]]; then
+          log_warn "regression-gate: lookup unavailable (rc=${RG_RC}, empty output) -- proceeding"
+        else
+          RG_RESULT=$(python3 -c "
+import sys, yaml
+try:
+    d = yaml.safe_load(sys.argv[1]) or {}
+    matches = d.get('matches')
+    if not isinstance(matches, list) or not matches:
+        print('NO_MATCH')
+    else:
+        top = matches[0]
+        print(f\"{top.get('score', 0.0)}|{top.get('id','')}|{top.get('summary','')}\")
+except Exception:
+    print('UNPARSABLE')
+" "$RG_YAML" 2>/dev/null || echo "UNPARSABLE")
+
+          if [[ "$RG_RESULT" == "UNPARSABLE" ]]; then
+            log_warn "regression-gate: immune-lookup output unparsable -- proceeding"
+          elif [[ "$RG_RESULT" == "NO_MATCH" ]]; then
+            log_warn "regression-gate: no negmem match for proposal ${PROPOSAL_ID} -- proceeding"
+          else
+            RG_SCORE="${RG_RESULT%%|*}"
+            RG_REST="${RG_RESULT#*|}"
+            RG_MATCH_ID="${RG_REST%%|*}"
+            RG_MATCH_SUMMARY="${RG_REST#*|}"
+            # Fix-round-1 #2: reject a malformed score (e.g. "0.9junk") BEFORE the numeric
+            # compare -- awk's `s+0` would silently coerce it to 0.9 and produce a spurious
+            # HOLD, violating fail-open. Strict float regex, optional leading '-'.
+            RG_NUM_RE='^-?[0-9]+(\.[0-9]+)?$'
+            if ! [[ "$RG_SCORE" =~ $RG_NUM_RE ]]; then
+              log_warn "regression-gate: non-numeric score from immune-lookup (${RG_SCORE}) -- proceeding"
+            else
+              # Fix-round-1 #3: a misconfigured (non-numeric) threshold must fall back to the
+              # 0.5 default rather than coerce to 0 (which would HOLD on any non-empty match).
+              if ! [[ "$REGRESSION_GATE_THRESHOLD" =~ $RG_NUM_RE ]]; then
+                log_warn "regression-gate: non-numeric LEADV2_REGRESSION_GATE_THRESHOLD (${REGRESSION_GATE_THRESHOLD}) -- falling back to default 0.5"
+                REGRESSION_GATE_THRESHOLD="0.5"
+              fi
+              RG_ABOVE=$(awk -v s="$RG_SCORE" -v t="$REGRESSION_GATE_THRESHOLD" 'BEGIN{print (s+0 >= t+0) ? "1" : "0"}' 2>/dev/null || echo "0")
+              if [[ "$RG_ABOVE" == "1" ]]; then
+                REGRESSION_GATE_HELD=1
+                log_error "regression-gate HELD: proposal ${PROPOSAL_ID} matches KNOWN-FAILED negmem pattern ${RG_MATCH_ID} (\"${RG_MATCH_SUMMARY}\", score=${RG_SCORE} >= threshold=${REGRESSION_GATE_THRESHOLD}) -- not applied"
+              else
+                log_warn "regression-gate: negmem match below threshold (score=${RG_SCORE} < ${REGRESSION_GATE_THRESHOLD}) for proposal ${PROPOSAL_ID} -- proceeding"
+              fi
+            fi
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  if [[ "$REGRESSION_GATE_HELD" == "1" ]]; then
+    exit 6
   fi
 
   # flock -x on proposal file before any state transition (R4)
