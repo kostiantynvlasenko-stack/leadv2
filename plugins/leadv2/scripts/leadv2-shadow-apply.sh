@@ -279,6 +279,99 @@ PYEOF
     log_ok "eval-harness passed"
   fi
 
+  # Run taskbench_gate before promote (T9 SHADOW-PROMOTION-GATE-01): a real quality-benchmark
+  # verdict on top of the golden-fixture regression check above (EVAL-HARNESS-01 design section 4).
+  # LEADV2_TASKBENCH_ON unset/0 -> this entire block is skipped, byte-identical to pre-diff.
+  # STRICT ALLOW-LIST (founder-confirmed, fix-round 1): promote ONLY on a cleanly-parsed
+  # verdict=="PROMOTE" (design section 4: "--promote requires verdict==PROMOTE"). Every other
+  # outcome -- REJECT, INCONCLUSIVE, empty/unparsable JSON, gate script absent, jq missing,
+  # sourcing error, timeout -- HOLDS (does not promote, does not mutate the target). Accepted
+  # consequence: with the flag ON and no benchmark feeder producing real PROMOTE verdicts, ALL
+  # promotions HOLD (gate intentionally DORMANT until fed) -- flag stays default-OFF so nothing
+  # changes unless deliberately enabled. Candidate/proposal data passed via argv only -- never
+  # spliced into a shell string / eval / backticks (no injection). `timeout -k` hard-kills a gate
+  # that ignores SIGTERM so it can never hang this command substitution.
+  if [[ "${LEADV2_TASKBENCH_ON:-0}" == "1" ]]; then
+    _taskbench_hold() {
+      local reason="$1"
+      rm -f "${TB_TMP:-}"
+      log_error "taskbench_gate HOLD: held: ${reason}"
+      (
+        flock -x 9 || { log_error "could not acquire proposal lock"; exit 1; }
+        python3 - "$PROPOSAL_FILE" << 'PYEOF'
+import sys, yaml
+path = sys.argv[1]
+with open(path) as f:
+    p = yaml.safe_load(f) or {}
+p['status'] = 'blocked_by_eval'
+with open(path, 'w') as f:
+    yaml.dump(p, f, default_flow_style=False, sort_keys=False)
+PYEOF
+      ) 9>"$PROPOSAL_LOCK"
+      exit 4
+    }
+
+    TASKBENCH_GATE_SCRIPT="${LEADV2_TASKBENCH_GATE_SCRIPT:-${LEADV2_PROJECT_ROOT}/.claude/scripts/leadv2-taskbench-gate.sh}"
+
+    if ! command -v jq >/dev/null 2>&1; then
+      _taskbench_hold "gate misconfigured (jq not found on PATH)"
+    fi
+    if [[ ! -f "$TASKBENCH_GATE_SCRIPT" ]]; then
+      _taskbench_hold "gate misconfigured (script not found: ${TASKBENCH_GATE_SCRIPT})"
+    fi
+
+    log "running taskbench_gate before promote..."
+    TB_BASE_RUN_ID=$(_prop benchmark_base_run_id)
+    TB_CAND_RUN_ID=$(_prop benchmark_cand_run_id)
+    : "${TB_BASE_RUN_ID:=baseline}"
+    : "${TB_CAND_RUN_ID:=$PROPOSAL_ID}"
+
+    # CRITICAL fix (fix-round 2): do NOT capture gate stdout via $(...) -- `timeout` only tracks
+    # its direct child, so a gate that backgrounds a job inheriting fd 1 (e.g. `( sleep 10 ) &`)
+    # before returning leaves `$(...)` blocked on the pipe until that orphaned grandchild closes
+    # fd 1, potentially forever, even though `timeout`/the gate itself already finished. Redirect
+    # to a system-tmp temp file instead (never a proposal-influenced path) and read the file --
+    # regular-file reads do not block on lingering pipe writers.
+    TB_TMP="$(mktemp 2>/dev/null)" || TB_TMP=""
+    if [[ -z "$TB_TMP" ]]; then
+      _taskbench_hold "gate misconfigured (mktemp unavailable)"
+    fi
+    set +e
+    timeout -k 5s 30s bash -c 'source "$1"; taskbench_gate "$2" "$3"' _ \
+      "$TASKBENCH_GATE_SCRIPT" "$TB_BASE_RUN_ID" "$TB_CAND_RUN_ID" > "$TB_TMP" 2>/dev/null
+    TB_GATE_RC=$?
+    set -e
+    TB_GATE_JSON=$(cat "$TB_TMP" 2>/dev/null)
+    rm -f "$TB_TMP"
+
+    # `timeout`'s reported exit code for a killed child varies by platform/implementation:
+    # 124 (GNU documented default), or 128+signal (137 SIGKILL / 143 SIGTERM) when the child
+    # doesn't self-report -- observed 137 in local testing. Treat all three as "timed out".
+    if [[ $TB_GATE_RC -eq 124 || $TB_GATE_RC -eq 137 || $TB_GATE_RC -eq 143 ]]; then
+      _taskbench_hold "gate misconfigured (timeout -- taskbench_gate did not return within 30s, force-killed via -k)"
+    elif [[ $TB_GATE_RC -ne 0 || -z "$TB_GATE_JSON" ]]; then
+      _taskbench_hold "gate misconfigured (sourcing/exec error, rc=${TB_GATE_RC})"
+    fi
+
+    TB_VERDICT=$(printf -- '%s' "$TB_GATE_JSON" | jq -r '.verdict // empty' 2>/dev/null || true)
+    TB_REASON=$(printf -- '%s' "$TB_GATE_JSON" | jq -r '.reason // empty' 2>/dev/null || true)
+
+    case "$TB_VERDICT" in
+      PROMOTE)
+        log_ok "taskbench_gate PROMOTE (${TB_REASON}) -- promotion allowed"
+        ;;
+      REJECT)
+        _taskbench_hold "verdict=REJECT (measured regression) -- ${TB_REASON}"
+        ;;
+      INCONCLUSIVE)
+        _taskbench_hold "verdict=INCONCLUSIVE (no benchmark result -- gate dormant until fed) -- ${TB_REASON}"
+        ;;
+      *)
+        _taskbench_hold "gate misconfigured (empty/unparsable verdict, raw='${TB_GATE_JSON}')"
+        ;;
+    esac
+  fi
+
   # flock -x on proposal file before any state transition (R4)
   (
     flock -x 9 || { log_error "could not acquire proposal lock"; exit 1; }
