@@ -335,6 +335,15 @@ PY
 COMPILE_EXIT=$?
 [[ "$COMPILE_EXIT" -eq 1 ]] && CANDIDATES_GENERATED=1
 
+# MEM-SEMANTIC-RECALL-01 fix round (H3): re-sync the semantic index on every
+# compile run (TTL sweeps + Tier-B-approved status flips both change which
+# entries are "active" — backfill is idempotent/re-runnable and content_hash
+# gated, so this is cheap when nothing changed). Best-effort only — never
+# affects this script's own exit code.
+if [[ -f "${SCRIPT_DIR}/leadv2-semantic-backfill.sh" ]]; then
+  bash "${SCRIPT_DIR}/leadv2-semantic-backfill.sh" "$PROJECT_ROOT" >/dev/null 2>&1 || true
+fi
+
 # Final exit code
 if [[ "$CANDIDATES_GENERATED" -eq 1 && "$TTL_EXIT" -eq 2 ]]; then
   exit 3   # both changes

@@ -64,9 +64,18 @@ MATCH if ALL of:
      # Threshold is tunable via LEADV2_NM_THRESHOLD env var (default 0.55).
      # Lower = more sensitive (more blocks); 0.4 was over-blocking unrelated tasks.
      # Raise to 0.65+ for large diverse codebases; lower to 0.45 if misses are observed.
+     OR fused-top-3(approach_description) includes this entry with cosine >= tau_sem (0.35)
+     # MEM-SEMANTIC-RECALL-01: additive OR-path. Only active when
+     # LEADV2_SEMANTIC_RECALL_ENABLED=1 and LEADV2_RECALL_HELPER is set — call
+     # scripts/leadv2-semantic-recall.sh negmem "<approach_description>" and
+     # RRF-fuse (k=60) with the keyword_overlap ranking, same rule as
+     # leadv2-immune-lookup.sh §2. Flag off, or helper missing/Qdrant down
+     # (fail-open empty semantic list) => this OR-term is never true; the
+     # keyword_overlap>=0.55 check above is unaffected either way (semantic
+     # only ADDS a match, never suppresses one).
 ```
 
-Keyword overlap is approximate. At 0.55 the balance is: occasional unrelated block (ask founder) vs missed block (causes rollback). Tune if false-positive rate is high.
+Keyword overlap is approximate. At 0.55 the balance is: occasional unrelated block (ask founder) vs missed block (causes rollback). Tune if false-positive rate is high. Semantic OR-path catches the differently-phrased case (e.g. "PGRST102 partial-index upsert" vs "upsert conflict target could not be resolved on a partial unique index") that keyword_overlap alone misses.
 
 ### 4. For each match — enforce or allow
 

@@ -160,6 +160,41 @@ def main(tasks_dir: str, output_path: str) -> None:
     output.write_text(yaml.dump(result, allow_unicode=True, sort_keys=False, default_flow_style=False))
     print(f"[immune-aggregate] extracted {len(new_patterns)} patterns")
 
+    _semantic_index_all(output, new_patterns)
+
+
+def _semantic_index_all(output: Path, patterns: dict[str, dict[str, Any]]) -> None:
+    """MEM-SEMANTIC-RECALL-01: best-effort post-write embed+upsert into the
+    shared leadv2_memory Qdrant collection. Additive only — never blocks or
+    mutates the YAML write above. No-op unless LEADV2_SEMANTIC_RECALL_ENABLED=1
+    and LEADV2_RECALL_HELPER is set (leadv2-semantic-index.sh fail-opens on
+    both conditions, so this call is always safe to make unconditionally)."""
+    import os
+    import subprocess
+
+    if os.environ.get("LEADV2_SEMANTIC_RECALL_ENABLED") != "1" or not os.environ.get("LEADV2_RECALL_HELPER"):
+        return
+
+    indexer = Path(__file__).parent / "leadv2-semantic-index.sh"
+    if not indexer.exists():
+        return
+
+    repo = output.parents[2].name if len(output.parents) > 2 else output.parent.name
+    for pid, p in patterns.items():
+        text = f"{p.get('summary', '')} {p.get('action', '')} {' '.join(p.get('keywords') or [])}"
+        content_hash = hashlib.sha1(text.encode()).hexdigest()
+        try:
+            subprocess.run(
+                ["bash", str(indexer), "immune", pid, "", content_hash, text, repo],
+                check=False,
+                capture_output=True,
+                timeout=65,
+            )
+        except Exception:
+            # lean: best-effort indexing — a failed subprocess call never
+            # blocks pattern aggregation. upgrade if silent index-drift is observed.
+            continue
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:

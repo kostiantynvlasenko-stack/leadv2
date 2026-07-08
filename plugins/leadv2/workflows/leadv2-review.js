@@ -190,6 +190,20 @@ if (verdict === 'ACCEPT' && qualityScore !== null) {
     `    ts: "${TS}"\n` +
     `Use python3: import yaml; load existing or []; append entry; dump back. Return "ok".`,
     { label: 'archive-write', phase: 'Reflect', model: 'haiku', effort: 'low' })
+
+  // MEM-SEMANTIC-RECALL-01 fix round (H3): best-effort semantic index of the
+  // new solutions-archive entry. Never blocks/throws Reflect on failure —
+  // indexing is additive-only, same fail-open contract as the other writers.
+  try {
+    const _diffSummaryEsc = diffSummary.replace(/'/g, "'\\''")
+    await bash(
+      `PLUGIN_SCRIPTS="\${CLAUDE_PLUGIN_ROOT:-}/scripts"; ` +
+      `[ -f "$PLUGIN_SCRIPTS/leadv2-semantic-index.sh" ] || exit 0; ` +
+      `text='${_diffSummaryEsc} ${TASK_CLASS}'; ` +
+      `chash=$(printf '%s' "$text" | shasum -a 1 | awk '{print $1}'); ` +
+      `bash "$PLUGIN_SCRIPTS/leadv2-semantic-index.sh" solutions '${TASK_ID}' "" "$chash" "$text" "$(basename '${_archiveRoot}')" >/dev/null 2>&1 || true`
+    )
+  } catch (_e) { /* best-effort — indexing failure must never block Reflect */ }
 }
 
 await agent(

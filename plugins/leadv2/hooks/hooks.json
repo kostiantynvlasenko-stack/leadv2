@@ -1,538 +1,545 @@
 {
-  "description": "leadv2 autonomous orchestrator hooks \u2014 guards, counters, delegations, lifecycle",
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-truth-card-inject.sh\"",
-            "timeout": 6,
-            "continueOnBlock": true,
-            "statusMessage": "Injecting persona truth card..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-install-dispatcher.sh\"",
-            "timeout": 5,
-            "statusMessage": "Installing lv2 dispatcher..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-stale-pid-sweep.sh\"",
-            "timeout": 5,
-            "statusMessage": "Sweeping stale leadv2 sessions..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-orphan-monitor-sweep.sh\"",
-            "timeout": 5,
-            "statusMessage": "Killing orphan codex-monitor loops..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-compact-trigger.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-learn-consume.sh\"",
-            "timeout": 5,
-            "continueOnBlock": true,
-            "statusMessage": "Flywheel: checking for learn trigger..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-pending-close-inject.sh\"",
-            "timeout": 5,
-            "continueOnBlock": true,
-            "statusMessage": "Checking for pending close obligations..."
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-user-prompt-context.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-pulse-enforcer.sh\"",
-            "timeout": 8,
-            "continueOnBlock": true,
-            "statusMessage": "Pulse-mode enforcer..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-broken-signal-gate.sh\"",
-            "timeout": 5,
-            "continueOnBlock": true,
-            "statusMessage": "Broken-signal gate..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-compact-warn.sh\"",
-            "timeout": 5,
-            "continueOnBlock": true,
-            "statusMessage": "Turn-count compact warner..."
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-loop-detect-hook.sh\"",
-            "timeout": 5,
-            "statusMessage": "Tool-cap loop guard..."
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-block-bash-heredoc.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-codex-round-cap.sh\"",
-            "timeout": 5,
-            "statusMessage": "Checking codex round cap..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-codex-nopoll-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Codex no-poll guard (G3)..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bash-lint-pre-gate.sh\"",
-            "timeout": 10,
-            "statusMessage": "bash -n pre-gate..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-env-audit-pre-gate.sh\"",
-            "timeout": 10,
-            "statusMessage": ".env audit pre-gate..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-schema-audit-pre-gate.sh\"",
-            "timeout": 10,
-            "statusMessage": "Schema audit pre-gate..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-close-ritual-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Close-ritual guard (blocks lying-fast closes)..."
-          }
-        ]
-      },
-      {
-        "matcher": "Read",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-read-gate.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-opus-read-budget.sh\"",
-            "timeout": 5,
-            "statusMessage": "Opus read-budget gate..."
-          }
-        ]
-      },
-      {
-        "matcher": "Agent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-block-fg-agent.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-codex-first-nudge.sh\"",
-            "timeout": 5,
-            "continueOnBlock": true,
-            "statusMessage": "Codex-first nudge (WARN-only)..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-worktree-enforce.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-tool-blowup-gate.sh\"",
-            "timeout": 5,
-            "statusMessage": "Checking tool-blowup hard gate..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-routing-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Routing guard (model check)..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-model-inherit-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Model-inherit guard (opus allowlist)..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-gate-artifact-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Gate-1 artifact guard..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-blocker-drift-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Blocker-drift diverge guard..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-thinking-audit-gate.sh\"",
-            "timeout": 8,
-            "statusMessage": "Thinking-directive gate..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-workflow-bypass-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Workflow-first guard..."
-          }
-        ]
-      },
-      {
-        "matcher": "Workflow",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bandit-preflight.sh\"",
-            "timeout": 20,
-            "statusMessage": "Bandit preflight: ensuring route-decisions.yaml..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-workflow-model-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Workflow model-guard (unpinned agent warn)..."
-          }
-        ]
-      },
-      {
-        "matcher": "TaskOutput",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-taskoutput-ban.sh\"",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "matcher": "Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-memory-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Memory guard (MEMORY.md leak prevention)..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-edit-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "leadv2 lead-edit guard..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-verdict-format-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Checking verdict YAML format..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-no-opus-code-edit.sh\"",
-            "timeout": 5,
-            "statusMessage": "No-opus-code-edit guard..."
-          }
-        ]
-      },
-      {
-        "matcher": "Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-memory-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Memory guard (MEMORY.md leak prevention)..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-edit-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "leadv2 lead-edit guard..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-verdict-format-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Checking verdict YAML format..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-no-opus-code-edit.sh\"",
-            "timeout": 5,
-            "statusMessage": "No-opus-code-edit guard..."
-          }
-        ]
-      },
-      {
-        "matcher": "MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-memory-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Memory guard (MEMORY.md leak prevention)..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-edit-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "leadv2 lead-edit guard..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-verdict-format-guard.sh\"",
-            "timeout": 5,
-            "statusMessage": "Checking verdict YAML format..."
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-tool-counter.sh\""
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-task-budget-tracker.sh\"",
-            "timeout": 3,
-            "continueOnBlock": true
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-hardbans-reinject.sh\"",
-            "timeout": 5,
-            "continueOnBlock": true,
-            "statusMessage": "Hard-bans anti-drift reinject..."
-          }
-        ]
-      },
-      {
-        "matcher": "Bash|Read|Agent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-delegation-nudge.sh\""
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-graph-cache-bust.sh\""
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bash-output-cap.sh\"",
-            "timeout": 5,
-            "continueOnBlock": true
-          }
-        ]
-      },
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-active-cache.sh\"",
-            "timeout": 5,
-            "continueOnBlock": true
-          }
-        ]
-      },
-      {
-        "matcher": "Workflow",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-workflow-sentinel-touch.sh\"",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "matcher": "Agent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-ledger.sh\"",
-            "timeout": 3,
-            "continueOnBlock": true,
-            "statusMessage": "BG-ledger: recording agent spawn..."
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-watchdog-gate.sh\"",
-            "timeout": 5,
-            "continueOnBlock": true,
-            "statusMessage": "BG-watchdog: checking for unwatched spawn..."
-          }
-        ]
-      },
-      {
-        "matcher": "Monitor",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-ledger.sh\"",
-            "timeout": 3,
-            "continueOnBlock": true,
-            "statusMessage": "BG-ledger: recording watchdog..."
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-force-reflect.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-compact-trigger.sh\"",
-            "continueOnBlock": true,
-            "timeout": 8
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-auto-clear-after-close.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-prose-guard.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-stop-warn.sh\"",
-            "timeout": 5,
-            "continueOnBlock": true,
-            "statusMessage": "BG-backstop: checking unwatched agents..."
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-subagent-stop-verify.sh\"",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-precompact-log.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-pre-compact-checkpoint.sh\"",
-            "timeout": 5,
-            "continueOnBlock": true,
-            "statusMessage": "Writing pre-compact checkpoint..."
-          }
-        ]
-      }
-    ],
-    "PostCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-precompact-log.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-postcompact-goal-reinject.sh\"",
-            "timeout": 5,
-            "statusMessage": "Reinjecting active task goal after compaction..."
-          }
-        ]
-      }
-    ],
-    "CwdChanged": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-cwd-changed.sh\"",
-            "timeout": 5,
-            "asyncRewake": true
-          }
-        ]
-      }
-    ],
-    "TaskCreated": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-task-created.sh\"",
-            "timeout": 5,
-            "async": true
-          }
-        ]
-      }
+ "description": "leadv2 autonomous orchestrator hooks \u2014 guards, counters, delegations, lifecycle",
+ "hooks": {
+  "SessionStart": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-truth-card-inject.sh\"",
+      "timeout": 6,
+      "continueOnBlock": true,
+      "statusMessage": "Injecting persona truth card..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-install-dispatcher.sh\"",
+      "timeout": 5,
+      "statusMessage": "Installing lv2 dispatcher..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-stale-pid-sweep.sh\"",
+      "timeout": 5,
+      "statusMessage": "Sweeping stale leadv2 sessions..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-orphan-monitor-sweep.sh\"",
+      "timeout": 5,
+      "statusMessage": "Killing orphan codex-monitor loops..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-compact-trigger.sh\"",
+      "timeout": 5
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-learn-consume.sh\"",
+      "timeout": 5,
+      "continueOnBlock": true,
+      "statusMessage": "Flywheel: checking for learn trigger..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-pending-close-inject.sh\"",
+      "timeout": 5,
+      "continueOnBlock": true,
+      "statusMessage": "Checking for pending close obligations..."
+     }
     ]
-  }
+   }
+  ],
+  "UserPromptSubmit": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-user-prompt-context.sh\"",
+      "timeout": 5
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-pulse-enforcer.sh\"",
+      "timeout": 8,
+      "continueOnBlock": true,
+      "statusMessage": "Pulse-mode enforcer..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-broken-signal-gate.sh\"",
+      "timeout": 5,
+      "continueOnBlock": true,
+      "statusMessage": "Broken-signal gate..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-compact-warn.sh\"",
+      "timeout": 5,
+      "continueOnBlock": true,
+      "statusMessage": "Turn-count compact warner..."
+     }
+    ]
+   }
+  ],
+  "PreToolUse": [
+   {
+    "matcher": ".*",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-loop-detect-hook.sh\"",
+      "timeout": 5,
+      "statusMessage": "Tool-cap loop guard..."
+     }
+    ]
+   },
+   {
+    "matcher": "Bash",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-block-bash-heredoc.sh\"",
+      "timeout": 5
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-codex-round-cap.sh\"",
+      "timeout": 5,
+      "statusMessage": "Checking codex round cap..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-codex-nopoll-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Codex no-poll guard (G3)..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bash-lint-pre-gate.sh\"",
+      "timeout": 10,
+      "statusMessage": "bash -n pre-gate..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-env-audit-pre-gate.sh\"",
+      "timeout": 10,
+      "statusMessage": ".env audit pre-gate..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-schema-audit-pre-gate.sh\"",
+      "timeout": 10,
+      "statusMessage": "Schema audit pre-gate..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-close-ritual-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Close-ritual guard (blocks lying-fast closes)..."
+     }
+    ]
+   },
+   {
+    "matcher": "Read",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-read-gate.sh\"",
+      "timeout": 5
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-opus-read-budget.sh\"",
+      "timeout": 5,
+      "statusMessage": "Opus read-budget gate..."
+     }
+    ]
+   },
+   {
+    "matcher": "Agent",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-block-fg-agent.sh\"",
+      "timeout": 5
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-codex-first-nudge.sh\"",
+      "timeout": 5,
+      "continueOnBlock": true,
+      "statusMessage": "Codex-first nudge (WARN-only)..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-worktree-enforce.sh\"",
+      "timeout": 5
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-tool-blowup-gate.sh\"",
+      "timeout": 5,
+      "statusMessage": "Checking tool-blowup hard gate..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-routing-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Routing guard (model check)..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-model-inherit-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Model-inherit guard (opus allowlist)..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-gate-artifact-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Gate-1 artifact guard..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-blocker-drift-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Blocker-drift diverge guard..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-thinking-audit-gate.sh\"",
+      "timeout": 8,
+      "statusMessage": "Thinking-directive gate..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-workflow-bypass-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Workflow-first guard..."
+     }
+    ]
+   },
+   {
+    "matcher": "Workflow",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bandit-preflight.sh\"",
+      "timeout": 20,
+      "statusMessage": "Bandit preflight: ensuring route-decisions.yaml..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-workflow-model-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Workflow model-guard (unpinned agent warn)..."
+     }
+    ]
+   },
+   {
+    "matcher": "TaskOutput",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-taskoutput-ban.sh\"",
+      "timeout": 5
+     }
+    ]
+   },
+   {
+    "matcher": "Write",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-memory-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Memory guard (MEMORY.md leak prevention)..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-edit-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "leadv2 lead-edit guard..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-verdict-format-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Checking verdict YAML format..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-no-opus-code-edit.sh\"",
+      "timeout": 5,
+      "statusMessage": "No-opus-code-edit guard..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-immune-intake-inject.sh\"",
+      "timeout": 30,
+      "continueOnBlock": true,
+      "statusMessage": "Immune-pattern recall (keyword+semantic fusion)..."
+     }
+    ]
+   },
+   {
+    "matcher": "Edit",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-memory-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Memory guard (MEMORY.md leak prevention)..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-edit-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "leadv2 lead-edit guard..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-verdict-format-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Checking verdict YAML format..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-no-opus-code-edit.sh\"",
+      "timeout": 5,
+      "statusMessage": "No-opus-code-edit guard..."
+     }
+    ]
+   },
+   {
+    "matcher": "MultiEdit",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-memory-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Memory guard (MEMORY.md leak prevention)..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-edit-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "leadv2 lead-edit guard..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-verdict-format-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Checking verdict YAML format..."
+     }
+    ]
+   }
+  ],
+  "PostToolUse": [
+   {
+    "matcher": ".*",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-tool-counter.sh\""
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-task-budget-tracker.sh\"",
+      "timeout": 3,
+      "continueOnBlock": true
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-hardbans-reinject.sh\"",
+      "timeout": 5,
+      "continueOnBlock": true,
+      "statusMessage": "Hard-bans anti-drift reinject..."
+     }
+    ]
+   },
+   {
+    "matcher": "Bash|Read|Agent",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-delegation-nudge.sh\""
+     }
+    ]
+   },
+   {
+    "matcher": "Bash",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-graph-cache-bust.sh\""
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bash-output-cap.sh\"",
+      "timeout": 5,
+      "continueOnBlock": true
+     }
+    ]
+   },
+   {
+    "matcher": ".*",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-active-cache.sh\"",
+      "timeout": 5,
+      "continueOnBlock": true
+     }
+    ]
+   },
+   {
+    "matcher": "Workflow",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-workflow-sentinel-touch.sh\"",
+      "timeout": 5
+     }
+    ]
+   },
+   {
+    "matcher": "Agent",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-ledger.sh\"",
+      "timeout": 3,
+      "continueOnBlock": true,
+      "statusMessage": "BG-ledger: recording agent spawn..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-watchdog-gate.sh\"",
+      "timeout": 5,
+      "continueOnBlock": true,
+      "statusMessage": "BG-watchdog: checking for unwatched spawn..."
+     }
+    ]
+   },
+   {
+    "matcher": "Monitor",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-ledger.sh\"",
+      "timeout": 3,
+      "continueOnBlock": true,
+      "statusMessage": "BG-ledger: recording watchdog..."
+     }
+    ]
+   }
+  ],
+  "Stop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-force-reflect.sh\"",
+      "timeout": 5
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-compact-trigger.sh\"",
+      "continueOnBlock": true,
+      "timeout": 8
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-auto-clear-after-close.sh\"",
+      "timeout": 5
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-prose-guard.sh\"",
+      "timeout": 5
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-stop-warn.sh\"",
+      "timeout": 5,
+      "continueOnBlock": true,
+      "statusMessage": "BG-backstop: checking unwatched agents..."
+     }
+    ]
+   }
+  ],
+  "SubagentStop": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-subagent-stop-verify.sh\"",
+      "timeout": 5
+     }
+    ]
+   }
+  ],
+  "PreCompact": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-precompact-log.sh\"",
+      "timeout": 5
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-pre-compact-checkpoint.sh\"",
+      "timeout": 5,
+      "continueOnBlock": true,
+      "statusMessage": "Writing pre-compact checkpoint..."
+     }
+    ]
+   }
+  ],
+  "PostCompact": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-precompact-log.sh\"",
+      "timeout": 5
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-postcompact-goal-reinject.sh\"",
+      "timeout": 5,
+      "statusMessage": "Reinjecting active task goal after compaction..."
+     }
+    ]
+   }
+  ],
+  "CwdChanged": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-cwd-changed.sh\"",
+      "timeout": 5,
+      "asyncRewake": true
+     }
+    ]
+   }
+  ],
+  "TaskCreated": [
+   {
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-task-created.sh\"",
+      "timeout": 5,
+      "async": true
+     }
+    ]
+   }
+  ]
+ }
 }
