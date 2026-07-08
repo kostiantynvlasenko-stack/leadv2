@@ -129,10 +129,27 @@ const PROPOSAL_SCHEMA = {
   }, required: ['proposals', 'summary_for_lead'],
 }
 
+// REFLECT-CAUSAL-CRITIQUE-01: schema for freeform-insights.jsonl recall leg (flag-gated)
+const FREEFORM_RECALL_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    freeform_recalled: { type: 'array', items: { type: 'object', additionalProperties: false,
+      properties: {
+        id: { type: 'string' }, insight: { type: 'string' }, recall_tags: { type: 'array', items: { type: 'string' } },
+      }, required: ['id', 'insight'] } },
+    summary_for_lead: { type: 'string' },
+  }, required: ['freeform_recalled', 'summary_for_lead'],
+}
+
 // ── B3: Gather fan-out — signal-counter (haiku) + rejected-edits-reader (haiku) in parallel ──
 phase('Gather')
 await emitLedger('phase_enter', { phase: 'Gather', label: LABEL })
-const [patterns, rejectedResult, exemplarResult] = await parallel([
+// REFLECT-CAUSAL-CRITIQUE-01: 4th leg is additive + flag-gated -- reuses LEADV2_CAUSAL_CRITIQUE
+// (the same flag that writes freeform-insights.jsonl) so recall costs nothing extra when the
+// write-side is off. lean: recall surfaces but does not yet feed Propose -- upgrade when
+// leadv2-learn consumes freeform recall for tuning proposals.
+const freeformRecallOn = ((typeof process !== 'undefined' && process.env && process.env.LEADV2_CAUSAL_CRITIQUE) || '0') !== '0'
+const gatherLegs = [
   // Fan-out leg 1: signal aggregation (unchanged logic, model=haiku)
   () => agent(
     `Aggregate the leadv2 learning signals. Steps:\n` +
@@ -161,11 +178,24 @@ const [patterns, rejectedResult, exemplarResult] = await parallel([
     `Group entries by task_class. For each task_class, keep only the top-K=3 entries by score (descending). ` +
     `Return those as exemplars[]. If file does not exist or solutions is empty, return exemplars=[].`,
     { label: 'gather-exemplars', phase: 'Gather', model: 'haiku', effort: 'low', schema: EXEMPLAR_SCHEMA }),
-])
+]
+if (freeformRecallOn) {
+  // REFLECT-CAUSAL-CRITIQUE-01 leg 4: freeform-insights.jsonl recall (flag-gated, additive-only)
+  gatherLegs.push(() => agent(
+    `Read ${DURABLE_ROOT}/docs/leadv2/freeform-insights.jsonl (JSONL, one record per line; may not exist). ` +
+    `Filter to status=="candidate" entries. Score each by keyword-overlap between its recall_tags[] and ` +
+    `this run's task_class="${TASK_CLASS}". Return the top-5 by overlap as freeform_recalled[] = ` +
+    `[{id, insight, recall_tags}]. If the file does not exist or is empty, return freeform_recalled=[].`,
+    { label: 'gather-freeform-recall', phase: 'Gather', model: 'haiku', effort: 'low', schema: FREEFORM_RECALL_SCHEMA }))
+}
+const gatherResults = await parallel(gatherLegs)
+const [patterns, rejectedResult, exemplarResult, freeformRecallResult] = gatherResults
 
 const safePatterns = patterns || { recurring: [], revise_rate: 'n/a', summary_for_lead: 'gather returned null' }
 const safeRejected = rejectedResult || { rejected_keys: [], rejected_count: 0, summary_for_lead: 'rejected-reader null' }
 const safeExemplars = exemplarResult || { exemplars: [], summary_for_lead: 'exemplar-reader null' }
+const safeFreeformRecall = freeformRecallResult || { freeform_recalled: [], summary_for_lead: 'freeform-recall not run' }
+if (freeformRecallOn) log(`Gather: freeform-recall leg returned ${safeFreeformRecall.freeform_recalled.length} candidate(s)`)
 
 // B1: filter rejected class_keys from recurring signals
 const rejectedKeySet = new Set(safeRejected.rejected_keys)
@@ -357,4 +387,8 @@ return {
   proposals: proposal.proposals.map(p => ({ kind: p.kind, target: p.target })),
   shadow_proposals: shadowProposals,
   shadow_emitted: shadowProposals.filter(sp => sp.id).length,
+  // fix-round-2 H2: omit the key entirely when the flag is off -- previously this key was
+  // ALWAYS added (even as []), which is a return-shape change even in the byte-identical
+  // flag-off state. Spread-conditional keeps the object literally unchanged when off.
+  ...(freeformRecallOn ? { freeform_recalled: safeFreeformRecall.freeform_recalled } : {}),
 }
