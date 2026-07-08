@@ -26,13 +26,28 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# Durable-root (fix round 1, item 7): the old "$SCRIPT_DIR/../.." climbed
+# two HARDCODED directory levels regardless of where this script actually
+# lives and ignored LEADV2_PROJECT_ROOT entirely -- worse than the T1
+# ephemeral-worktree bug, it wasn't git-aware at all. Matches the durable-
+# root pattern + override convention already used by sibling scripts
+# (leadv2-immune-lookup.sh, this diff's own leadv2-immune-aggregate.sh fix).
+PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null || pwd)}"
 
 NM_FILE="${PROJECT_ROOT}/docs/leadv2-negative-memory.yaml"
 NM_ARCHIVE="${PROJECT_ROOT}/docs/leadv2-negative-memory-archive.yaml"
 LEAD_STATE="${PROJECT_ROOT}/docs/LEAD_V2_STATE.md"
 LEAD_HISTORY="${PROJECT_ROOT}/docs/ops/LEAD_HISTORY.md"
 DECISIONS_DIR="${PROJECT_ROOT}/docs/leadv2-decisions"
+
+# MEM-BACKUP-RESTORE-01: flag-gated backup+integrity+restore around writes to
+# NM_FILE / NM_ARCHIVE below. Byte-identical no-op when LEADV2_MEM_BACKUP is
+# unset/0 (see scripts/leadv2-mem-backup.sh header for the full contract).
+_MEM_BACKUP_HELPER="${SCRIPT_DIR}/leadv2-mem-backup.sh"
+if [[ -f "$_MEM_BACKUP_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$_MEM_BACKUP_HELPER"
+fi
 
 DRY_RUN=0
 TTL_ONLY=0
@@ -123,8 +138,23 @@ PY
   return $?
 }
 
+# fix round 1, item 2: trailing `|| true` is load-bearing (see
+# leadv2-mem-backup.sh header) -- prevents a real internal failure in the
+# FINAL command of this `&&`/`{ }` chain from aborting this set -e script.
+command -v mem_backup_snapshot >/dev/null 2>&1 && { mem_backup_snapshot "$NM_FILE" "entries"; mem_backup_snapshot "$NM_ARCHIVE" "entries"; } || true
+
 TTL_EXIT=0
 run_ttl_sweep || TTL_EXIT=$?
+
+# NM_ARCHIVE legitimately does not exist until the FIRST entry ever expires
+# (fix round: T6 own test caught this) -- only verify/restore it when it's
+# actually present, else "never created yet" false-positives as corruption
+# on every normal run and spams a restore attempt for nothing to restore.
+command -v mem_backup_verify_or_restore >/dev/null 2>&1 && {
+  mem_backup_verify_or_restore "$NM_FILE" "entries"
+  [[ -f "$NM_ARCHIVE" ]] && mem_backup_verify_or_restore "$NM_ARCHIVE" "entries"
+  true
+} || true
 
 [[ "$TTL_ONLY" -eq 1 ]] && exit "$TTL_EXIT"
 
@@ -134,6 +164,18 @@ log_info "Scanning history for failed approaches..."
 
 CANDIDATES_GENERATED=0
 
+command -v mem_backup_snapshot >/dev/null 2>&1 && mem_backup_snapshot "$NM_FILE" "entries" || true
+
+# fix round 1, item 1 (CRITICAL): this writer intentionally `sys.exit(1)`
+# (candidates pending) / can fail non-zero for real reasons too. As a bare
+# top-level command under set -e, an exit-1 here ABORTS THE SCRIPT
+# immediately -- the old `COMPILE_EXIT=$?` line below never ran, so
+# mem_backup_verify_or_restore never fired on exactly the runs where the
+# writer did something (or crashed). Capturing the exit code via `||`
+# keeps this in the errexit-exempt position (any command of an AND-OR list
+# OTHER than the last is exempt) so the script always reaches the
+# unconditional restore call after it, regardless of the writer's outcome.
+COMPILE_EXIT=0
 python3 - \
   "$NM_FILE" \
   "${NM_ARCHIVE}" \
@@ -143,7 +185,7 @@ python3 - \
   "$DRY_RUN" \
   "${TASK_ID_FILTER}" \
   "${DECISIONS_DIR}" \
-  <<'PY'
+  <<'PY' || COMPILE_EXIT=$?
 import sys, yaml, pathlib, datetime, re, json, hashlib
 
 nm_path        = pathlib.Path(sys.argv[1])
@@ -332,8 +374,10 @@ for entry in new_entries:
 sys.exit(1)   # exit 1 = candidates generated (founder approval pending)
 PY
 
-COMPILE_EXIT=$?
 [[ "$COMPILE_EXIT" -eq 1 ]] && CANDIDATES_GENERATED=1
+
+# Unconditional: runs regardless of COMPILE_EXIT (0, 1, 2, or a real crash).
+command -v mem_backup_verify_or_restore >/dev/null 2>&1 && mem_backup_verify_or_restore "$NM_FILE" "entries" || true
 
 # MEM-SEMANTIC-RECALL-01 fix round (H3): re-sync the semantic index on every
 # compile run (TTL sweeps + Tier-B-approved status flips both change which
