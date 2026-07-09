@@ -75,6 +75,55 @@ done
 PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
 
 # ---------------------------------------------------------------------------
+# H1/H2/H4 fix-round-1 — task-scoped LEADV2_FORCE_MODEL + shared locked
+# costs.yaml append helper.
+#
+# H2: LEADV2_FORCE_MODEL used to be honored unconditionally from inherited
+# env, with no task binding — a stale force from a DIFFERENT task_id (e.g. a
+# parent shell that ran task A earlier) could silently leak into task B's
+# spawns. Now every read is gated by a companion LEADV2_FORCE_MODEL_TASK; if
+# it doesn't match the CURRENT TASK_ID, the force is treated as ABSENT (never
+# inherited, never cleared — just ignored) and re-derived fresh from the router.
+# ---------------------------------------------------------------------------
+_force_model_for_task() {
+  if [[ "${LEADV2_FORCE_MODEL_TASK:-}" == "$TASK_ID" ]]; then
+    printf '%s' "${LEADV2_FORCE_MODEL:-}"
+  fi
+}
+
+_set_force_model_for_task() {
+  export LEADV2_FORCE_MODEL="$1"
+  export LEADV2_FORCE_MODEL_TASK="$TASK_ID"
+}
+
+_clear_force_model() {
+  unset LEADV2_FORCE_MODEL
+  unset LEADV2_FORCE_MODEL_TASK
+}
+
+# H1/H4: every costs.yaml writer in this file funnels through here — a single
+# flock -x -w N (bounded, never unbounded) on the SAME .cost-flush.lock the
+# router reads under -s. On lock timeout: log + skip, NEVER write unlocked
+# (would race the router's read / another writer's append into a torn file).
+LEADV2_LOCK_WAIT_SEC="${LEADV2_LOCK_WAIT_SEC:-10}"
+_costs_append() {
+  local costs_file="$1" content="$2" header="${3:-}"
+  local lock_file
+  lock_file="$(dirname "$costs_file")/.cost-flush.lock"
+  mkdir -p "$(dirname "$costs_file")" 2>/dev/null || true
+  (
+    if ! flock -w "$LEADV2_LOCK_WAIT_SEC" -x 9; then
+      echo "[claude-subsession] WARN: could not acquire cost-flush lock within ${LEADV2_LOCK_WAIT_SEC}s for ${costs_file} — skipping append (never write unlocked)" >&2
+      exit 0
+    fi
+    if [[ -n "$header" && ! -f "$costs_file" ]]; then
+      printf '%s' "$header" > "$costs_file"
+    fi
+    printf '%s' "$content" >> "$costs_file"
+  ) 9>"$lock_file"
+}
+
+# ---------------------------------------------------------------------------
 # CACHE DIR — /tmp/leadv2-cache/ holds per-role stable prefix files
 # TTL: 5 min (matches Anthropic ephemeral cache window). Files older than
 # 5 min are deleted at the start of each run so stale checksums never linger.
@@ -394,16 +443,17 @@ PYEOF
   fi
   local checksum_val="${derived_checksum:-null}"
 
-  # Append YAML row (create file with list header if absent)
-  if [[ ! -f "$costs_file" ]]; then
-    printf -- '# leadv2 cost telemetry — appended by claude-subsession.sh\n' > "$costs_file"
-  fi
-
-  printf -- '- role: %s\n  model: %s\n  session_id: %s\n  input_tokens: %s\n  output_tokens: %s\n  cost_usd: %s\n  duration_sec: %s\n  timestamp: %s\n  cache_hit_rate: %s\n  prompt_prefix_checksum: %s\n' \
+  # H4 fix-round-1: locked append (was a bare >> with a separate unlocked
+  # header-creation check — both folded into _costs_append's single critical
+  # section now, closing the header-creation TOCTOU too).
+  local _row
+  _row=$(printf -- '- role: %s\n  model: %s\n  session_id: %s\n  input_tokens: %s\n  output_tokens: %s\n  cost_usd: %s\n  duration_sec: %s\n  timestamp: %s\n  cache_hit_rate: %s\n  prompt_prefix_checksum: %s\n' \
     "$role" "$model" "$session_id" \
     "$input_tokens" "$output_tokens" "$cost_usd" \
     "$duration_sec" "$timestamp" \
-    "${cache_hit_rate_val:-null}" "$checksum_val" >> "$costs_file"
+    "${cache_hit_rate_val:-null}" "$checksum_val")
+  _costs_append "$costs_file" "$_row" "# leadv2 cost telemetry — appended by claude-subsession.sh
+"
 
   echo "[claude-subsession] cost recorded: ${role}/${model} in=${input_tokens} out=${output_tokens} usd=${cost_usd} cache_hit=${cache_hit_rate_val:-null}" >&2
 }
@@ -441,16 +491,44 @@ _check_cost_ceiling() {
       _write_auto_abort_decision
       exit 1
     fi
-    # exit 2 = routing.yaml missing or unknown step → proceed normally
+    # exit 2 = routing.yaml missing or unknown step, or router crashed outright
+    # (row 6, design §4). Router gave us NOTHING this probe — do not return 0
+    # into an unforced spawn if a prior spawn already forced a model in THIS
+    # task (H2: task-scoped — a different task's stale force is never inherited).
+    local _inherited_force
+    _inherited_force="$(_force_model_for_task)"
+    if [[ -n "$_inherited_force" && "$_inherited_force" != "$MODEL" ]]; then
+      echo "[claude-subsession] WARN: router probe failed (rc=${rc}) — keeping inherited LEADV2_FORCE_MODEL=${_inherited_force} for ${ROLE}" >&2
+      MODEL="$_inherited_force"
+    fi
     return 0
   }
 
   local ceiling_status downgrade_applied router_model current_burn ceiling_usd
+  local recovery_status downgrade_active force_model hard_stop_flag fresh_trip burn_readable
   ceiling_status=$(printf '%s\n' "$router_out" | grep '^ceiling_status=' | cut -d= -f2 || true)
   downgrade_applied=$(printf '%s\n' "$router_out" | grep '^downgrade_applied=' | cut -d= -f2 || true)
   router_model=$(printf '%s\n' "$router_out" | grep '^model=' | cut -d= -f2 | cut -d+ -f1 | sed 's/-subsession//' || true)
   current_burn=$(printf '%s\n' "$router_out" | grep '^current_burn_usd=' | cut -d= -f2 || echo "0")
   ceiling_usd=$(printf '%s\n' "$router_out" | grep '^ceiling_usd=' | cut -d= -f2 || echo "0")
+  # T8b ROUTING-TIER-RECOVERY-REDESIGN keys (additive; router recomputes fresh
+  # every probe — NOT inherited env; env is a per-task-scoped cache, never
+  # authority). recovery_status/downgrade_active default to "unknown" when
+  # absent (older router without the T8b keys) so we HOLD, never recover.
+  recovery_status=$(printf '%s\n' "$router_out" | grep '^recovery_status=' | cut -d= -f2 || echo "unknown")
+  downgrade_active=$(printf '%s\n' "$router_out" | grep '^downgrade_active=' | cut -d= -f2 || echo "unknown")
+  force_model=$(printf '%s\n' "$router_out" | grep '^force_model=' | cut -d= -f2 || true)
+  hard_stop_flag=$(printf '%s\n' "$router_out" | grep '^hard_stop=' | cut -d= -f2 || echo "false")
+  fresh_trip=$(printf '%s\n' "$router_out" | grep '^fresh_trip=' | cut -d= -f2 || echo "false")
+  # F-A fix-round-2: burn_readable distinguishes "genuinely unreadable spend
+  # history" from a plain never-spent/day-0 unknown — default true (day-0
+  # shaped) when absent, matching the router's own F-A default.
+  burn_readable=$(printf '%s\n' "$router_out" | grep '^burn_readable=' | cut -d= -f2 || echo "true")
+  [[ -z "$recovery_status" ]] && recovery_status="unknown"
+  [[ -z "$downgrade_active" ]] && downgrade_active="unknown"
+  [[ -z "$hard_stop_flag" ]] && hard_stop_flag="false"
+  [[ -z "$fresh_trip" ]] && fresh_trip="false"
+  [[ -z "$burn_readable" ]] && burn_readable="true"
 
   # ---- 100% cap: auto-abort ----
   if [[ "$ceiling_status" == "hard_stop_95pct" ]]; then
@@ -487,30 +565,70 @@ print(int(b/c*100) if c>0 else 0)
     fi
   fi
 
-  # ---- 60% cap: downgrade subsequent spawns ----
-  if [[ "$ceiling_status" == "warn_60pct" ]]; then
-    if [[ "$downgrade_applied" == "true" && -n "$router_model" && "$router_model" != "$MODEL" ]]; then
-      echo "[claude-subsession] WARN: burn >= 60% ceiling — downgrading ${MODEL} → ${router_model} for ${ROLE}" >&2
-      _log_downgrade_event "$MODEL" "$router_model" "$current_burn" "$ceiling_usd"
-      export LEADV2_FORCE_MODEL="$router_model"
-      # NOTE (Risk 4): MODEL is a shell-local var — it is NOT exported and does NOT propagate
-      # to subsequent separate-process spawns. LEADV2_FORCE_MODEL (exported above) is the
-      # cross-spawn signal. Any caller that re-reads LEADV2_FORCE_MODEL before spawning the
-      # NEXT subsession will pick up the correct model. This function only affects the CURRENT
-      # spawn's MODEL; subsequent spawns call _check_cost_ceiling themselves and read the env.
-      MODEL="$router_model"
-    elif [[ -n "${LEADV2_FORCE_MODEL:-}" && "${LEADV2_FORCE_MODEL}" != "$MODEL" ]]; then
-      # Already forced by a prior spawn in this task
-      echo "[claude-subsession] WARN: LEADV2_FORCE_MODEL=${LEADV2_FORCE_MODEL} active — overriding ${MODEL} for ${ROLE}" >&2
-      MODEL="$LEADV2_FORCE_MODEL"
+  # ---- T8b ROUTING-TIER-RECOVERY-REDESIGN: windowed recovery gate ----
+  # Router recomputes recovery_status/downgrade_active/force_model fresh on
+  # EVERY probe from costs.yaml (never from inherited env — env is a cache,
+  # never authority, Codex #3). Exactly one branch may clear LEADV2_FORCE_MODEL.
+  # NOTE (Risk 4, preserved): MODEL is shell-local and does not propagate to
+  # separate-process spawns; LEADV2_FORCE_MODEL (exported) is the cross-spawn
+  # signal every subsequent _check_cost_ceiling call re-derives.
+  # H2 fix-round-1: every LEADV2_FORCE_MODEL touch below is task-scoped via
+  # _force_model_for_task/_set_force_model_for_task/_clear_force_model — a
+  # stale force from a different task_id is never read, inherited, or cleared.
+  #
+  # F-D fix-round-2: a FRESH process (no inherited env at all) used to only
+  # HOLD if LEADV2_FORCE_MODEL was already inherited — so `claude-subsession
+  # --model opus` with router force_model=sonnet still launched opus. Now:
+  # whenever force_model is a REAL value (present, != __HOLD__), it is
+  # ADOPTED DIRECTLY as authoritative — never gated behind "was something
+  # already inherited". This covers downgrade_active==true AND the
+  # "unknown but to_model still known" case (T6/T7-style: active downgrade
+  # existed, later windowed data got corrupted) uniformly.
+  local _inherited_force
+  _inherited_force="$(_force_model_for_task)"
+  if [[ -n "$force_model" && "$force_model" != "__HOLD__" ]]; then
+    if [[ "$fresh_trip" == "true" ]]; then
+      echo "[claude-subsession] WARN: windowed burn >= 60% ceiling — downgrading ${MODEL} → ${force_model} for ${ROLE}" >&2
+      _log_downgrade_event "$MODEL" "$force_model" "$current_burn" "$ceiling_usd"
+    else
+      echo "[claude-subsession] WARN: recovery gate holding (downgrade_active=${downgrade_active}, recovery_status=${recovery_status}) — adopting router force_model=${force_model} for ${ROLE}" >&2
     fi
-    _append_status_warn "cost_ceiling_60pct: burn ${current_burn} / ${ceiling_usd} — subsequent spawns downgraded"
-  fi
-
-  # Apply LEADV2_FORCE_MODEL if set (persists across spawns in same shell env)
-  if [[ -n "${LEADV2_FORCE_MODEL:-}" && "${LEADV2_FORCE_MODEL}" != "$MODEL" ]]; then
-    echo "[claude-subsession] INFO: LEADV2_FORCE_MODEL=${LEADV2_FORCE_MODEL} — overriding ${MODEL} for ${ROLE}" >&2
-    MODEL="$LEADV2_FORCE_MODEL"
+    _set_force_model_for_task "$force_model"
+    MODEL="$force_model"
+    _append_status_warn "cost_ceiling_recovery_hold: spawn ${ROLE} forced to ${force_model}"
+  elif [[ "$downgrade_active" == "true" || "$burn_readable" == "false" ]]; then
+    # force_model unreadable (__HOLD__) but genuinely active-or-unreadable —
+    # NOT a plain day-0 unknown (F-A). If this exact task already had a
+    # force inherited (e.g. costs.yaml vanished mid-task, design row 1),
+    # keep holding that; otherwise fall back to the safest floor tier.
+    if [[ -n "$_inherited_force" ]]; then
+      echo "[claude-subsession] WARN: downgrade active/unreadable, force_model unreadable — keeping inherited LEADV2_FORCE_MODEL=${_inherited_force} for ${ROLE}" >&2
+      MODEL="$_inherited_force"
+    else
+      echo "[claude-subsession] WARN: downgrade active/unreadable, force_model unreadable, nothing inherited for this task — forcing safest tier (haiku) for ${ROLE}" >&2
+      _set_force_model_for_task "haiku"
+      MODEL="haiku"
+    fi
+  elif [[ "$downgrade_active" == "false" && "$recovery_status" == "ok" ]]; then
+    # THE only clear — flag-off (LEADV2_COOLDOWN_RECOVERY=0) always yields
+    # downgrade_active=false only when there was never an active downgrade,
+    # so this never fires a spurious recovery when the flag is off (design F2).
+    if [[ -n "$_inherited_force" ]]; then
+      echo "[claude-subsession] INFO: cost recovery — clearing forced model (was ${_inherited_force}) for ${ROLE}" >&2
+    fi
+    _clear_force_model
+  else
+    # F-A: plain day-0/never-spent unknown — recovery_status=unknown,
+    # downgrade_active=unknown, burn_readable=true, force_model unreadable,
+    # AND no active downgrade. KNOWN-safe zero-spend state, not lost data.
+    # If something was inherited for THIS exact task (ambiguous mid-task
+    # file-loss vs genuine day-0 — the file state alone can't tell them
+    # apart), keep holding it; otherwise this is a genuine first-ever probe
+    # — allow the caller's requested tier through untouched, never haiku.
+    if [[ -n "$_inherited_force" && "$_inherited_force" != "$MODEL" ]]; then
+      echo "[claude-subsession] WARN: recovery state unknown (day-0-shaped) — keeping inherited LEADV2_FORCE_MODEL=${_inherited_force} for ${ROLE}" >&2
+      MODEL="$_inherited_force"
+    fi
   fi
 }
 
@@ -520,17 +638,13 @@ print(int(b/c*100) if c>0 else 0)
 _log_downgrade_event() {
   local from_model="$1" to_model="$2" current_burn="${3:-?}" ceiling="${4:-?}"
   local costs_file="$HANDOFF_DIR/costs.yaml"
-  mkdir -p "$HANDOFF_DIR" 2>/dev/null || true
-  {
-    printf -- '- downgrade_event:\n'
-    printf -- '    timestamp: %s\n' "$(date -u +%FT%TZ)"
-    printf -- '    reason: cost_ceiling_60pct\n'
-    printf -- '    from_model: %s\n' "$from_model"
-    printf -- '    to_model: %s\n' "$to_model"
-    printf -- '    affected_role: %s\n' "$ROLE"
-    printf -- '    burn_usd: %s\n' "$current_burn"
-    printf -- '    ceiling_usd: %s\n' "$ceiling"
-  } >> "$costs_file" 2>/dev/null || true
+  # H1/H4 fix-round-1: routed through the shared _costs_append (flock -x -w N
+  # on the same .cost-flush.lock the router reads under -s) instead of its
+  # own unbounded flock -x 9 — bounded wait, never a permanent hang.
+  local _row
+  _row=$(printf -- '- downgrade_event:\n    timestamp: %s\n    reason: cost_ceiling_60pct\n    from_model: %s\n    to_model: %s\n    affected_role: %s\n    burn_usd: %s\n    ceiling_usd: %s\n' \
+    "$(date -u +%FT%TZ)" "$from_model" "$to_model" "$ROLE" "$current_burn" "$ceiling")
+  _costs_append "$costs_file" "$_row"
 }
 
 # ---------------------------------------------------------------------------
@@ -575,17 +689,12 @@ _write_auto_abort_decision() {
     rm -f "${state_md}.bak" 2>/dev/null || true
   fi
 
-  # Write outcome to history in costs.yaml
+  # Write outcome to history in costs.yaml — H4 fix-round-1: locked append.
   local costs_file="$HANDOFF_DIR/costs.yaml"
-  mkdir -p "$HANDOFF_DIR" 2>/dev/null || true
-  {
-    printf -- '- event: budget_exceeded\n'
-    printf -- '  role: %s\n' "$ROLE"
-    printf -- '  burn_usd: %s\n' "$current_burn"
-    printf -- '  ceiling_usd: %s\n' "$ceiling"
-    printf -- '  outcome: budget_exceeded\n'
-    printf -- '  timestamp: %s\n' "$(date -u +%FT%TZ)"
-  } >> "$costs_file" 2>/dev/null || true
+  local _row
+  _row=$(printf -- '- event: budget_exceeded\n  role: %s\n  burn_usd: %s\n  ceiling_usd: %s\n  outcome: budget_exceeded\n  timestamp: %s\n' \
+    "$ROLE" "$current_burn" "$ceiling" "$(date -u +%FT%TZ)")
+  _costs_append "$costs_file" "$_row"
 
   # Compose decision file
   {
@@ -702,11 +811,12 @@ _detect_empty_session() {
   local threshold=50
   if [[ "$word_count" -lt "$threshold" ]]; then
     echo "[claude-subsession] WARN: empty_session — ${ROLE}.summary.md has ${word_count} words (< ${threshold})" >&2
+    # H4 fix-round-1: locked append.
     local costs_file="$HANDOFF_DIR/costs.yaml"
-    {
-      printf -- '- event: empty_session\n  role: %s\n  model: %s\n  word_count: %s\n  timestamp: %s\n' \
-        "$ROLE" "$MODEL" "$word_count" "$(date -u +%FT%TZ)"
-    } >> "$costs_file" 2>/dev/null || true
+    local _row
+    _row=$(printf -- '- event: empty_session\n  role: %s\n  model: %s\n  word_count: %s\n  timestamp: %s\n' \
+      "$ROLE" "$MODEL" "$word_count" "$(date -u +%FT%TZ)")
+    _costs_append "$costs_file" "$_row"
   fi
 }
 

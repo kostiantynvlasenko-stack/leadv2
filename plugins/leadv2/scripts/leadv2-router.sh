@@ -238,6 +238,12 @@ if change_kind and os.path.isfile(sys.argv[7] if len(sys.argv) > 7 else ""):
     except Exception:
         pass
 
+# Snapshot the pre-ceiling model (post escalate_if/success-rate, pre-downgrade)
+# — the T8b fresh-trip mapping below downgrades FROM this, not from
+# `selected_model` after the legacy cumulative block may have already mutated
+# it once; otherwise a single windowed trip could double-hop the chain.
+_pre_ceiling_model = selected_model
+
 # ---------------------------------------------------------------------------
 # Cost ceiling check
 # ---------------------------------------------------------------------------
@@ -247,20 +253,35 @@ ceiling = float(ceiling_cfg.get(task_class, 2.00))
 warn_pct = float(ceiling_cfg.get("warn_threshold_pct", 60)) / 100
 hard_pct = float(ceiling_cfg.get("hard_stop_threshold_pct", 95)) / 100
 
+# C2/C3 fix (fix-round-1): whether the caller (bash) successfully held the
+# shared .cost-flush.lock before invoking us. Defaults to "assume locked" so
+# direct/manual invocations (tests, no-task-id calls) are unaffected; the
+# bash wrapper passes an explicit 0 only when flock genuinely failed/timed out.
+_lock_acquired = os.environ.get("LEADV2_LOCK_ACQUIRED", "1") == "1"
+
 current_burn = 0.0
+# burn_readable=False means "we could not safely determine cumulative spend"
+# (lock not held, file present but corrupt/non-list) — NEVER the same as
+# "no spend yet" (file genuinely absent, which is a known, safe current_burn=0).
+burn_readable = True
 if task_id:
-    costs_file = Path(f"docs/handoff/{task_id}/costs.yaml")
-    # Try PROJECT_ROOT prefix
-    alt = Path(os.environ.get("PROJECT_ROOT", ".")) / "docs" / "handoff" / task_id / "costs.yaml"
-    for cf in [costs_file, alt]:
-        if cf.is_file():
-            try:
-                entries = load_yaml_file(str(cf))
-                if isinstance(entries, list):
-                    current_burn = sum(float(e.get("cost_usd", 0)) for e in entries if isinstance(e, dict))
+    if not _lock_acquired:
+        burn_readable = False
+    else:
+        costs_file = Path(f"docs/handoff/{task_id}/costs.yaml")
+        # Try PROJECT_ROOT prefix
+        alt = Path(os.environ.get("PROJECT_ROOT", ".")) / "docs" / "handoff" / task_id / "costs.yaml"
+        for cf in [costs_file, alt]:
+            if cf.is_file():
+                try:
+                    entries = load_yaml_file(str(cf))
+                    if isinstance(entries, list):
+                        current_burn = sum(float(e.get("cost_usd", 0)) for e in entries if isinstance(e, dict))
+                    else:
+                        burn_readable = False
+                except Exception:
+                    burn_readable = False
                 break
-            except Exception:
-                pass
 
 ceiling_status = "ok"
 downgrade_applied = False
@@ -286,33 +307,198 @@ if ceiling > 0 and current_burn > 0:
                 expected_cost = expected_cost * 0.3  # rough sonnet vs opus ratio
 
 # ---------------------------------------------------------------------------
-# Build command_template from tool type
+# T8b ROUTING-TIER-RECOVERY-REDESIGN — windowed recovery gate (additive).
+# Legacy ceiling_status/downgrade_applied/current_burn above are UNCHANGED
+# (cumulative burn — backward-compat for the 85%/95% consumers + other repo
+# readers of ceiling_status, see design.md F5). This block adds a SEPARATE
+# trailing-window burn gate consumed via the new keys below by
+# claude-subsession.sh::_check_cost_ceiling. Router stays read-only: it never
+# writes downgrade_event/recovery rows, only reads costs.yaml under a shared
+# lock. Any exception anywhere -> tri-state "unknown" -> caller HOLDs.
 # ---------------------------------------------------------------------------
-def build_command_template(tool_str: str, model_str: str) -> str:
-    # Primary model is the first token before +
-    primary_model = model_str.split("+")[0].replace("-subsession", "").replace("-agent-tool", "")
-    if primary_model in ("bash", "bash+python", "bash+yaml", "mcp-calls-only", "skip"):
-        return f"# no-LLM: {primary_model}"
-    if "subsession" in tool_str or "subsession" in model_str:
-        return (
-            "bash .claude/scripts/claude-subsession.sh "
-            "--role {{role}} "
-            f"--model {primary_model} "
-            "--task-id {{task_id}} "
-            "--mission-file {{mission}} "
-            "--wait"
-        )
-    # Default: Agent tool invocation hint
-    return (
-        f"Agent(subagent_type={{role}}, model={primary_model}, "
-        "prompt=<mission from {{mission_file}}>)"
-    )
+def _env_num(name, default, lo=None, hi=None):
+    try:
+        v = float(os.environ.get(name) or default)
+    except (TypeError, ValueError):
+        v = float(default)
+    if lo is not None and v < lo:
+        v = lo
+    if hi is not None and v > hi:
+        v = hi
+    return v
 
-command_template = build_command_template(tool, selected_model)
+recovery_window_sec = _env_num("LEADV2_RECOVERY_WINDOW_SEC", 1800, 300, 86400)
+recover_pct = _env_num("LEADV2_RECOVERY_RECOVER_PCT", 5) / 100.0
+min_dwell_sec = _env_num("LEADV2_RECOVERY_MIN_DWELL_SEC", 300, 0, None)
+recovery_flag_on = os.environ.get("LEADV2_COOLDOWN_RECOVERY", "0") == "1"
 
+recovery_status = "unknown"     # tri-state: ok | over | unknown
+downgrade_active = "unknown"    # true | false | unknown
+force_model = ""
+fresh_trip = "false"            # true only on the probe that FIRST crosses the
+                                 # windowed trigger with no downgrade_event yet
+                                 # logged — tells the caller to persist ONE event.
+to_model = ""
+# fix-round-5: pre-init so it's ALWAYS bound, including on paths that raise
+# before ever reaching the `active = len(downgrade_rows) > 0` assignment
+# below (e.g. true day-0's FileNotFoundError). The except handler reads this
+# to distinguish "no downgrade ever" from "an existing downgrade_event row
+# just failed to parse further" — both used to collapse into the same
+# downgrade_active="unknown" and let G-3's =="true" check never fire.
+active = False
+# hard_stop is cumulative + always computable — never "unknown" (design §3/§4).
+# C3 fix (fix-round-1): when burn is UNreadable (lock failure or corrupt
+# file), hard_stop must NOT default to false — an unreadable spend history is
+# exactly the condition the fail-safe contract exists for ("fail cheap, not
+# fail-open"). Force hard_stop=true so both the cap-guard and do_recover's
+# `not hard_stop` gate refuse premium / refuse recovery.
+hard_stop = bool((not burn_readable) or (ceiling > 0 and current_burn >= hard_pct * ceiling))
+
+if not task_id:
+    # No task scope -> nothing to recover from; not an error.
+    recovery_status = "ok"
+    downgrade_active = "false"
+else:
+    try:
+        from datetime import datetime, timezone
+
+        # C2 fix (fix-round-1): never read costs.yaml unlocked. If the bash
+        # wrapper couldn't hold the shared lock (timeout/failure), skip the
+        # read entirely and fall straight to the except -> unknown/HOLD path.
+        if not _lock_acquired:
+            raise RuntimeError("cost-flush lock not held — refusing unlocked read")
+
+        def _parse_ts(raw):
+            s = str(raw).strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            return datetime.fromisoformat(s).timestamp()
+
+        _recovery_entries = None
+        for cf in [Path(f"docs/handoff/{task_id}/costs.yaml"),
+                   Path(os.environ.get("PROJECT_ROOT", ".")) / "docs" / "handoff" / task_id / "costs.yaml"]:
+            if cf.is_file():
+                _loaded = load_yaml_file(str(cf))
+                _recovery_entries = _loaded if isinstance(_loaded, list) else []
+                break
+        if _recovery_entries is None:
+            # costs.yaml missing entirely for a task_id that's in scope — could
+            # be "never spent yet" OR "file vanished mid-task" (row 1). Fail
+            # safe: unknown, never silently treated as "nothing to recover".
+            raise FileNotFoundError(f"costs.yaml not found for task {task_id}")
+
+        now_epoch = datetime.now(timezone.utc).timestamp()
+        downgrade_rows = [e["downgrade_event"] for e in _recovery_entries
+                          if isinstance(e, dict) and isinstance(e.get("downgrade_event"), dict)]
+        cost_rows = [e for e in _recovery_entries
+                     if isinstance(e, dict) and "downgrade_event" not in e]
+
+        active = len(downgrade_rows) > 0
+        downgrade_ts = None
+        if active:
+            last_event = downgrade_rows[-1]
+            to_model = str(last_event.get("to_model") or "")
+            downgrade_ts = _parse_ts(last_event.get("timestamp"))
+            if now_epoch < downgrade_ts:
+                raise ValueError("clock-skew: downgrade_event timestamp in the future")
+
+        windowed_burn = 0.0
+        valid_ts_count = 0
+        ts_fail_count = 0
+        for row in cost_rows:
+            ts_raw = row.get("timestamp")
+            if ts_raw is None:
+                ts_fail_count += 1
+                continue
+            ts_epoch = _parse_ts(ts_raw)
+            if ts_epoch > now_epoch + 5:
+                raise ValueError("clock-skew: future cost-row timestamp")
+            valid_ts_count += 1
+            if (now_epoch - ts_epoch) <= recovery_window_sec:
+                windowed_burn += float(row.get("cost_usd", 0) or 0)
+
+        # C1 fix (fix-round-1): "ok" is permitted ONLY when the parse is fully
+        # clean AND there is >=1 valid-ts cost row AND zero rows failed
+        # ts-parsing. Empty cost_rows, or ANY mix of valid+missing-ts rows,
+        # both fall through to the outer except -> unknown (never a silent ok).
+        if len(cost_rows) == 0 or valid_ts_count == 0 or ts_fail_count > 0:
+            raise ValueError("empty cost history or incomplete timestamps — cannot compute windowed burn safely")
+
+        if windowed_burn >= warn_pct * ceiling:
+            recovery_status = "over"
+        elif windowed_burn < recover_pct * ceiling:
+            recovery_status = "ok"
+        else:
+            recovery_status = "over"   # dead-band [recover_pct, warn_pct) HOLDs
+
+        if not active:
+            if recovery_status == "over":
+                # First-time windowed trip (F3): no downgrade_event row exists
+                # yet, but windowed_burn just crossed warn_pct. Resolve the
+                # target tier via the SAME downgrade_chain the legacy
+                # cumulative block uses, floor-respecting. Router stays
+                # read-only — it signals fresh_trip, caller persists the event.
+                _dg_chain = cfg.get("downgrade_chain", {})
+                if not is_floor:
+                    _parts = _pre_ceiling_model.split("+")
+                    _new_parts = [_dg_chain.get(p.split("-")[0], p) for p in _parts]
+                    _fresh_to = "+".join(_new_parts).split("+")[0]
+                else:
+                    _fresh_to = ""
+                if _fresh_to and _fresh_to != _pre_ceiling_model.split("+")[0]:
+                    downgrade_active = "true"
+                    fresh_trip = "true"
+                    force_model = _fresh_to
+                else:
+                    # already at floor / no downgrade mapping available
+                    downgrade_active = "false"
+                    force_model = ""
+            else:
+                downgrade_active = "false"
+                force_model = ""
+        else:
+            dwell_ok = (now_epoch - downgrade_ts) >= min_dwell_sec
+            forward_ok = (current_burn + float(expected_cost or 0.0)) < (hard_pct * ceiling)
+            do_recover = (
+                recovery_flag_on and recovery_status == "ok"
+                and not hard_stop and dwell_ok and forward_ok
+            )
+            if do_recover:
+                downgrade_active = "false"
+                force_model = ""
+            else:
+                downgrade_active = "true"
+                force_model = to_model or "__HOLD__"
+    except Exception:
+        recovery_status = "unknown"
+        # fix-round-5 (Critical): the blanket except used to always write
+        # "unknown" here, discarding whether `active` (a real downgrade_event
+        # row) had already been bound above the point of failure. True day-0
+        # raises FileNotFoundError before `active` is ever touched -> stays
+        # False (pre-init above) -> "unknown" -> F-A's day-0 allowance still
+        # applies. An EXISTING downgrade_event with a garbage/unparseable
+        # timestamp sets active=True at line ~389 BEFORE the ts-parse raise
+        # -> "true" -> G-3's cap now correctly fires instead of silently
+        # looking identical to day-0 and leaking an uncapped premium spawn.
+        downgrade_active = "true" if active else "unknown"
+        force_model = to_model or "__HOLD__"
+
+# ---------------------------------------------------------------------------
+# NOTE (fix-round-3, structural): the T8b escalation cap and command_template
+# construction USED TO both live here (round-2 F-A/F-B/F-C). Round-3 found
+# the cap still re-desynced because (a) it keyed off `downgrade_active=="true"`
+# instead of `force_model` truthiness directly (G-1: an active downgrade with
+# an imperfect read resolves downgrade_active="unknown" even though
+# force_model is a real, known value — the cap silently skipped), and (b) it
+# ran BEFORE the bandit overlay, which could still raise the tier back up
+# and desync command_template afterward (G-2). Both are architecturally the
+# same bug: two writers, two different signals, applied at two different
+# times. Fixed by deleting BOTH from here and moving to a single
+# `resolve_effective_model` choke-point in bash, AFTER the bandit overlay,
+# which is now the ONLY place that decides the final model and builds
+# command_template — see below the bandit overlay block.
 print(f"model={selected_model}")
 print(f"tool={tool}")
-print(f"command_template={command_template}")
 print(f"expected_cost_usd={expected_cost:.4f}")
 print(f"expected_tokens={expected_tokens}")
 print(f"ceiling_status={ceiling_status}")
@@ -320,25 +506,74 @@ print(f"downgrade_applied={str(downgrade_applied).lower()}")
 print(f"escalated={str(escalated).lower()}")
 print(f"current_burn_usd={current_burn:.6f}")
 print(f"ceiling_usd={ceiling:.2f}")
+# H3 fix (fix-round-1): ALL T8b recovery keys gated behind task_id — no-task
+# routing calls (the vast majority of phase/step routing) get byte-identical
+# stdout to pre-T8b baseline.
+if task_id:
+    print(f"recovery_status={recovery_status}")
+    print(f"force_model={force_model}")
+    print(f"downgrade_active={downgrade_active}")
+    print(f"fresh_trip={fresh_trip}")
+    print(f"hard_stop={'true' if hard_stop else 'false'}")
+    print(f"burn_readable={'true' if burn_readable else 'false'}")
 PYEOF
 
 # Run the helper — argv[7]=agent-stats, argv[8]=priors-yaml
 STATS_ARG="${AGENT_STATS_YAML:-}"
 
-result=$(python3 "$PY_HELPER" \
-  "$ROUTING_YAML" "$PHASE" "$STEP" "$SIGNALS" \
-  "${TASK_ID:-}" "${TASK_CLASS:-Standard}" \
-  "${STATS_ARG:-}" "${PRIORS_YAML:-}" 2>/tmp/leadv2-router-err.tmp) || {
-  err_code=$?
+# T8b: acquire flock -s on the SAME .cost-flush.lock the cost-flush writer and
+# _log_downgrade_event use (both -x), so the recovery-gate read never races a
+# concurrent append (design §2 TOCTOU). Only when task-scoped — routing calls
+# without --task-id have no costs.yaml to protect and keep the original
+# unlocked invocation byte-identical.
+#
+# C2/H1 fix (fix-round-1): `flock -s 9 || true` used to proceed UNLOCKED on
+# any flock failure — the exact TOCTOU hole the lock exists to close. Now:
+# (a) `-w LEADV2_LOCK_WAIT_SEC` (default 10s) bounds the wait so a wedged
+#     lock can never hang the task forever; (b) on a non-zero flock rc we
+#     NEVER run python with an unlocked read — LEADV2_LOCK_ACQUIRED=0 tells
+#     the python helper to skip BOTH costs.yaml reads (legacy cumulative +
+#     recovery gate) and report burn_readable=false / recovery_status=unknown
+#     (fail-safe HOLD), not silently degrade to an unlocked read.
+_router_py_err="/tmp/leadv2-router-err.tmp"
+LEADV2_LOCK_WAIT_SEC="${LEADV2_LOCK_WAIT_SEC:-10}"
+_handle_py_helper_failure() {
+  local err_code="$1"
   if [[ $err_code -eq 2 ]]; then
     log_warn "routing.yaml parse error or unknown phase/step — caller uses fallback"
-    cat /tmp/leadv2-router-err.tmp >&2 2>/dev/null || true
+    cat "$_router_py_err" >&2 2>/dev/null || true
     exit 2
   fi
   log_error "router python helper failed (exit $err_code)"
-  cat /tmp/leadv2-router-err.tmp >&2 2>/dev/null || true
+  cat "$_router_py_err" >&2 2>/dev/null || true
   exit 1
 }
+
+if [[ -n "${TASK_ID:-}" ]]; then
+  _cost_flush_lock="${PROJECT_ROOT}/docs/handoff/${TASK_ID}/.cost-flush.lock"
+  mkdir -p "$(dirname "$_cost_flush_lock")" 2>/dev/null || true
+  result=$(
+    (
+      if flock -w "$LEADV2_LOCK_WAIT_SEC" -s 9; then
+        LEADV2_LOCK_ACQUIRED=1 python3 "$PY_HELPER" \
+          "$ROUTING_YAML" "$PHASE" "$STEP" "$SIGNALS" \
+          "${TASK_ID:-}" "${TASK_CLASS:-Standard}" \
+          "${STATS_ARG:-}" "${PRIORS_YAML:-}"
+      else
+        log_warn "could not acquire cost-flush lock within ${LEADV2_LOCK_WAIT_SEC}s — reporting fail-safe HOLD, no unlocked read"
+        LEADV2_LOCK_ACQUIRED=0 python3 "$PY_HELPER" \
+          "$ROUTING_YAML" "$PHASE" "$STEP" "$SIGNALS" \
+          "${TASK_ID:-}" "${TASK_CLASS:-Standard}" \
+          "${STATS_ARG:-}" "${PRIORS_YAML:-}"
+      fi
+    ) 9>"$_cost_flush_lock" 2>"$_router_py_err"
+  ) || _handle_py_helper_failure "$?"
+else
+  result=$(python3 "$PY_HELPER" \
+    "$ROUTING_YAML" "$PHASE" "$STEP" "$SIGNALS" \
+    "${TASK_ID:-}" "${TASK_CLASS:-Standard}" \
+    "${STATS_ARG:-}" "${PRIORS_YAML:-}" 2>"$_router_py_err") || _handle_py_helper_failure "$?"
+fi
 
 if [[ "$result" == "ROUTING_YAML_ERROR"* ]] || [[ "$result" == "UNKNOWN_PHASE_STEP"* ]]; then
   log_warn "routing returned: $result — using fallback"
@@ -417,16 +652,11 @@ except Exception:
       if [[ -n "$_chosen" && "$_chosen" != "$_heuristic_primary" ]]; then
         BANDIT_ARM="$_chosen"
         BANDIT_DEVIATION="true"
-        # Patch model= line: replace primary model token with bandit arm
-        result=$(printf '%s\n' "$result" | python3 -c "
-import sys
-heuristic='$_heuristic_primary'
-bandit='$_chosen'
-for line in sys.stdin:
-    if line.startswith('model='):
-        line = 'model=' + line[len('model='):].rstrip().replace(heuristic, bandit, 1) + '\n'
-    sys.stdout.write(line)
-")
+        # fix-round-3: bandit PROPOSES here (BANDIT_ARM/BANDIT_DEVIATION), it
+        # does NOT get the last word — no more patching $result's model=
+        # line directly. The resolve_effective_model choke-point below reads
+        # BANDIT_ARM/BANDIT_DEVIATION to build proposed_model, then applies
+        # the cap, then is the ONE place that writes model=/command_template=.
       else
         BANDIT_ARM="${_chosen:-}"
       fi
@@ -439,7 +669,146 @@ for line in sys.stdin:
 fi
 # ── end bandit overlay ─────────────────────────────────────────────────────────
 
-if [[ "$ceiling_status" == "hard_stop_95pct" ]]; then
+# ── [T8b] resolve_effective_model — SINGLE final choke-point (fix-round-3) ──
+# G-1/G-2 fix. Rounds 1-2's cap kept re-desyncing because it lived at the
+# WRONG point (before the bandit overlay) and keyed off the WRONG signal
+# (`downgrade_active=="true"` as a string, instead of `force_model`
+# truthiness directly). G-1 repro: an active downgrade with an imperfect
+# read (0 cost rows / a bad timestamp) resolves downgrade_active="unknown"
+# even though force_model is a real, known value (e.g. "sonnet") — the old
+# condition silently skipped the cap. G-2 repro: the bandit overlay above
+# ran AFTER the old cap and could raise the tier back up, desyncing
+# command_template (built even earlier, before either).
+#
+# This is now the ONE place, decided exactly once, that resolves the final
+# model for BOTH emitted fields: (1) proposed_model = base selection,
+# possibly overridden by the bandit's pick above (bandit proposes, does NOT
+# get the last word); (2) the cap is the LAST word, keyed off force_model
+# truthiness (mirrors claude-subsession.sh's own F-D adopt-check, so router
+# self-cap == consumer check) OR burn_readable==false OR hard_stop==true;
+# (3) command_template is rebuilt from the resulting effective_model and
+# model= is rewritten to match — a single python transform does both in one
+# pass, so they can never desync again. No other code path may write either
+# field after this point.
+_force_model_val=$(printf '%s\n' "$result" | grep '^force_model=' | cut -d= -f2 || true)
+_downgrade_active_val=$(printf '%s\n' "$result" | grep '^downgrade_active=' | cut -d= -f2 || echo "unknown")
+_burn_readable_val=$(printf '%s\n' "$result" | grep '^burn_readable=' | cut -d= -f2 || echo "true")
+_hard_stop_val=$(printf '%s\n' "$result" | grep '^hard_stop=' | cut -d= -f2 || echo "false")
+_tool_val=$(printf '%s\n' "$result" | grep '^tool=' | cut -d= -f2)
+
+_proposed_model="$_heuristic_model"
+if [[ -n "$BANDIT_ARM" && "$BANDIT_DEVIATION" == "true" ]]; then
+  _heuristic_primary_tok=$(printf '%s' "$_heuristic_model" | cut -d+ -f1)
+  _proposed_model="${_heuristic_model/$_heuristic_primary_tok/$BANDIT_ARM}"
+fi
+
+_tier_rank() {
+  local base
+  base="$(printf '%s' "$1" | cut -d+ -f1 | sed -e 's/-subsession$//' -e 's/-agent-tool$//')"
+  case "$base" in
+    haiku) echo 0 ;;
+    sonnet|fable) echo 1 ;;
+    opus) echo 2 ;;
+    *) echo 1 ;;
+  esac
+}
+
+_effective_model="$_proposed_model"
+# G-3 fix-round-4 (surgical add — no re-architect): the trigger gained one
+# more OR-branch, `downgrade_active=="true" AND force_model=="__HOLD__"` — a
+# malformed downgrade_event row (valid timestamp, missing to_model).
+# Previously this fell through uncapped (force_model isn't "real",
+# burn_readable/hard_stop are both fine) even though there IS a confirmed
+# active downgrade, while the consumer (claude-subsession.sh's mirrored
+# check) already forces the safe floor in this exact shape.
+#
+# NOTE — spec deviation, documented (see build.md): the round-4 spec text
+# also lists `downgrade_active=="unknown"` in this OR-branch. Empirically
+# that collides with genuine day-0/never-spent (F-A): a fresh task with NO
+# costs.yaml ALSO produces downgrade_active="unknown" + force_model=
+# "__HOLD__" (the FileNotFoundError except path), and F-A is a confirmed,
+# must-hold invariant (explicitly reconfirmed this round) that a never-spent
+# task's first premium probe must NOT be capped. As of round-5, the except
+# handler above (~line 472) pre-inits `active = False` and reads it to
+# distinguish the two cases: a malformed EXISTING downgrade_event row (bad
+# timestamp etc.) sets `active=True` before the parse raises, so its except
+# path now writes downgrade_active="true" — not "unknown" — while true
+# day-0 raises FileNotFoundError before `active` is ever touched and still
+# lands on "unknown". That signal is what makes restricting this branch to
+# downgrade_active=="true" ONLY safe: a malformed-active-row now genuinely
+# reaches "true" here (fixing G-3's literal repro — a downgrade_event row
+# that exists and parses, just incompletely) while day-0 stays "unknown"
+# and never trips this OR-branch, so the F-A allowance still holds.
+# Every other condition below is UNCHANGED from round-3.
+if { [[ -n "$_force_model_val" && "$_force_model_val" != "__HOLD__" ]]; } \
+   || [[ "$_burn_readable_val" == "false" ]] \
+   || [[ "$_hard_stop_val" == "true" ]] \
+   || { [[ "$_downgrade_active_val" == "true" ]] && [[ "$_force_model_val" == "__HOLD__" ]]; }; then
+  _cap_target="$_force_model_val"
+  if [[ -z "$_cap_target" || "$_cap_target" == "__HOLD__" ]]; then
+    _cap_target="haiku"   # SAFE_FLOOR — lowest tier in the downgrade_chain
+  fi
+  if [[ $(_tier_rank "$_proposed_model") -gt $(_tier_rank "$_cap_target") ]]; then
+    _effective_model="$_cap_target"
+    log_warn "resolve_effective_model: capping ${_proposed_model} -> ${_effective_model} (force_model=${_force_model_val:-<empty>}, downgrade_active=${_downgrade_active_val}, burn_readable=${_burn_readable_val}, hard_stop=${_hard_stop_val})"
+  fi
+fi
+
+# Exactly ONE writer for model= and command_template= — both rebuilt fresh
+# from the SAME effective_model in a single pass, so they can never desync.
+result=$(printf '%s\n' "$result" | EFFECTIVE_MODEL="$_effective_model" TOOL_VAL="$_tool_val" python3 -c "
+import sys, os
+
+effective_model = os.environ['EFFECTIVE_MODEL']
+tool_val = os.environ['TOOL_VAL']
+
+# G-5 fix-round-4 (CRITICAL, surgical): round-3 merged this into ONE f-string
+# per branch — an f-string treats {{ / }} as an ESCAPE for a literal single
+# brace, so every {{placeholder}} silently collapsed to {placeholder},
+# breaking the documented double-brace template contract for 100% of router
+# calls. Restored EXACTLY as pre-round-3: each branch is built from adjacent
+# string-literal segments, where each segment is EITHER a plain (non-f)
+# string — {{x}} stays four literal characters, never touched — OR a
+# narrow f-string segment that interpolates ONLY primary_model. The ONLY
+# value this function ever interpolates is the (capped) model; every
+# {{role}}/{{task_id}}/{{mission}}/{{mission_file}} placeholder must survive
+# verbatim for the downstream filler to substitute.
+def build_command_template(tool_str, model_str):
+    primary_model = model_str.split('+')[0].replace('-subsession', '').replace('-agent-tool', '')
+    if primary_model in ('bash', 'bash+python', 'bash+yaml', 'mcp-calls-only', 'skip'):
+        return f'# no-LLM: {primary_model}'
+    if 'subsession' in tool_str or 'subsession' in model_str:
+        return (
+            'bash .claude/scripts/claude-subsession.sh '
+            '--role {{role}} '
+            f'--model {primary_model} '
+            '--task-id {{task_id}} '
+            '--mission-file {{mission}} '
+            '--wait'
+        )
+    return (
+        'Agent(subagent_type={{role}}, model='
+        f'{primary_model}, '
+        'prompt=<mission from {{mission_file}}>)'
+    )
+
+new_cmpl = build_command_template(tool_val, effective_model)
+_wrote_cmpl = False
+for line in sys.stdin:
+    if line.startswith('model='):
+        sys.stdout.write('model=' + effective_model + chr(10))
+    elif line.startswith('command_template='):
+        sys.stdout.write('command_template=' + new_cmpl + chr(10))
+        _wrote_cmpl = True
+    else:
+        sys.stdout.write(line)
+if not _wrote_cmpl:
+    sys.stdout.write('command_template=' + new_cmpl + chr(10))
+")
+# ── end resolve_effective_model ─────────────────────────────────────────────
+
+hard_stop_flag=$(printf '%s\n' "$result" | grep '^hard_stop=' | cut -d= -f2 || echo "false")
+if [[ "$hard_stop_flag" == "true" ]]; then
   log_error "HARD STOP: task burn >= 95% of ceiling — refusing spawn for $PHASE/$STEP"
   printf '%s\n' "$result"
   exit 1

@@ -130,8 +130,12 @@ PYEOF
   # This makes the operation idempotent: if session_id already exists in
   # costs_file we skip the append. Marker is deleted inside the same lock
   # so concurrent retries see a consistent state.
+  # F-E fix-round-2: bounded wait (was unbounded flock -x 9 — the third
+  # costs.yaml writer missed the H1/H4 timeout treatment). On timeout,
+  # log-and-skip — marker file is left in place for the next flush pass,
+  # never a corrupting unlocked write.
   (
-    flock -x 9 || { log "ERROR: could not acquire flush lock for $handoff_dir — aborting"; exit 1; }
+    flock -w "${LEADV2_LOCK_WAIT_SEC:-10}" -x 9 || { log "WARN: could not acquire flush lock for $handoff_dir within ${LEADV2_LOCK_WAIT_SEC:-10}s — skipping (marker kept for retry)"; exit 0; }
 
     # Idempotency check: skip if session_id already recorded
     if [[ -f "$costs_file" ]] && python3 -c "

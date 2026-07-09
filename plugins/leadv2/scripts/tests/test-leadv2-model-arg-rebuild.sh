@@ -123,9 +123,14 @@ _it_run_subsession() {
 # ── Test 1: THIS spawn's own fresh 60% breach -> downgrade reaches --model ──
 test_1_downgrade_reaches_model() {
   log "Test 1: burn>=60% THIS spawn -> --model=sonnet (downgrade reaches launch)"
-  local costs='- role: developer
+  # T8b: the fresh-trip decision is now windowed-burn-derived, so the cost row
+  # needs a parseable in-window timestamp (design §3) — a row with no
+  # timestamp can never contribute to windowed_burn and would leave
+  # recovery_status/downgrade_active "unknown" (fail-safe HOLD), not "over".
+  local costs="- role: developer
   cost_usd: 1.5
-'
+  timestamp: $(date -u +%FT%TZ)
+"
   local got
   got="$(_it_run_subsession "IT-01" "opus" "$costs" "")"
   if [[ "$got" == "sonnet" ]]; then
