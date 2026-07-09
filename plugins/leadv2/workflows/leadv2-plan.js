@@ -241,7 +241,7 @@ if (recommendedRoles.includes('security-auditor')) {
 // Both run in parallel; Codex findings are weighted first during concern dedup (higher signal-to-token ratio).
 if (CODEX_ON) {
   spawns.unshift(() => agent(
-    `Run this single blocking call: bash ~/.claude/scripts/leadv2-codex-planner.sh --task-id ${TASK_ID} --mission-file "${MISSION_PATH}" --effort ${HEAVY ? 'xhigh' : 'high'} --wait. ` +
+    `Run this single blocking call: bash ~/.claude/scripts/leadv2-codex-planner.sh --task-id ${TASK_ID} --mission-file "${MISSION_PATH}" --tier ${HEAVY ? 'top' : 'standard'} --wait. ` +
     `The --wait flag blocks until done; no polling needed. When it exits, read findings: bash ~/.claude/scripts/cx-tail.sh <output-file>. ` +
     `Return codex's plan findings as concerns[] (severity-tagged). If codex unavailable (non-zero exit), return empty with summary_for_lead="codex unavailable". Do NOT poll or loop.`,
     { label: 'codex-planner', phase: 'Plan', model: 'haiku', effort: 'low', schema: CRITIC_SCHEMA }))

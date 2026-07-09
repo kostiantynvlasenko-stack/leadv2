@@ -32,7 +32,7 @@ Before spawning this Opus judge for a critic-vs-codex conflict specifically (cod
 
 ```bash
 bash .claude/scripts/lv2 leadv2-codex-planner.sh \
-  --task-id "<task-id>" --mode reconfirm --effort medium \
+  --task-id "<task-id>" --mode reconfirm --effort medium --tier standard \
   --prior-verdict "docs/handoff/<task-id>/codex.summary.md" \
   --out "docs/handoff/<task-id>/codex-reconfirm.md"
 ```

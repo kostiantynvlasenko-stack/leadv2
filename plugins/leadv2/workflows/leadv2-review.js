@@ -102,7 +102,7 @@ if (SAFETY) {
 if (CODEX_ON) {
   // Codex is primary: unshift to run before agent-critic in parallel (first slot = primary adversarial brain)
   reviewers.unshift(() => agent(
-    `Run and wait: bash ~/.claude/scripts/codex-task.sh adversarial-review --wait --base ${BASE}. Then read findings with: bash ~/.claude/scripts/cx-tail.sh <output-file>. Parse [critical]/[high]/[medium]/[low] lines into findings (dimension="codex"). If codex unavailable (exit non-zero), return empty findings with summary_for_lead="codex unavailable". Do NOT invent findings.`,
+    `Run and wait: bash ~/.claude/scripts/codex-task.sh adversarial-review --wait --base ${BASE} --tier top. Then read findings with: bash ~/.claude/scripts/cx-tail.sh <output-file>. Parse [critical]/[high]/[medium]/[low] lines into findings (dimension="codex"). If codex unavailable (exit non-zero), return empty findings with summary_for_lead="codex unavailable". Do NOT invent findings.`,
     { label: 'codex-adversarial', phase: 'Review', model: 'haiku', effort: 'low', schema: FINDINGS_SCHEMA }))
 }
 const reviewResults = (await parallel(reviewers)).filter(Boolean)

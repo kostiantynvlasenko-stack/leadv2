@@ -410,7 +410,7 @@ _SENSITIVE=$(git diff --name-only "${TASK_START_SHA}..HEAD" 2>/dev/null \
 
 if [[ -n "$_SENSITIVE" ]] && bash ~/.claude/scripts/codex-task.sh status >/dev/null 2>&1; then
   bash .claude/scripts/lv2 leadv2-codex-planner.sh \
-    --task-id "${TASK_ID}" --mode quick-verify --effort low \
+    --task-id "${TASK_ID}" --mode quick-verify --effort low --tier standard \
     --diff-paths "$_SENSITIVE" \
     --out "docs/handoff/${TASK_ID}/codex-step-${STEP_N:-0}-result.md" &   # background, own path — does not race codex-plan-result.md from Phase 2
 fi
