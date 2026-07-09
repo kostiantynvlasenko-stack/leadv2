@@ -1,6 +1,6 @@
 ---
 name: leadv2-plan
-description: "Phase 2 — parallel architect(opus) + critic + optional-Codex triad synthesized into context.yaml decisions/off_limits/plan.steps. Triggers: classify produces Standard/Heavy/Strategic."
+description: "Phase 2 — Codex (GPT-5.6, tiered) is the PRIMARY plan author; architect(sonnet, never opus) cross-checks + critic synthesized into context.yaml decisions/off_limits/plan.steps. Triggers: classify produces Standard/Heavy/Strategic."
 allowed-tools:
   - Read
   - Write
@@ -41,9 +41,10 @@ The bandit writes `docs/handoff/<id>/route-decisions.yaml`; scorecard-write.sh r
 
 > **PREFERRED — saved workflow (offload, model-pinned, 2026-06-09):** when the `Workflow` tool is available, issue
 > `Workflow({name:"leadv2-plan", args:{taskId, taskBrief, heavy, archKeyword, codexEnabled, missionPath}})`.
-> It runs architect + critic + Codex-via-agent in parallel, synthesizes context.yaml to disk, and returns
+> It runs Codex (PRIMARY plan author, `--tier top` Heavy/arch else `--tier standard`) + architect (sonnet
+> cross-check) + critic in parallel, synthesizes context.yaml to disk, and returns
 > `{decisions_count, steps_count, blocking_concerns, context_path, needs_founder_decision}`. Retires the manual
-> triad + Codex Monitor-polling; lead context stays clean. architect=opus only on Heavy/arch, else sonnet.
+> triad + Codex Monitor-polling; lead context stays clean. architect=sonnet ALWAYS (never opus, CODEX-56-ROUTING).
 > The manual protocol below is the FALLBACK when the `Workflow` tool is unavailable.
 
 ### 1a. Graph discovery — lead pre-populates (recommended)
@@ -265,8 +266,8 @@ On any QUESTION_PENDING notification → run `leadv2-question-proxy` skill.
 > // Workflow script — planning fan-out
 > const results = await parallel([
 >   agent("architect", {
->     model: "claude-opus-4-8",
->     prompt: `<architect mission — full mission context + graph context from /tmp/mission-<id>.md>`,
+>     model: "claude-sonnet-5",   // CODEX-56-ROUTING: always sonnet, never opus — cross-check on Codex's plan
+>     prompt: `<architect mission — cross-check Codex's plan, full mission context + graph context from /tmp/mission-<id>.md>`,
 >     outputSchema: {
 >       type: "object",
 >       properties: {
@@ -332,11 +333,12 @@ Bash(
   run_in_background: true
 )  # ← only when codex_ok
 
-# Architect(opus) — spawn if Heavy OR arch keyword OR complex multi-service change.
-# Standard class: optional. If skipping → Agent(critic, sonnet) covers Stage 1 alone.
+# Architect(sonnet, CODEX-56-ROUTING: never opus) — spawn if Heavy OR arch keyword OR complex
+# multi-service change, as a cross-check on Codex's plan (fired above). Standard class: optional.
+# If skipping → Agent(critic, sonnet) covers Stage 1 alone.
 Agent(
   subagent_type: architect,
-  model: opus,
+  model: sonnet,
   prompt: "
 Mission: <one-sentence goal from classify>
 
@@ -515,7 +517,7 @@ decisions:        # combine locked-in picks from all three
     topic: ...
     choice: ...
     rejected: [...]
-    source: architect(opus)
+    source: architect(sonnet)
   - id: D2
     ...
     source: codex
@@ -524,7 +526,7 @@ off_limits:       # union of all off-limits from three sources
   - ...
 
 research:         # pointers to each deliverable
-  - source: architect(opus)
+  - source: architect(sonnet)
     summary: "<one sentence from their output>"
     file: docs/handoff/<id>/architect.md#<anchor>
   - source: critic(opus)

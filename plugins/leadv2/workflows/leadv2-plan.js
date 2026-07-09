@@ -29,7 +29,10 @@ const _ARCHIVE_ROOT = (await bash(`_r="$(git rev-parse --path-format=absolute --
 // args.models absent (or LEADV2_ROUTE_BANDIT != 1) => falls back to existing pinned defaults.
 // Flag-off guarantee: if args.models is not provided, model values are identical to pre-BANDIT-WIRE-01.
 const _MODELS = (a.models && typeof a.models === 'object') ? a.models : {}
-const ARCH_MODEL = _MODELS.architect || (HEAVY ? 'opus' : 'sonnet')
+// [CODEX-56-ROUTING] Architect downgraded to sonnet ALWAYS (never opus, even Heavy) — Codex
+// GPT-5.6 (--tier top/standard below) is now the PRIMARY plan author; architect is a
+// lightweight cross-check that challenges/augments Codex's plan, not a competing full author.
+const ARCH_MODEL = 'sonnet'
 const CRITIC_MODEL = _MODELS.critic || 'sonnet'
 
 // [CODEMAP-CONTEXT-01] Flag-gated repomap-style code_map. The JS workflow runtime has no
@@ -210,11 +213,20 @@ await emitLedger('phase_enter', { phase: 'Plan' })
 // [F5+F8] Dynamic spawns from recommended_roles + context envelope injected into architect prompt
 const spawns = []
 if (recommendedRoles.includes('architect')) {
+  // [CODEX-56-ROUTING] Reframed as a lightweight CROSS-CHECK on Codex's plan (spawned below,
+  // same Plan phase, parallel) — not a full competing plan author. It still emits the
+  // ARCH_SCHEMA shape (decisions/plan_steps/off_limits/risks) so Synthesize has a structured
+  // plan to write, but the prompt's job is to challenge/augment, not originate from a blank
+  // slate: assume Codex has already proposed an options/recommendation/risks/rollback plan
+  // for this same brief, and this pass exists to catch what Codex would miss (repo-specific
+  // detail, off_limits) and flag disagreements as risks for lead arbitration.
   spawns.push(() => synthAgent(
-    `Architect the plan for task ${TASK_ID}. Brief: ${BRIEF || MISSION_PATH}. Read ${MISSION_PATH} + the repo. ` +
-    `Produce decisions[], plan_steps[] (minimal-diff oriented), off_limits[], risks[]. No code, no full-file rewrites.` +
+    `Cross-check Codex's plan for task ${TASK_ID} — Codex (GPT-5.6) is the primary plan author for this task; ` +
+    `do NOT re-author a competing full plan from scratch. Brief: ${BRIEF || MISSION_PATH}. Read ${MISSION_PATH} + the repo. ` +
+    `Turn the brief into decisions[], plan_steps[] (minimal-diff oriented), off_limits[], risks[], focusing on repo-specific ` +
+    `detail and gaps a fast 2nd-opinion plan is likely to miss. No code, no full-file rewrites.` +
     contextEnvelope,
-    { label: 'architect', phase: 'Plan', agentType: 'architect', model: ARCH_MODEL, effort: HEAVY ? (ARCH_MODEL === 'sonnet' ? 'high' : 'xhigh') : 'medium', schema: ARCH_SCHEMA }))
+    { label: 'architect', phase: 'Plan', agentType: 'architect', model: ARCH_MODEL, effort: HEAVY ? 'high' : 'medium', schema: ARCH_SCHEMA }))
 }
 if (recommendedRoles.includes('critic')) {
   spawns.push(() => agent(
@@ -237,8 +249,11 @@ if (recommendedRoles.includes('security-auditor')) {
     { label: 'security-plan', phase: 'Plan', agentType: 'security-auditor', model: 'sonnet', effort: 'high', schema: CRITIC_SCHEMA }))
 }
 // lean: devops-engineer and frontend-developer plan-phase spawns omitted — rarely needed at Plan stage; upgrade when task_class=ops|ui is common
-// [COST-LEVERS-01] Codex is the PRIMARY adversarial brain for Plan (Lever 3). Agent critic above is the fallback when CODEX_ON=false.
-// Both run in parallel; Codex findings are weighted first during concern dedup (higher signal-to-token ratio).
+// [CODEX-56-ROUTING] Codex (GPT-5.6, tiered top/standard) is the PRIMARY plan author for Plan
+// phase — it runs first in dispatch order (unshift below) and its findings are weighted first
+// during concern dedup (higher signal-to-token ratio). The Claude architect above is downgraded
+// to sonnet ALWAYS and reframed as a lightweight cross-check, not a competing full author.
+// Agent critic above is the fallback second voice when CODEX_ON=false.
 if (CODEX_ON) {
   spawns.unshift(() => agent(
     `Run this single blocking call: bash ~/.claude/scripts/leadv2-codex-planner.sh --task-id ${TASK_ID} --mission-file "${MISSION_PATH}" --tier ${HEAVY ? 'top' : 'standard'} --wait. ` +

@@ -24,7 +24,7 @@ synthesis/judgment (Heavy design, diverge judge, safety verdicts) — never hard
 | Role | Model | Effort | Spawn | When |
 |---|---|---|---|---|
 | Main lead (you) | **Opus** (per-repo `ref/leadv2-main-model.yaml`) | -- | -- | Always (thin router, not a thinker) |
-| architect | Sonnet (Standard) / Opus (Heavy/arch) | `medium` / `xhigh` (Heavy) | Agent tool | Phase 2 Plan (Heavy/arch keyword); Phase 7 Recovery alt |
+| architect | Sonnet ALWAYS (Codex GPT-5.6 is primary plan author, CODEX-56-ROUTING) | `medium` / `high` (Heavy) | Agent tool | Phase 2 Plan cross-check (never opus); Phase 7 Recovery alt |
 | critic | Sonnet (Standard) / Opus (Heavy/safety verdict) | `high` / `xhigh` (safety verdict) | Agent tool | Phase 2 Plan Stage 2 (sequential); Phase 5 Review if safety-touched |
 | product-owner / strategist | Sonnet | `medium` | claude-subsession | Task-queue meetings only (staleness trigger) |
 | developer / postgres-pro / frontend-developer / devops-engineer | Sonnet | `medium` | Agent tool | Interactive build, deploy, fix rounds |
@@ -82,7 +82,7 @@ synthesis/judgment (Heavy design, diverge judge, safety verdicts) — never hard
 - Detail: read `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Phase 1.5` BEFORE executing.
 
 ## Phase 2: PLAN - parallel brain triad
-- Trigger: `leadv2-router.sh --phase plan` -> parallel: `leadv2-codex-planner.sh` + `Agent(architect, sonnet by default — opus ONLY Heavy/arch-keyword)` + `Agent(critic, sonnet by default — opus ONLY Heavy/safety-touched; Codex is the primary adversarial brain)` -> Monitor Codex completion -> synthesize into context.yaml | Exit: context.yaml has decisions[], off_limits[], plan.steps[], risk summary
+- Trigger: `leadv2-router.sh --phase plan` -> parallel: `leadv2-codex-planner.sh --tier top|standard` (PRIMARY plan author, CODEX-56-ROUTING) + `Agent(architect, sonnet ALWAYS — never opus; lightweight cross-check on Codex's plan)` + `Agent(critic, sonnet by default — opus ONLY Heavy/safety-touched)` -> Monitor Codex completion -> synthesize into context.yaml | Exit: context.yaml has decisions[], off_limits[], plan.steps[], risk summary
 - Detail: read `${CLAUDE_PLUGIN_ROOT}/docs/phases.md §Phase 2` BEFORE executing.
 
 ## Phase 3: GATE 1 - the only gate
