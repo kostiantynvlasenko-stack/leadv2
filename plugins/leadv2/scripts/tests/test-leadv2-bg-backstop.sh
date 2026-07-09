@@ -54,8 +54,8 @@ _clean "$T7"
 
 T8="$(_sid)"; _clean "$T8"
 printf -- '%s\tBG_SPAWN\tthrottled\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "/tmp/leadv2-bg-ledger/${T8}.log"
-LEADV2_BG_WARN_EVERY=3 printf '{"session_id":"%s","stop_hook_active":false}' "$T8" | bash "$WARN_SH" >/dev/null 2>&1 || true
-OUT="$(LEADV2_BG_WARN_EVERY=3 printf '{"session_id":"%s","stop_hook_active":false}' "$T8" | bash "$WARN_SH" 2>/dev/null || true)"
+printf '{"session_id":"%s","stop_hook_active":false}' "$T8" | LEADV2_BG_WARN_EVERY=3 bash "$WARN_SH" >/dev/null 2>&1 || true
+OUT="$(printf '{"session_id":"%s","stop_hook_active":false}' "$T8" | LEADV2_BG_WARN_EVERY=3 bash "$WARN_SH" 2>/dev/null || true)"
 [[ -z "$OUT" ]] && pass "T8: throttle suppresses 2nd stop" || fail "T8: should suppress, got: $OUT"
 _clean "$T8"
 
