@@ -18,9 +18,10 @@ fi
 
 usage() {
   cat >&2 <<EOF
-Usage: leadv2-codex-planner.sh --task-id <id> (--mission "<text>" | --mission-file <path>) [--effort <medium|high|xhigh>=high]
+Usage: leadv2-codex-planner.sh --task-id <id> (--mission "<text>" | --mission-file <path>) [--tier <top|standard|volume>=standard] [--effort <medium|high|xhigh>]
        leadv2-codex-planner.sh --task-id <id> --mode <quick-verify|diagnose|reconfirm> [--out <file>]
                                 [--diff-paths <str>] [--log-path <file>] [--prior-verdict <file>]
+       leadv2-codex-planner.sh --print-model [--tier <top|standard|volume>=standard]
 
   --mission "<text>"     Inline mission text (passed directly via CLI). --mode plan only.
   --mission-file <path>  Path to mission file; read early for race protection.
@@ -31,15 +32,24 @@ Usage: leadv2-codex-planner.sh --task-id <id> (--mission "<text>" | --mission-fi
   --diff-paths <str>     quick-verify: paths to review. diagnose: diff content/path (optional).
   --log-path <file>      diagnose: log file (tail -100 used as prompt input).
   --prior-verdict <file> reconfirm: prior verdict file content used as prompt input.
+  --tier <t>             top | standard | volume (default: standard). Resolves model+effort:
+                           top      -> gpt-5.6-sol/high, falls back to gpt-5.6-terra/ultra if
+                                       sol is absent from ~/.codex/models_cache.json (gov-gated)
+                           standard -> gpt-5.6-terra/high
+                           volume   -> gpt-5.6-luna/medium
+                         Explicit --effort (if also given) overrides the tier's resolved effort.
+  --print-model          Dry-run: print resolved "model=<slug> effort=<level>" and exit 0.
+                         Skips --task-id/--mission validation and does not call Codex.
 
-Codex model is the codex-companion default (gpt-5.5 on plugin >=1.0.4).
-The --model flag is intentionally not exposed; spark is banned project-wide.
+Codex model is resolved from --tier (see above); spark is banned project-wide
+regardless of tier.
 EOF
   exit 1
 }
 
-TASK_ID=""; MISSION=""; MISSION_FILE=""; EFFORT="high"; WAIT=0
+TASK_ID=""; MISSION=""; MISSION_FILE=""; EFFORT=""; WAIT=0
 MODE="plan"; OUT_FILE=""; DIFF_PATHS=""; LOG_PATH=""; PRIOR_VERDICT=""
+TIER="standard"; PRINT_MODEL=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,13 +63,51 @@ while [[ $# -gt 0 ]]; do
     --diff-paths)    DIFF_PATHS="$2"; shift 2 ;;
     --log-path)      LOG_PATH="$2"; shift 2 ;;
     --prior-verdict) PRIOR_VERDICT="$2"; shift 2 ;;
+    --tier)          TIER="$2"; shift 2 ;;
+    --print-model)   PRINT_MODEL=1; shift ;;
     --model)
-      echo "[leadv2-codex-planner] --model is no longer accepted (gpt-5.5 default, spark banned)" >&2
+      echo "[leadv2-codex-planner] --model is no longer accepted directly; use --tier <top|standard|volume>" >&2
       usage
       ;;
     *) echo "[leadv2-codex-planner] unknown arg: $1" >&2; usage ;;
   esac
 done
+
+# Tier resolver -- logical-tier -> (codex model slug, reasoning effort).
+# Spark is never a tier target; the codex-task.sh spark ban is a second gate.
+MODELS_CACHE="${CODEX_MODELS_CACHE:-$HOME/.codex/models_cache.json}"
+_resolve_tier() {
+  case "$TIER" in
+    top)
+      if command -v jq >/dev/null 2>&1 && [[ -f "$MODELS_CACHE" ]] \
+         && jq -e '.models[]? | select(.slug=="gpt-5.6-sol")' "$MODELS_CACHE" >/dev/null 2>&1; then
+        TIER_MODEL="gpt-5.6-sol"; TIER_EFFORT="high"
+      else
+        # lean: sol is gov-gated and currently absent from models_cache.json --
+        # fall back to terra/ultra. upgrade when sol lands on this plan.
+        TIER_MODEL="gpt-5.6-terra"; TIER_EFFORT="ultra"
+      fi
+      ;;
+    standard)
+      TIER_MODEL="gpt-5.6-terra"; TIER_EFFORT="high"
+      ;;
+    volume)
+      TIER_MODEL="gpt-5.6-luna"; TIER_EFFORT="medium"
+      ;;
+    *)
+      echo "[leadv2-codex-planner] unknown --tier: $TIER (expected top|standard|volume)" >&2
+      usage
+      ;;
+  esac
+  # Explicit --effort (rare) wins over the tier default; otherwise use the tier's effort.
+  [[ -n "$EFFORT" ]] || EFFORT="$TIER_EFFORT"
+}
+_resolve_tier
+
+if [[ "$PRINT_MODEL" == "1" ]]; then
+  echo "model=$TIER_MODEL effort=$EFFORT"
+  exit 0
+fi
 
 case "$MODE" in
   plan|quick-verify|diagnose|reconfirm) ;;
@@ -164,11 +212,22 @@ if ! command -v gtimeout >/dev/null 2>&1 && ! command -v timeout >/dev/null 2>&1
   echo "[leadv2-codex-planner] WARN: no timeout binary (gtimeout/timeout) — --wait path unbounded" >&2
 fi
 
+# codex-companion only accepts {none,minimal,low,medium,high,xhigh} as a wire
+# reasoning-effort value -- "ultra" (the top-tier fallback label) is a logical
+# name only and does not exist there (verified against codex-companion.mjs
+# VALID_REASONING_EFFORTS, 2026-07-10). Translate at the wire boundary so
+# --print-model / codex-plan.json still show the logical "ultra" label while
+# the actual dispatch sends a value codex-companion accepts.
+# lean: "ultra" maps to codex-companion's actual ceiling "xhigh" -- upgrade to a
+# direct pass-through when/if codex-companion adds a level above xhigh.
+WIRE_EFFORT="$EFFORT"
+[[ "$WIRE_EFFORT" == "ultra" ]] && WIRE_EFFORT="xhigh"
+
 if [[ "$WAIT" == "1" ]]; then
   # Synchronous path: block until codex completes, write findings to a file.
   # `task` is synchronous by default; no --wait flag needed (nor accepted by codex-companion).
   FINDINGS_FILE="${OUT_FILE:-$HANDOFF_DIR/codex-plan-output.txt}"
-  CODEX_ARGS=(task --effort "$EFFORT")
+  CODEX_ARGS=(task --model "$TIER_MODEL" --effort "$WIRE_EFFORT")
   CODEX_ARGS+=("$(cat "$PROMPT_FILE")")
   DISPATCH_EXIT=0
   ~/.claude/scripts/codex-task.sh "${CODEX_ARGS[@]}" > "$FINDINGS_FILE" 2>&1 || DISPATCH_EXIT=$?
@@ -182,8 +241,10 @@ if [[ "$WAIT" == "1" ]]; then
   "mode": "wait",
   "findings_file": "$FINDINGS_FILE",
   "started_at": "$STARTED_AT",
+  "tier": "$TIER",
   "effort": "$EFFORT",
-  "model": "default",
+  "wire_effort": "$WIRE_EFFORT",
+  "model": "$TIER_MODEL",
   "prompt_file": "$PROMPT_FILE"
 }
 EOF
@@ -191,7 +252,7 @@ EOF
   echo "$FINDINGS_FILE"
 else
   # Async path (original behaviour): dispatch background job, emit job ID.
-  CODEX_ARGS=(task --background --effort "$EFFORT")
+  CODEX_ARGS=(task --background --model "$TIER_MODEL" --effort "$WIRE_EFFORT")
   CODEX_ARGS+=("$(cat "$PROMPT_FILE")")
   OUT=$(~/.claude/scripts/codex-task.sh "${CODEX_ARGS[@]}" 2>&1)
   DISPATCH_EXIT=$?
@@ -215,8 +276,10 @@ else
 {
   "job_id": "$JOB_ID",
   "started_at": "$STARTED_AT",
+  "tier": "$TIER",
   "effort": "$EFFORT",
-  "model": "default",
+  "wire_effort": "$WIRE_EFFORT",
+  "model": "$TIER_MODEL",
   "prompt_file": "$PROMPT_FILE"
 }
 EOF
