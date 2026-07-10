@@ -12,6 +12,8 @@ allowed-tools:
 
 ## When: Phase 7 verify failed. When NOT: during Plan/Build/Review (use their own escalation).
 
+**vs emergency-mode:** a verify-probe failure AFTER a normal deploy → this skill; a founder pre-grant ("no approvals"/emergency) BEFORE Phase 5 review even runs → `leadv2-emergency-mode` (archived: `skills/archive/leadv2-emergency-mode/SKILL.md`) instead — the two never fire on the same task.
+
 ## Protocol
 
 ### 0. Root cause context

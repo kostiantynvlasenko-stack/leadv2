@@ -12,6 +12,16 @@ allowed-tools:
 
 ## When: Phase 8, after Verify success. When NOT: verify failed (use leadv2-recovery).
 
+## Phase-flow at a glance (map only — each row's steps carry the authoritative detail below)
+
+| Stage | Steps | What happens |
+|---|---|---|
+| Gate + cost | 0, 0a, 1 | `phase8-close.sh` writes scorecard/ledger/passed.flag; emit+flush+read cost telemetry |
+| Persist signals | 1b, 1c, 1d | scorecard row, graph-reflect footprint, opt-in learn aggregation |
+| History + ledger | 2, 2b, 5c | LEAD_V2_STATE `history:` entry, `learnings.md` line, correction-detect scan |
+| Cleanup + consolidate | 3, 4, 5, 5b, 7 | reset state to idle, cost log, archive handoff, followup consolidator, session-hygiene tip |
+| Watch + release | 6, 7b, 8 | schedule outcome-watch, release PO queue item, unregister from `active.md` (the close-succeeded signal) |
+
 ## Protocol
 
 ### Step 0 — MANDATORY: run phase8-close.sh before any close commit

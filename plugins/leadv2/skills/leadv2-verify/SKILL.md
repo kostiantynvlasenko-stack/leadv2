@@ -1,6 +1,6 @@
 ---
 name: leadv2-verify
-description: "[internal] Use after Deploy completes cleanly (Phase 7): blocks close until a concrete production signal (DB row, log line, HTTP response, or metric delta) is captured with an unmasked exit code, and forces mandatory layer-by-layer re-probing on any 0/null/empty result before treating it as a real negative. Not for use when Deploy itself circuit-broke — that goes straight to Recovery instead."
+description: "[internal] Phase 7 gate: needs a real prod signal + re-probed 0/null before close. Skip if Deploy circuit-broke (→ Recovery)."
 allowed-tools:
   - Read
   - Write
@@ -12,14 +12,9 @@ allowed-tools:
 
 ## When: Phase 7, after Deploy clean. When NOT: deploy circuit-broke.
 
-## VERIFY PASS requires (anti-lying-green invariants)
+## VERIFY PASS requires (anti-lying-green invariants — full text: `ref/anti-lying-green-gates.md`)
 
-Before declaring verify complete, ALL of these must hold:
-
-1. **Concrete live signal** — at least one of: a real DB row (with distinct id/media_id logged), a non-zero metric delta, a log line with timestamp, or a confirmed HTTP response. "No error" alone is NOT a pass.
-2. **Exit code captured non-masked** — probe exit code must be captured and checked explicitly; never swallowed by `|| true` or `2>/dev/null` after the signal step.
-3. **0/null/empty result → mandatory layer-by-layer probe** — if the expected signal returns 0 rows, null, or empty: re-query by alternate key (e.g. slug not UUID), check RUN_MODE=prod, confirm the event was emitted at all. Only after all layers return negative is the result treated as PROBE_NEG → recovery. Never close on a 0/null result without the layer probe (root of lying-green closes).
-4. **`verify-probe-result.yaml` written** — `outcome:` field must be `probe_ok`; no other value admits close.
+Before declaring verify complete, ALL 4 must hold: (1) a concrete live signal (real DB row w/ id, non-zero metric delta, timestamped log line, or confirmed HTTP response — "no error" alone is NOT a pass); (2) probe exit code captured non-masked (never swallowed by `|| true`/`2>/dev/null`); (3) 0/null/empty result → mandatory layer-by-layer re-probe (alternate key, RUN_MODE=prod, event-emitted check) before treating it as a real negative — never close on 0/null without this; (4) `verify-probe-result.yaml` written with `outcome: probe_ok` (no other value admits close).
 
 ## Protocol
 

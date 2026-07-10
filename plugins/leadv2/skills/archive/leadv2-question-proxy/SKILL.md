@@ -11,6 +11,8 @@ allowed-tools:
 
 # Lead v2 Question Proxy
 
+> **ARCHIVED 2026-07-10 (PROMPT-HYGIENE-01 #6).** Moved here because it never fired in production (0 firings as of 2026-07-03). Kept as a fallback reference, not auto-discovered from `skills/archive/`. Restore to `skills/` and e2e-test before relying on it again.
+
 ## When: any phase during active subsessions. When NOT: no subsessions active.
 
 ## Setup — monitor at subsession start

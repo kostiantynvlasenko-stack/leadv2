@@ -1,6 +1,6 @@
 ---
 name: leadv2-diverge
-description: "Phase 1.5 — divergent ideation BEFORE planning. Spawns N isolated frame-shifted generator agents (zero cross-talk), then a separate critic scores / clusters / flags traps / deepens top-K. Surfaces a non-obvious-but-viable candidate set that Phase 2 architect converges on. Expensive (~9 Agent spawns, hard ceiling 14) — gated to open-ended high-stakes design decisions. Triggers: explicit /leadv2 diverge (overrides class+self-judge; honors dry-run/cost-cap/emergency); auto on Heavy that passes the open-ended self-judge. Ported from ADHD (UditAkhourii/adhd, MIT)."
+description: "Phase 1.5 divergent ideation before planning (isolated frame-shifted generators + critic). Triggers: explicit /leadv2 diverge, or auto on Heavy that passes the open-ended self-judge."
 allowed-tools:
   - Read
   - Write

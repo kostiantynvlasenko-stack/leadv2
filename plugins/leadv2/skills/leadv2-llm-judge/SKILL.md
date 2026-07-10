@@ -1,6 +1,6 @@
 ---
 name: leadv2-llm-judge
-description: "[internal] Opus deploy gate; reads diff stats, premortem, hack findings; returns risk 0-10 + go/no-go."
+description: "[internal] Phase 6 Deploy gate, mandatory: Opus risk verdict (0-10, go/no-go) from diff+premortem+hack findings. Skip only if Light+clean+premortem-proceed+zero hack blocks."
 allowed-tools:
   - Read
   - Write

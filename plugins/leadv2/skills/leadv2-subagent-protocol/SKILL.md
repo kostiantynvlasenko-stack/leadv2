@@ -22,7 +22,11 @@ allowed-tools:
 
 Rules for operating as a subagent inside a /leadv2 run. These apply whether you're spawned via `claude-subsession.sh` (isolated process) or via Agent tool (shared parent session).
 
-## 1. Handoff file contract — IMMUTABLE per task
+## 1. Handoff discipline — contract, graph context, question proxy
+
+Three things to internalize before your first tool call: the task's immutable handoff contract (1a), the graph context lead already injected for you (1b), and the escape hatch when you need more (1c — `ask-lead.sh`). Read all three once; don't re-derive them mid-task.
+
+### 1a. Handoff file contract — IMMUTABLE per task
 
 **Before doing anything:** read `docs/handoff/<task-id>/context.yaml` (if it exists).
 
@@ -34,10 +38,10 @@ research:       # pointers to prior analysis
 ```
 
 - `decisions` and `off_limits` are **append-only within a task**. Never rewrite them. If you need to change a decision → return to lead with "decision conflict" — do not work around.
-- Read only files listed in your `plan.steps.reads:`. If you need more, see §3 (question proxy).
+- Read only files listed in your `plan.steps.reads:`. If you need more, see §1c (question proxy).
 - Write your deliverable to `docs/handoff/<task-id>/<role>.summary.md` (≤50w) and `docs/handoff/<task-id>/<role>.full.md` (full analysis, DELIVERABLE_COMPLETE last line). See §5 for format. Lead reads the summary file first.
 
-## 2. Graph context injected — USE IT, don't re-discover
+### 1b. Graph context injected — USE IT, don't re-discover
 
 Mission file contains a `## Graph context` block pre-populated by lead from codebase-memory-mcp.
 
@@ -47,7 +51,7 @@ Graph queries are cheap when fresh — but DON'T re-issue queries already popula
 - Inside an Agent-tool subagent (shared parent session): MCP may be available if your agent frontmatter allows it (`tools: ... mcp__codebase-memory-mcp__*`). Use it normally.
 - Either way: start from mission's Graph context. Only Grep config/JSON/migrations (where graph has no coverage).
 
-## 3. Question proxy — ask-lead.sh
+### 1c. Question proxy — ask-lead.sh
 
 When you need user input OR more graph info mid-task:
 
@@ -87,7 +91,7 @@ Agent(subagent_type="general-purpose",  model="claude-sonnet-5",  ...)  # light 
 - Allowed subagent_type: `Explore` or `general-purpose` only.
 - **Never spawn** `developer`, `critic`, `architect`, `security-auditor`, or any build/review role.
 - `run_in_background=true` recommended for non-blocking probes.
-- If you need deeper graph queries, prefer the **ask-lead.sh graph proxy** (§3) — it costs lead tokens only and does not count against your nested-spawn budget.
+- If you need deeper graph queries, prefer the **ask-lead.sh graph proxy** (§1c) — it costs lead tokens only and does not count against your nested-spawn budget.
 
 **Hook enforcement:** `leadv2-routing-guard.sh` (PreToolUse:Agent) enforces this allow-list and denies any nested spawn that violates these constraints with an actionable error message.
 
@@ -115,7 +119,7 @@ An escalation token allows a single nested spawn of a type/model outside the bas
 
 **Never escalate for:**
 - Uncertainty or preference ("I'm not sure which approach is better").
-- Discovery tasks — use ask-lead.sh graph proxy (§3) instead.
+- Discovery tasks — use ask-lead.sh graph proxy (§1c) instead.
 - Any situation reachable by returning a blocker to lead via your deliverable.
 
 **How to escalate:**
@@ -241,10 +245,8 @@ These rules apply to the **lead** (Sonnet/Opus orchestrator chat), not the subag
 8. **Pre-compute heavy data outside subagents.** If a subagent needs aggregates (action_log fingerprint, follower deltas, action counts), compute in bash via `sb_get` + `jq` and embed the *result* in the mission file. Don't make Opus burn 30k tokens reading 200 raw rows.
 9. **Don't re-paraphrase deliverables to founder.** If founder asks "what did architect say?", quote the `.summary.md` (≤50 words) directly — don't re-narrate.
 
-**Failure modes this prevents:**
-- Reading 226-line architect-design.md fully into lead → ~30k tokens × every subsequent turn until compaction.
-- 9 hours of `journalctl` output dumped raw → tens of KB stuck in lead history.
-- Writing PO/architect mission files via Write inline → mission body lives in transcript forever.
+**Failure modes this prevents:** see `ref/lead-reading-failure-modes.md` for the 3 concrete
+token-burn examples (30k-token full reads, raw journalctl dumps, inline mission writes).
 
 When you violate one of these, save a `feedback` memory the same turn so the next session learns. Don't just apologize — document.
 

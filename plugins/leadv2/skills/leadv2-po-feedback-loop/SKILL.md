@@ -1,6 +1,6 @@
 ---
 name: leadv2-po-feedback-loop
-description: Product-Owner feedback loop — full 4-phase orchestration (Audit → Build → Verify → Iterate) for UI-heavy features. Architect-Opus audits the deployed feature against best-in-class benchmarks (industry leaders for the domain) + local design baseline (m3-nft-design / emil-design-engineering / etc.), writes prioritized P0/P1/P2 fix list, then parallel Sonnet developers ship fixes split by file ownership, then Playwright auto-verification (PASS/FAIL/PARTIAL). Max 2 iteration rounds before shipping with TODO. Auto-invoked after Build for class ≥ Standard when diff touches UI files.
+description: Product-Owner feedback loop — 4-phase orchestration (Audit → Build → Verify → Iterate) for UI-heavy features. Auto-invoked after Build for class ≥ Standard when diff touches UI files.
 when_to_invoke: |
   Auto-trigger after Phase 4 (Build) if ALL conditions:
   - class is Standard, Heavy, or Strategic (not Trivial/Light)

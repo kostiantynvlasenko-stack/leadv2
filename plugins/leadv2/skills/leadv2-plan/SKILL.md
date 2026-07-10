@@ -14,6 +14,29 @@ allowed-tools:
 
 ## When: Phase 2, class ≥ Standard. When NOT: Trivial / Light (skip to build).
 
+## Phase-2 steps at a glance (map only — numbered steps below carry the detail)
+
+| Step | Fires when | Action | Output |
+|---|---|---|---|
+| 0 | `LEADV2_ROUTE_BANDIT=1` | select-for-workflow model picks | route-decisions.yaml |
+| 1a/1a-2/1a-3 | codebase-memory-mcp available / always / ≥2 personas touched | graph discovery, agent priors, persona-config audit | mission Graph-context block |
+| 1c (divergence) | Phase 1.5 ran | inject divergence shortlist + non_obvious_pick into architect mission | context.yaml.divergence |
+| 1b | always | write mission file (graph context + constraints) | /tmp/mission-<id>.md |
+| 1c (aggregates) | architect needs a number/count/delta | pre-compute in bash, embed result, not raw rows | mission's Pre-computed aggregates |
+| 2a | always, before spawns | start question-proxy Monitor | mailbox watch |
+| 2b (Stage 1) | class ≥ Standard | Codex (primary plan) + architect(sonnet) cross-check, parallel | architect.md, codex-plan-result.md |
+| 3 | after Stage 1 spawns | Monitor until both deliverables exist | STAGE1_READY |
+| 4 | after 3 | read Stage-1 outputs, draft critic brief | /tmp/critic-brief-<id>.md |
+| 4b (Stage 2) | class ≥ Standard | critic(opus) adversarial review of synthesis | critic.md |
+| 4c/4d | after 4b | read critic output; negative-memory pre-check on candidate steps | negative-memory-matches.yaml |
+| 2.5 | always, before writing context.yaml | apply per-repo toolset overrides | context.yaml.allowed_tools |
+| 5 | after 4d | synthesize decisions/off_limits/plan.steps, schema-validate | context.yaml |
+| 6 | 3-way disagreement | arbitration table → Codex round 2 → AskUserQuestion | decisions cite arbitration |
+| 7 | after context.yaml written | premortem.sh --phase build | proceed / caution / redesign |
+| 8 | after 7 | update LEAD_V2_STATE, hand off | → Phase 3 Gate 1 |
+
+architect is ALWAYS sonnet (never opus, CODEX-56-ROUTING) — Codex is the primary plan author, architect cross-checks.
+
 ## Protocol
 
 ### Step 0 — Bandit model selection (MANDATORY when `LEADV2_ROUTE_BANDIT=1`)

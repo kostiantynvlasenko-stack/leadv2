@@ -37,411 +37,122 @@ If ANY condition is false → proceed with normal review flow below.
 
 ## Protocol
 
-### §0a. Trajectory pre-check (cheap structural gate)
+### 0a. Trajectory pre-check (cheap structural gate)
 
-**Run BEFORE §1 for Standard and Heavy tasks only.**
-Skip for Light class when the §0 skip-review gate has already passed (do not double-gate Light tasks).
+Run BEFORE §1 for Standard and Heavy tasks only. Skip for Light class when the §0 skip-review
+gate has already passed (do not double-gate Light tasks). Full script + branch-by-branch
+handling: **`ref/trajectory-gate.md`**.
 
-```bash
-bash .claude/scripts/lv2 leadv2-trajectory-check.sh \
-  --task-id "${TASK_ID}" \
-  --class "${TASK_CLASS}"
-# Exit codes:
-#   0 → trajectory ok, proceed to §1
-#   1 → trajectory mismatch (missing events or strict-mode extras)
-#   2 → script/config error
-```
+Quick reference:
 
-**On exit 0:** proceed normally to §1.
+| Exit | Meaning | Action |
+|---|---|---|
+| 0 | trajectory ok | proceed to §1 |
+| 1, `missing_events` non-empty | responsible role's artifact absent | re-spawn that role (max 1 retry: developer/architect/critic per missing artifact), re-run check; still failing → escalate via `ask-lead.sh` |
+| 1, only `out_of_order` | timing skew, nothing missing | log warning to LEAD_V2_STATE.md, proceed to §1 (not a blocker) |
+| 2 | script/config error | escalate via `ask-lead.sh`; do NOT proceed until resolved |
 
-**On exit 1 with `missing_events` non-empty:**
-- Read `docs/handoff/<task-id>/trajectory.yaml` to identify which role is responsible for the missing artifact.
-  - `build/developer` artifact missing → re-spawn `developer` agent with mission:
-    `"Phase 4 build was incomplete — produce artifact '<artifact>' as specified in context.yaml plan.steps"`
-  - `plan/architect` artifact missing → re-spawn `architect` agent with mission:
-    `"Phase 2 plan was incomplete — produce docs/handoff/<task-id>/architect.md"`
-  - `plan/critic` artifact missing → re-spawn `critic` agent similarly.
-- Max 1 retry per missing artifact.
-- After the re-spawn completes, re-run `leadv2-trajectory-check.sh` once.
-  - If still failing → escalate via `ask-lead.sh`.
+Result auto-saved to `docs/handoff/<task-id>/trajectory.yaml`.
 
-**On exit 1 with only `out_of_order` (no missing events):**
-- Log a warning to `LEAD_V2_STATE.md` history: `"trajectory: out_of_order timing skew, proceeding"`
-- Proceed to §1 — timing skew alone is not a blocker.
+### 1. Determine reviewers
 
-**On exit 2:**
-- Escalate via `ask-lead.sh <task-id> "trajectory-check script error — see stderr"`.
-- Do not proceed to review until resolved.
+Codex availability check: `bash .claude/scripts/lv2 codex-task.sh status` (exit 0 = OK, requires active ChatGPT login).
 
-**Save result to handoff dir** (done automatically by the script):
-`docs/handoff/<task-id>/trajectory.yaml`
+**Always fire (primary, one of):** Codex adversarial-review (background) if OK; else `Agent(critic, sonnet, run_in_background=true)` as fallback primary — equally valid.
 
-### 1. Determine reviewers — decide from context.yaml
+**Extra reviewers — HARD GATES:**
 
-**Reviewer routing — Codex is optional, Agent(critic) is the reliable default:**
+| Reviewer | Fires when |
+|---|---|
+| critic(opus) | ALL of: (a) diff touches safety-sensitive surface (safety gate, RLS policies, auth, publish path, webhook verification, billing/Paddle); (b) hack-detection OR Codex/critic Round 1 flagged a High severity finding; (c) the finding is structural (design/correctness), not style/naming |
+| security-auditor(sonnet) | diff touches `*crypto*`, `*auth*`, `*token*`, `*secret*`, `*webhook*`, `*billing*`, or RLS migrations |
+| **Auto-upgrade** (forces critic=opus AND spawns security-auditor, overriding the two gates above) | ANY of: context.yaml lists ≥2 persona ids in `applies_to`; diff touches `personas/_shared/**` or `agent/**` AND the brief mentions 'across personas' / 'all personas' / 'multi-tenant' / 'RLS'; a new/changed GRANT/REVOKE/CREATE POLICY in a `*.sql` migration with a USING clause on `auth.uid()`/`persona_id`. Reason: 2026-05-12 FEAT-OBS-BATCH-1 — architect proposed an RLS cross-tenant grant hole; only opus critic + security-auditor parallel caught it. |
 
-```
-# Check Codex availability first (requires active ChatGPT login):
-CODEX_OK=$(bash .claude/scripts/lv2 codex-task.sh status >/dev/null 2>&1 && echo "1" || echo "0")
+If neither extra reviewer fires → the primary reviewer output (Codex or critic-sonnet) IS the review; proceed to Phase 6 Deploy on `disposition == resolved`.
 
-Always fire (one of):
-  if CODEX_OK: Codex adversarial-review (background) + Agent(critic, sonnet) in Stage 2
-  if !CODEX_OK: Agent(critic, sonnet, run_in_background=true) — Codex fallback, equally valid
+### 1b–1e. Setup before spawning reviewers
 
-HARD GATE for critic(opus) — spawn ONLY if ALL of:
-  (a) diff touches safety-sensitive surface:
-      [safety gate, RLS policies, auth, publish path, webhook verification, billing/Paddle]
-  (b) hack-detection OR Codex/critic Round 1 flagged a High severity finding
-  (c) the finding is structural (design/correctness), not style/naming
+Full commands: **`ref/reviewer-setup-steps.md`**.
 
-HARD GATE for security-auditor(sonnet) — spawn ONLY if diff touches:
-  [*crypto*, *auth*, *token*, *secret*, *webhook*, *billing*, RLS migrations]
+- **Question-proxy Monitor** — start it now if not already running from Phase 2 (mailbox that surfaces subagent questions to the lead).
+- **Diff prep** — generate `git diff <task-start-sha>..HEAD`, save to `/tmp/leadv2-review-<id>.diff` + `docs/handoff/<id>/diff.patch`. Every reviewer mission file MUST embed the diff path and a "<15% tokens on file-context lookups" budget. **Exception:** security-auditor may always read full files in security-sensitive paths (`platform/safety/`, `platform/auth/`, `*crypto*|*auth*|*token*|*secret*|*webhook*|*billing*`) without that budget constraint.
+- **Cache warming** — if Review will fire ≥2 same-role spawns (critic(opus) + security-auditor, Case B), pre-warm both before spawning (max 3s wait enforced). Skip for single-spawn phases.
+- **Compress Build outputs** — before reading developer.md/diff.md, run `leadv2_compress_handoff` (no-op on files ≤8KB or YAML; saves ~50-70% Opus tokens on large deliverables).
 
-HARD GATE: cross-tenant / multi-persona triggers (auto-upgrade Round 1)
-  If ANY of the following hits, force critic=opus AND spawn security-auditor
-  regardless of (a)/(b)/(c) above:
-    - context.yaml lists >=2 persona ids in `applies_to`
-    - diff touches files matching `personas/_shared/**` OR `agent/**` AND brief
-      mentions any of: 'across personas', 'all personas', 'multi-tenant', 'RLS'
-    - new/changed grant statement in any *.sql migration (GRANT, REVOKE,
-      CREATE POLICY) with USING clause involving auth.uid() or persona_id
-  Reason: 2026-05-12 FEAT-OBS-BATCH-1 — architect proposed RLS-client grant
-  (cross-tenant hole), only opus critic + security-auditor parallel caught it.
-```
+### 2. Round 1 — spawn reviewers
 
-If neither extra reviewer fires → primary reviewer output (Codex or critic(sonnet)) IS the review; proceed to Phase 6 Deploy on `disposition == resolved`.
+Reviewers spawn via **Agent tool** (shared session) — their `.claude/agents/<role>.md` frontmatter activates skills (code-review-patterns, devils-advocate, codex-review, leadv2-subagent-protocol). claude-subsession loses these in headless mode. Hack-detection always runs in parallel with Codex/critic (see `leadv2-hack-detection` skill).
 
-### 1b. Ensure question-proxy Monitor is running
-
-If not already started in Phase 2 (because Trivial task skipped Plan), start it now:
-
-```
-Monitor:
-  command: while true; do
-    for sig in docs/handoff/*/questions/_signal; do
-      [[ -f "$sig" ]] && {
-        task_id=$(echo "$sig" | awk -F/ '{print $(NF-2)}')
-        echo "QUESTION_PENDING:$task_id"
-        rm -f "$sig"
-      }
-    done
-    sleep 5
-  done
-  description: "subagent question mailbox"
-  persistent: true
-  timeout_ms: 3600000
-```
-
-### 1c. Prepare diff for reviewers
-
-Before spawning any reviewer, generate and store the diff:
-
-```bash
-# Generate diff from task start SHA to current HEAD
-git diff "${TASK_START_SHA}..HEAD" > "/tmp/leadv2-review-${TASK_ID}.diff"
-# Also write to handoff dir for persistence
-cp "/tmp/leadv2-review-${TASK_ID}.diff" "docs/handoff/${TASK_ID}/diff.patch"
-```
-
-Reviewer mission files MUST include a `## Diff` section embedding the path to the diff file:
-```
-## Diff
-File: /tmp/leadv2-review-<task-id>.diff
-Read this diff first. Review diff, not full files.
-Budget: spend <15% of tokens on file-context lookups (allowed when diff lacks context).
-```
-
-**Security-auditor exception:** may always read full files in security-sensitive paths without the 15% budget constraint:
-- `platform/safety/`
-- `platform/auth/`
-- Any file matching `*crypto*`, `*auth*`, `*token*`, `*secret*`, `*webhook*`, `*billing*`
-
-### 1d. Cache warming before spawns (≥2 same-role spawns)
-
-If Review phase will fire critic(opus) **and** security-auditor (Case B), pre-warm both:
-```bash
-# Call warm_chain if claude-subsession.sh is sourced, else call warmer directly:
-warm_chain "critic:opus" "security-auditor:sonnet"
-# Or directly:
-bash .claude/scripts/lv2 leadv2-cache-warm.sh --role critic --model opus &
-bash .claude/scripts/lv2 leadv2-cache-warm.sh --role security-auditor --model sonnet &
-# Proceed immediately (max 3s wait enforced by warm_chain)
-```
-
-Skip if single-spawn phase (only Codex + hack-detection, no critic/security-auditor).
-
-### 1e. Compress Build outputs before reading
-
-Before reading developer.md / diff.md produced by the Build phase, compress them if large:
-
-```bash
-source .claude/scripts/lv2 leadv2-helpers.sh
-leadv2_compress_handoff "docs/handoff/${TASK_ID}/developer.md"
-leadv2_compress_handoff "docs/handoff/${TASK_ID}/diff.md"
-# Then read via helper (falls back to original when no twin exists)
-dev_output=$(leadv2_read_handoff "docs/handoff/${TASK_ID}/developer.md")
-```
-
-Files ≤8KB or YAML → no-op. Saves ~50-70% Opus tokens on large developer deliverables.
-
-### 2. Round 1 — Agent tool, NOT claude-subsession
-
-Reviewers spawn via **Agent tool** (shared session) — their `.claude/agents/<role>.md` frontmatter activates skills (code-review-patterns, devils-advocate, codex-review, leadv2-subagent-protocol). claude-subsession loses these in headless mode.
-
-Hack-detection runs in parallel with Codex/critic in ALL cases (see `leadv2-hack-detection` skill).
-
-**Env flag:** `LEADV2_WORKFLOW_ENABLED=1` enables the dynamic-Workflow fan-out path for the Review phase (requires Max/Team plan with `Workflow` tool). Default (unset) uses the manual Cases A/B/C below.
->
+**Workflow fan-out toggle:** `LEADV2_WORKFLOW_ENABLED=1` enables the dynamic-Workflow path (requires Max/Team plan `Workflow` tool). Default (unset) uses the manual Cases A/B/C below.
 > **Self-enable (orchestrator-judged):** you MAY set `LEADV2_WORKFLOW_ENABLED=1` for the session yourself — without a founder prompt — when Review meets the fan-out test (multi-dimension review / adversarial verify). See `docs/goal-workflow-autonomy.md`.
 
-**Codex invocation discipline:** `codex-task.sh adversarial-review` MUST be passed
-`--wait` and run as a `run_in_background=true` Bash tool call. `--wait` makes
-codex-companion run synchronously; the Bash tool's background flag is the only async
-layer. Never use a bare `--background` codex flag without `--wait` — codex-companion
-then returns immediately, the job runs detached, and the captured output file gets
-only the start banner (findings stay stranded in the plugin job-log). With `--wait`
-the full review lands in the Bash output file and `cx-tail.sh` reads it directly.
+**Codex invocation discipline (hard rule):** `codex-task.sh adversarial-review` MUST be passed
+`--wait` and run as a `run_in_background=true` Bash tool call. `--wait` makes codex-companion run
+synchronously; the Bash tool's background flag is the only async layer. Never use a bare
+`--background` codex flag without `--wait` — codex-companion then returns immediately, the job
+runs detached, and the captured output file gets only the start banner (findings stay stranded in
+the plugin job-log). With `--wait` the full review lands in the Bash output file and
+`cx-tail.sh` reads it directly.
 
-> **If `LEADV2_WORKFLOW_ENABLED=1` (and `Workflow` tool is available):**
->
+**Step 0 — Bandit model selection, MANDATORY when `LEADV2_ROUTE_BANDIT=1`:** run
+`leadv2-route-bandit.sh select-for-workflow --phase review ...` BEFORE calling `Workflow()`
+and pass the result as `args.models`. Skipping this step freezes arm posteriors — the bandit
+never learns from this task. Flag-off → skip entirely (byte-identical to pre-BANDIT-WIRE-01).
+Full command + Workflow args wiring: **`ref/route-bandit-step0.md`**.
 
-### Step 0 — Bandit model selection (MANDATORY when `LEADV2_ROUTE_BANDIT=1`)
-
-**Before invoking `Workflow()`, you MUST run `select-for-workflow` when the bandit is active.**
-Skipping this step freezes arm posteriors — the bandit never learns from this task.
-
-1. Check flag: `if [[ "${LEADV2_ROUTE_BANDIT:-0}" == "1" ]]`
-2. Run selection — writes `docs/handoff/${TASK_ID}/route-decisions.yaml`:
-   ```bash
-   MODELS=$(bash .claude/scripts/lv2 leadv2-route-bandit.sh select-for-workflow \
-     --phase review \
-     --class "${TASK_CLASS}" \
-     --safety "${SAFETY_TOUCHED:-false}" \
-     --task-id "${TASK_ID}")
-   ```
-3. Pass result as `args.models` to the Workflow call:
-   ```
-   Workflow({name:"leadv2-review", args:{taskId, base, safetyTouched, ..., models: JSON.parse(MODELS)}})
-   ```
-
-The workflow JS consumes `args.models.critic` / `args.models.verify` with fallback to pinned defaults.
-**Flag-off (`LEADV2_ROUTE_BANDIT != 1`):** skip the shell call entirely — behavior is byte-identical to pre-BANDIT-WIRE-01.
-The bandit writes `docs/handoff/<id>/route-decisions.yaml`; scorecard-write.sh reads it at Phase 8 close.
-
-> **PREFERRED — invoke the saved workflow (ships at `~/.claude/workflows/leadv2-review.js`, all repos):**
-> ```
-> Workflow({ name: "leadv2-review", args: { taskId: "<id>", base: "main",
->            safetyTouched: <bool>, codexEnabled: <bool>, missionPath: "docs/handoff/<id>/review-mission.md" } })
-> ```
-> It returns ONE synthesized verdict `{verdict, blocking_count, blocking[], followups[]}` — lead context stays clean.
-> blocking_count==0 → ACCEPT → Phase 6. blocking_count>=1 → developer fix → re-run (max 2 rounds) → judge.
-> The workflow is **model-pinned** (critic sonnet / opus-on-safety, hack+codex haiku, verify sonnet) — never Opus-by-inheritance.
-> `m3-market`: set `codexEnabled:false` if managed settings disable Codex/workflows; fall back to manual Cases A/B/C.
->
-> The inline draft below is the REFERENCE SHAPE only (the saved .js is canonical). Do NOT hand-inline a fresh script:
->
-> ```js
-> // Workflow script — review fan-out
-> const DIFF_PATH = `/tmp/leadv2-review-<id>.diff`;
->
-> const round1 = await parallel([
->   agent("critic", {
->     model: safetyTouched ? "claude-opus-4-8" : "claude-sonnet-5",
->     prompt: `Adversarial code review. Diff: ${DIFF_PATH}. Brief: /tmp/review-mission-<id>.md.
->              Output CHALLENGE blocks per critic role format with severity tags.`,
->     outputSchema: {
->       type: "object",
->       properties: {
->         findings: {
->           type: "array",
->           items: {
->             type: "object",
->             properties: {
->               severity: { type: "string", enum: ["critical", "high", "medium", "low", "nit"] },
->               dimension: { type: "string" },
->               description: { type: "string" },
->               suggested_fix: { type: "string" }
->             },
->             required: ["severity", "dimension", "description"]
->           }
->         },
->         max_severity: { type: "string" }
->       },
->       required: ["findings", "max_severity"]
->     }
->   }),
->   // security-auditor fires only when safety-touched (same gate as manual Cases B/C)
->   ...(safetyTouched ? [agent("security-auditor", {
->     model: "claude-sonnet-5",
->     prompt: `Security review. Diff: ${DIFF_PATH}. Full-file read allowed for security-sensitive paths.`,
->     outputSchema: {
->       type: "object",
->       properties: {
->         findings: { type: "array", items: { type: "object" } },
->         has_critical: { type: "boolean" }
->       },
->       required: ["findings", "has_critical"]
->     }
->   })] : []),
->   agent("developer", {
->     model: "claude-sonnet-5",
->     prompt: `Run hack-detection per .claude/skills/leadv2-hack-detection/SKILL.md on diff ${DIFF_PATH}.
->              Output findings YAML with block_count/warn_count/has_block summary.`,
->     outputSchema: {
->       type: "object",
->       properties: {
->         findings: { type: "array" },
->         summary: {
->           type: "object",
->           properties: {
->             block_count: { type: "number" },
->             warn_count: { type: "number" },
->             has_block: { type: "boolean" }
->           },
->           required: ["block_count", "warn_count", "has_block"]
->         }
->       },
->       required: ["findings", "summary"]
->     }
->   })
-> ]);
->
-> // Adversarial-verify stage — per-finding 3-vote majority kill
-> // Each finding is put to 3 independent review dimensions; ≥2 refutations kill it.
-> const verified = await pipeline(round1, {
->   agent: "critic",
->   model: "claude-sonnet-5",
->   prompt: `For each Critical/High finding from round1, apply 3-vote majority-kill:
->            vote on (correctness, risk, actionability). If ≥2 votes refute → kill finding.
->            Output: verified_findings[], killed_findings[] with kill_reasons.`,
->   outputSchema: {
->     type: "object",
->     properties: {
->       verified_findings: { type: "array" },
->       killed_findings: { type: "array" },
->       kill_reasons: { type: "object" }
->     },
->     required: ["verified_findings", "killed_findings"]
->   }
-> });
-> ```
->
-> The Workflow returns structured JSON findings directly — no Monitor polling, no manual deliverable-file reads. Write the JSON results to `docs/handoff/<id>/reviews/round1-findings.json` and proceed to §3 using the structured output (no `cx-tail.sh` needed). Codex review (`codex-task.sh adversarial-review`) stays orthogonal: fire it as an optional background Bash call outside the Workflow if available.
->
-> **Note:** `Workflow` requires Max or Team plan. If the tool is not available in the current session, fall through to the manual Cases A/B/C below.
-
-```bash
-# Manual path (default — LEADV2_WORKFLOW_ENABLED unset or ≠ 1):
-#
-# Case A: Codex OK, non-safety → Codex + hack-detection, parallel
-if $CODEX_OK && ! safety_touched; then
-  # ONE message, two calls:
-  Bash(codex-task.sh adversarial-review --wait --base main, run_in_background=true)
-  Agent(subagent_type=developer, model=sonnet, prompt="run hack-detection per .claude/skills/leadv2-hack-detection/SKILL.md on diff /tmp/leadv2-review-<id>.diff; write findings YAML to docs/handoff/<id>/hack-findings.yaml and summary to docs/handoff/<id>/hack-detection.summary.md")
-fi
-
-# Case B: Codex OK, safety-touched → Codex + critic(opus) + security-auditor + hack-detection, parallel
-if $CODEX_OK && safety_touched; then
-  # ONE message, four calls:
-  Bash(codex-task.sh adversarial-review --wait --base main, run_in_background=true)
-  Agent(subagent_type=critic, model=opus, prompt="review diff /tmp/leadv2-review-<id>.diff per critic role frontmatter; brief /tmp/review-mission-<id>.md; write to docs/handoff/<id>/critic.summary.md + critic.full.md with DELIVERABLE_COMPLETE")
-  Agent(subagent_type=security-auditor, model=sonnet, prompt="security review diff /tmp/leadv2-review-<id>.diff per role frontmatter; always-read-full for security-sensitive paths; write to docs/handoff/<id>/security-auditor.summary.md + security-auditor.full.md with DELIVERABLE_COMPLETE")
-  Agent(subagent_type=developer, model=sonnet, prompt="run hack-detection per .claude/skills/leadv2-hack-detection/SKILL.md on diff /tmp/leadv2-review-<id>.diff; write findings YAML to docs/handoff/<id>/hack-findings.yaml and summary to docs/handoff/<id>/hack-detection.summary.md")
-fi
-
-# Case C: Codex down → critic(opus) via Agent promoted to primary + hack-detection
-if ! $CODEX_OK; then
-  Agent(subagent_type=critic, model=opus, prompt="primary adversarial review — full-coverage (Codex unavailable); diff /tmp/leadv2-review-<id>.diff; brief /tmp/review-mission-<id>.md; write to docs/handoff/<id>/critic.full.md + critic.summary.md")
-  Agent(subagent_type=developer, model=sonnet, prompt="run hack-detection per .claude/skills/leadv2-hack-detection/SKILL.md on diff /tmp/leadv2-review-<id>.diff; write findings to docs/handoff/<id>/hack-findings.yaml")
-  # If safety-touched, also Agent(security-auditor, sonnet) parallel
-fi
+**If `LEADV2_WORKFLOW_ENABLED=1` and the `Workflow` tool is available — PREFERRED path**
+(ships at `~/.claude/workflows/leadv2-review.js`, all repos):
 ```
+Workflow({ name: "leadv2-review", args: { taskId: "<id>", base: "main",
+           safetyTouched: <bool>, codexEnabled: <bool>, missionPath: "docs/handoff/<id>/review-mission.md" } })
+```
+Returns ONE synthesized verdict `{verdict, blocking_count, blocking[], followups[]}` — lead context
+stays clean. `blocking_count==0` → ACCEPT → Phase 6. `blocking_count>=1` → developer fix → re-run
+(max 2 rounds) → judge. The workflow is **model-pinned** (critic sonnet / opus-on-safety, hack+codex
+haiku, verify sonnet) — never Opus-by-inheritance. `m3-market`: set `codexEnabled:false` if managed
+settings disable Codex/workflows; fall back to manual Cases A/B/C.
 
-Mission file for critic:
-```
-Review the diff in docs/handoff/<id>/diff.md for:
-- Architecture violations of context.yaml decisions
-- Missed off_limits
-- Second-order effects
-- Hidden assumptions
-Output: CHALLENGE blocks per devils-advocate skill format.
-```
+The reference JS shape for that workflow is at **`ref/workflow-review-reference.md`** — illustrative
+only (the saved `.js` is canonical); do NOT hand-inline a fresh script from it. The Workflow returns
+structured JSON findings directly — no Monitor polling, no manual deliverable-file reads. Write the
+JSON results to `docs/handoff/<id>/reviews/round1-findings.json` and proceed to §3 using the
+structured output. Codex review stays orthogonal: fire it as an optional background Bash call
+outside the Workflow if available.
+
+**Note:** `Workflow` requires Max or Team plan. If the tool is not available in the current session,
+fall through to the manual path below.
+
+**Manual path (Cases A/B/C, default when `LEADV2_WORKFLOW_ENABLED` unset or ≠ 1)** — exact spawn
+commands + critic mission file: **`ref/manual-dispatch-cases.md`**.
+
+| Case | Condition | Spawns (ONE message, parallel) |
+|---|---|---|
+| A | Codex OK, not safety-touched | Codex adversarial-review (bg) + hack-detection (`Agent(developer, sonnet)`) |
+| B | Codex OK, safety-touched | Codex + `Agent(critic, opus)` + `Agent(security-auditor, sonnet)` + hack-detection |
+| C | Codex down | `Agent(critic, opus)` promoted to primary + hack-detection (+ security-auditor if safety-touched) |
 
 ### 3. Read Round 1 findings — adapt to which reviewers ran
 
-```
-# If Codex ran:
-~/.claude/scripts/cx-tail.sh <codex output path>
+- Codex ran → `~/.claude/scripts/cx-tail.sh <codex output path>`
+- critic(opus) ran → `Read docs/handoff/<id>/critic.md`
+- security-auditor ran → wait for Agent task-notification, read its summary
 
-# If critic(opus) ran:
-Read docs/handoff/<id>/critic.md
+**Codex mid-run failure detection** (rate-limit after spawn but before completion): if cx-tail
+shows `429` / `rate limit` / `timeout` / empty body → treat as Case C mid-flight, immediately spawn
+`critic(opus)` as fallback primary. Do NOT retry Codex — a rate limit means the burst is over budget.
 
-# If security-auditor ran:
-<wait for Agent task-notification, read summary>
-```
-
-**Codex mid-run failure detection** (rate-limit after spawn but before completion):
-- cx-tail shows `429` / `rate limit` / `timeout` / empty body → treat as Case C mid-flight
-- Immediately spawn `critic(opus)` as fallback primary
-- Do NOT retry Codex — rate limit means burst is over budget
-
-Read and fold in hack-detection results — **mandatory, not optional**:
-
-```bash
-# Read hack findings (written by the parallel Agent(developer) hack-detection run)
-# If file missing: treat as has_block=false, warn_count=0 (don't block on tooling absence)
-HACK_FILE="docs/handoff/<id>/hack-findings.yaml"
-```
-
-Parse the file and extract counts. Then **immediately execute** the following logic:
-
-```python
-# Pseudocode — execute inline or via a python3 -c call:
-import yaml, os
-hack_file = f"docs/handoff/{task_id}/hack-findings.yaml"
-if os.path.exists(hack_file):
-    findings = yaml.safe_load(open(hack_file)) or {}
-    summary = findings.get("summary", {})
-else:
-    summary = {"block_count": 0, "warn_count": 0, "has_block": False}
-block_count = summary.get("block_count", 0)
-warn_count  = summary.get("warn_count", 0)
-has_block   = summary.get("has_block", False)
-```
+**Hack-detection fold-in — mandatory, not optional.** Read `docs/handoff/<id>/hack-findings.yaml`
+(missing file → treat as `has_block=false, warn_count=0`; don't block on tooling absence). Parse
+`summary.block_count` / `warn_count` / `has_block`. Full parsing + round1-findings fold-in script:
+**`ref/hack-detection-processing.md`**.
 
 Write to context.yaml **now** (before reading other reviewer outputs):
 ```yaml
 context.yaml.reviews.codex_round_1: {critical: N, high: N, medium: N}
-context.yaml.reviews.hack_findings:
-  block_count: N      # findings with severity=block
-  warn_count: N       # findings with severity=warn
-  info_count: N       # findings with severity=info
-  has_block: true/false
+context.yaml.reviews.hack_findings: {block_count: N, warn_count: N, info_count: N, has_block: true/false}
 ```
 
 **Gate — execute before proceeding to §4 decision tree:**
-
-```bash
-# Fold hack-detection summary into round1-findings (concrete append, not optional):
-HACK_SUMMARY="docs/handoff/<id>/hack-detection.summary.md"
-ROUND1_FINDINGS="docs/handoff/<id>/reviews/round1-findings.md"
-mkdir -p "docs/handoff/<id>/reviews"
-if [[ -f "$HACK_SUMMARY" ]]; then
-  printf -- '\n## hack-detection\n' >> "$ROUND1_FINDINGS"
-  cat "$HACK_SUMMARY"              >> "$ROUND1_FINDINGS"
-fi
-
-# If has_block=true: HARD GATE — must get founder approval before disposition=resolved
-# Extract block snippets for the question:
-block_snippets=$(python3 -c "
-import yaml, sys, os
-f = 'docs/handoff/$TASK_ID/hack-findings.yaml'
-if not os.path.exists(f): sys.exit(0)
-d = yaml.safe_load(open(f)) or {}
-blocks = [x for x in d.get('findings',[]) if x.get('severity')=='block']
-for b in blocks[:3]: print(f\"  {b.get('type')}: {b.get('snippet','')[:80]}\")
-" 2>/dev/null || true)
-```
 
 If `has_block == true`:
 ```
@@ -451,7 +162,7 @@ Options: (A) accept with band-aid (appended to followups.md as tech debt), (B) f
 ```
 - Do NOT set `disposition: resolved` until founder answers.
 - If (B): spawn `Agent(developer, sonnet)` to fix the flagged patterns, then re-run hack-detection once.
-- If (A): append to `docs/handoff/<id>/followups.md`: `"- [ ] HACK-BANDAID-<type>: <snippet>"` for each block finding, then proceed.
+- If (A): append `"- [ ] HACK-BANDAID-<type>: <snippet>"` to `docs/handoff/<id>/followups.md` for each block finding, then proceed.
 
 If `has_block == false` → no gate. Incorporate warn-count into round_1 findings summary and proceed normally to §4.
 
@@ -499,26 +210,11 @@ Update `reviews.codex_round_2: {...}`.
 
 ### 6. Escape hatch — architect alt approach
 
-When max 2 rounds exhausted and Critical still:
-
-```bash
-# Compose full history mission file:
-cat > /tmp/alt-approach-<id>.md <<EOF
-Task: <id>
-Mission: <original>
-Round 1 findings: <summary>
-Round 1 fix: <what was done>
-Round 2 findings: <summary>
-Remaining Critical: <list>
-
-Propose alternative approach that bypasses this class of issue. 
-If no alt exists, explain why and recommend escalate-to-founder with what decision is needed.
-Max 300 words.
-EOF
-
-~/.claude/scripts/claude-subsession.sh --role architect --model opus \
-  --task-id <id> --mission-file /tmp/alt-approach-<id>.md --effort max
-```
+When max 2 rounds exhausted and Critical still present: compose a full-history mission file
+(template + exact invocation: **`ref/architect-escape-mission.md`** — task/mission/Round 1+2
+findings/fixes/remaining Critical, max 300 words, propose an alt approach that bypasses this
+class of issue, or explain why and recommend escalate-to-founder) and run it via
+`claude-subsession.sh --role architect --model opus --effort max`.
 
 - Architect proposes alt → re-run Plan phase (context.yaml revised) → re-Build → re-Review Round 3 (final).
 - Architect says "no alt" → circuit break.

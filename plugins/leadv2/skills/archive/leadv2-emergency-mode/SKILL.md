@@ -9,6 +9,8 @@ allowed-tools:
 
 # leadv2-emergency-mode — Reduced Review Protocol
 
+> **ARCHIVED 2026-07-10 (PROMPT-HYGIENE-01 #6).** Moved here because it never fired in production (0 firings as of 2026-07-03). Kept as a fallback reference, not auto-discovered from `skills/archive/`. Restore to `skills/` and e2e-test before relying on it again. See `leadv2-recovery/SKILL.md` for the decision line distinguishing this from Phase-7 recovery.
+
 ## Context
 V4 restore session (2026-05-13): founder granted "no approvals" → Phase 5 review was fully skipped on ~10 hotfixes. One (`local` keyword outside a function) broke prod. Emergency mode ≠ zero review.
 
