@@ -18,33 +18,60 @@ const TASK_ID = a.task_id || ''
 const OUT = `docs/leadv2/learning-proposals/${LABEL}.md`
 // C-1: task_class from args; avoids undefined cap-result reference
 const TASK_CLASS = a.task_class || 'general'
-// H-1: single init-time timestamp — replay-safe on workflow resume.
-// Workflow runtime throws on Date.now()/argless new Date() — derive stamp via bash() instead.
-const TS = a.ts || (await bash("date -u +%Y-%m-%dT%H:%M:%SZ")).trim()
-
-// MEM-WRITE-PATH-FIX-01: this workflow runs during an in-flight task -- cwd is the
-// task worktree, not the main checkout. solutions-archive.yaml (gitignored, never
-// merged) only ever exists at the shared main-repo root. Read from there so
-// exemplars are found regardless of which worktree/session invoked /learn.
-// MEM-WRITE-PATH-FIX-01 round2: marker-check hardening -- see leadv2-review.js
-// for the identical rationale (ambient bash()-cwd contract is unverified; the
-// docs/leadv2/ marker check refuses to trust a resolved root that isn't
-// actually this project, failing safe to pwd instead of a foreign repo).
-const DURABLE_ROOT = (await bash(
-  `_r="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null)"; [ -n "$_r" ] && [ -d "$_r/docs/leadv2" ] && printf '%s' "$_r" || pwd`
-)).trim() || '.'
+// WORKFLOW-BASH-FIX-01: runtime provides no bash() global — only agent()/parallel()/
+// pipeline()/log()/phase()/args/budget. TS + DURABLE_ROOT used to be 2 bare `await bash(...)`
+// calls; collapsed into ONE upfront `gather-init` agent() call (Move 1). NOTE: this call is
+// sequential (awaited) rather than folded as a 4th leg into the gatherLegs parallel() below,
+// because gather-rejected's prompt embeds `${TS.slice(0,10)}` and gather-exemplars'/
+// gather-freeform-recall's prompts embed `${DURABLE_ROOT}` directly in their template
+// literals — those legs are invoked synchronously by parallel()'s Promise.all(fns.map(fn=>fn()))
+// before any leg's promise resolves, so TS/DURABLE_ROOT MUST already be concrete values before
+// gatherLegs is built, not resolved concurrently with it. This costs one extra sequential
+// round-trip vs. the fully-folded ideal, but avoids reading unresolved values into sibling
+// prompts (a real correctness bug, not just a style deviation from the pattern).
+const projRoot = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
+const INIT_SCHEMA = { type: 'object', additionalProperties: false,
+  properties: { ts: { type: 'string' }, durable_root: { type: 'string' } },
+  required: ['ts', 'durable_root'] }
+let initResult = null
+if (!(a.ts && a.durable_root)) {
+  initResult = await agent(
+    `Run these two shell commands via your Bash tool EXACTLY as given, and return their raw ` +
+    `trimmed stdout, verbatim — do not modify, reformat, or re-derive them:\n` +
+    `1. ts: date -u +%Y-%m-%dT%H:%M:%SZ\n` +
+    `2. durable_root: _r="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null)"; [ -n "$_r" ] && [ -d "$_r/docs/leadv2" ] && printf '%s' "$_r" || pwd\n` +
+    `(MEM-WRITE-PATH-FIX-01: command 2 resolves the shared main-repo root even when cwd is a ` +
+    `task worktree, but only trusts it if docs/leadv2 actually exists there — else falls back to pwd.)`,
+    { label: 'gather-init', phase: 'Gather', model: 'haiku', effort: 'low', schema: INIT_SCHEMA })
+}
+// H-1: single init-time timestamp — replay-safe on workflow resume. Runtime throws on
+// Date.now()/argless new Date(), so the fallback below is a static sentinel, not a JS clock —
+// lean: static fallback on total gather-init failure — upgrade if a real clock primitive
+// becomes available in the runtime.
+const TS = a.ts || (initResult && initResult.ts) || '1970-01-01T00:00:00Z'
+const DURABLE_ROOT = a.durable_root || (initResult && initResult.durable_root) || '.'
 
 // ── C3: Ledger emit helper ────────────────────────────────────────────────────
-// Defined AFTER const declarations so TASK_ID is initialized before this closure captures it.
-// Fire-and-forget: never throws, never blocks workflow on failure.
-async function emitLedger(event, extra) {
-  const ev = Object.assign({ event, task_id: TASK_ID || 'unknown' }, extra || {})
-  const projRoot = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
+// Move 2 (Ledger-flush): accumulate in-memory, flush ONCE per return path via a single
+// agent() call instead of one bare bash() per event. pushLedger is synchronous (no I/O);
+// flushLedger is called right before each `return` (both the early-exit and final paths).
+const ledgerEvents = []
+function pushLedger(event, extra) {
+  ledgerEvents.push(Object.assign({ event, task_id: TASK_ID || 'unknown' }, extra || {}))
+}
+async function flushLedger() {
+  if (ledgerEvents.length === 0) return
   try {
-    await bash(
-      `_EMIT="${projRoot}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`
-    )
-  } catch (_) { /* fire-and-forget */ }
+    await agent(
+      `Append each of the following ${ledgerEvents.length} JSON objects as its own line to the ` +
+      `ledger, one at a time and in order, via this exact command per event (substitute ` +
+      `<event-json> with the object, verbatim — it is already valid JSON, do not reformat or ` +
+      `re-derive it):\n` +
+      `_EMIT="${projRoot}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '<event-json>' 2>/dev/null || true\n` +
+      `Events (in order): ${JSON.stringify(ledgerEvents)}\n` +
+      `Return "flushed:<n>" where n is the number of events processed.`,
+      { label: 'ledger-flush', phase: 'Shadow-Emit', model: 'haiku', effort: 'low' })
+  } catch (_) { /* fire-and-forget, never blocks task_close */ }
 }
 
 // ── B1: SkillOpt threshold (LEADV2_SKILL_SYNTH_THRESHOLD) ────────────────────
@@ -143,7 +170,7 @@ const FREEFORM_RECALL_SCHEMA = {
 
 // ── B3: Gather fan-out — signal-counter (haiku) + rejected-edits-reader (haiku) in parallel ──
 phase('Gather')
-await emitLedger('phase_enter', { phase: 'Gather', label: LABEL })
+pushLedger('phase_enter', { phase: 'Gather', label: LABEL })
 // REFLECT-CAUSAL-CRITIQUE-01: 4th leg is additive + flag-gated -- reuses LEADV2_CAUSAL_CRITIQUE
 // (the same flag that writes freeform-insights.jsonl) so recall costs nothing extra when the
 // write-side is off. lean: recall surfaces but does not yet feed Propose -- upgrade when
@@ -213,7 +240,7 @@ const belowThreshold = recurringFiltered.filter(r => r.count < SYNTH_THRESHOLD)
 
 log(`Gather: ${safePatterns.recurring.length} raw signals, ${safeRejected.rejected_count} recently rejected filtered, ` +
     `${aboveThreshold.length} above threshold (>=${SYNTH_THRESHOLD}), ${belowThreshold.length} below (accumulating)`)
-await emitLedger('phase_exit', { phase: 'Gather', signals_raw: safePatterns.recurring.length, above_threshold: aboveThreshold.length })
+pushLedger('phase_exit', { phase: 'Gather', signals_raw: safePatterns.recurring.length, above_threshold: aboveThreshold.length })
 
 // B1: persist below-threshold signals to accumulator for next cycle
 if (belowThreshold.length > 0) {
@@ -231,7 +258,8 @@ if (belowThreshold.length > 0) {
 // Early-exit if nothing above threshold — no proposal needed this cycle
 if (aboveThreshold.length === 0) {
   log(`Gather: no signals above threshold=${SYNTH_THRESHOLD} — skipping Propose. Signals accumulating.`)
-  await emitLedger('task_close', { phase: 'Gather', skipped_reason: `below_threshold=${SYNTH_THRESHOLD}` })
+  pushLedger('task_close', { phase: 'Gather', skipped_reason: `below_threshold=${SYNTH_THRESHOLD}` })
+  await flushLedger()
   return {
     label: LABEL,
     recurring_signals: safePatterns.recurring.length,
@@ -259,7 +287,7 @@ async function synthAgent(prompt, opts = {}) {
 }
 
 phase('Propose')
-await emitLedger('phase_enter', { phase: 'Propose', above_threshold: aboveThreshold.length })
+pushLedger('phase_enter', { phase: 'Propose', above_threshold: aboveThreshold.length })
 const proposal = await synthAgent(
   `Given these recurring leadv2 signals (all have count >= ${SYNTH_THRESHOLD} — threshold enforced), propose CONCRETE, minimal tuning. ` +
   `Recurring (above threshold): ${JSON.stringify(aboveThreshold)}.\n` +
@@ -271,13 +299,12 @@ const proposal = await synthAgent(
   `Then WRITE the proposal to ${OUT} as a governance markdown ` +
   `(status: pending — NOT auto-applied; founder or auto-approve decides). Return the proposals[].`,
   { label: 'propose', phase: 'Propose', model: 'opus', effort: 'medium', schema: PROPOSAL_SCHEMA })
-await emitLedger('phase_exit', { phase: 'Propose', proposals_count: (proposal && proposal.proposals) ? proposal.proposals.length : 0 })
+pushLedger('phase_exit', { phase: 'Propose', proposals_count: (proposal && proposal.proposals) ? proposal.proposals.length : 0 })
 
 // ── Shadow-Emit phase (D3 / G3c + C1/C2 dual-memory) ────────────────────────
 phase('Shadow-Emit')
-await emitLedger('phase_enter', { phase: 'Shadow-Emit', proposals_count: proposal.proposals.length })
+pushLedger('phase_enter', { phase: 'Shadow-Emit', proposals_count: proposal.proposals.length })
 const shadowProposals = []
-const projRoot = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
 const shadowOnClose = (typeof process !== 'undefined' && process.env && process.env.LEADV2_SHADOW_ON_CLOSE) === '1'
 
 // ── C1: Episodic memory write ─────────────────────────────────────────────────
@@ -341,6 +368,13 @@ if (TASK_ID && proposal && proposal.proposals && proposal.proposals.length > 0) 
   log(`Shadow-Emit: shared-memory updated at ${sharedMemPath} (worktree="${worktreeId || 'main'}")`)
 }
 
+// Move 3 (Loop-collapse): build all shell commands in JS first (already-escaped, exactly as
+// before — the escaping logic is untouched), skipping items that don't need an emit at all
+// (no diff_patch / dry-run). Then run ALL emit commands via ONE agent() call instead of one
+// bare bash() per proposal. The agent executes each command verbatim — it never re-derives or
+// re-escapes the command string (R1: escaping quality must stay deterministic JS, not LLM
+// judgment).
+const emitCandidates = []
 for (const p of proposal.proposals) {
   const riskLevel = classifyRisk(p.kind, p.target, p.change)
   const diffPatch = (p.diff_patch || '').trim()
@@ -357,27 +391,48 @@ for (const p of proposal.proposals) {
     continue
   }
 
-  const proposalId = await bash(
-    `python3 "${projRoot}/.claude/scripts/lv2-shadow-emit.py" ` +
+  const cmd = `python3 "${projRoot}/.claude/scripts/lv2-shadow-emit.py" ` +
     `"${TASK_ID}" "${p.kind}" "${p.target}" "${riskLevel}" "${projRoot}" ` +
     `"${diffPatch.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}" 2>/dev/null || true`
-  ).then(out => (out||'').trim()).catch(()=>'')
-
-  if (proposalId && /^[0-9a-f]{40}$/.test(proposalId)) {
-    shadowProposals.push({ id: proposalId, kind: p.kind, target: p.target, risk_level: riskLevel })
-    log(`Shadow-Emit: emitted ${proposalId} kind=${p.kind} risk=${riskLevel}`)
-  } else {
-    log(`Shadow-Emit: emit failed for ${p.kind}:${p.target}`)
-    shadowProposals.push({ kind: p.kind, target: p.target, risk_level: riskLevel, status: 'emit_failed' })
-  }
+  emitCandidates.push({ p, riskLevel, cmd })
 }
 
-await emitLedger('task_close', {
+if (emitCandidates.length > 0) {
+  const SHADOW_EMIT_SCHEMA = { type: 'object', additionalProperties: false,
+    properties: { results: { type: 'array', items: { type: 'object', additionalProperties: false,
+      properties: { index: { type: 'number' }, id: { type: ['string', 'null'] } },
+      required: ['index', 'id'] } } },
+    required: ['results'] }
+  const shadowResult = await agent(
+    `Run each of these ${emitCandidates.length} shell commands via your Bash tool, in order, ` +
+    `EXACTLY as given — do not modify, re-escape, or re-derive them (they are already ` +
+    `shell-escaped):\n` +
+    emitCandidates.map((c, i) => `${i}. ${c.cmd}`).join('\n') + '\n' +
+    `For each command, trim its stdout. If the trimmed stdout matches ^[0-9a-f]{40}$, that is ` +
+    `the proposal id for that command's index; otherwise id=null. Return results[] = ` +
+    `{index, id} — one entry per command, index matching the numbering above.`,
+    { label: 'shadow-emit-batch', phase: 'Shadow-Emit', model: 'haiku', effort: 'low', schema: SHADOW_EMIT_SCHEMA })
+  const results = (shadowResult && shadowResult.results) || []
+  emitCandidates.forEach((c, i) => {
+    const r = results.find(x => x.index === i)
+    const id = r && r.id
+    if (id && /^[0-9a-f]{40}$/.test(id)) {
+      shadowProposals.push({ id, kind: c.p.kind, target: c.p.target, risk_level: c.riskLevel })
+      log(`Shadow-Emit: emitted ${id} kind=${c.p.kind} risk=${c.riskLevel}`)
+    } else {
+      log(`Shadow-Emit: emit failed for ${c.p.kind}:${c.p.target}`)
+      shadowProposals.push({ kind: c.p.kind, target: c.p.target, risk_level: c.riskLevel, status: 'emit_failed' })
+    }
+  })
+}
+
+pushLedger('task_close', {
   phase: 'Shadow-Emit',
   proposals_count: proposal.proposals.length,
   shadow_emitted: shadowProposals.filter(sp => sp.id).length,
   episodic_written: !!(TASK_ID && proposal.proposals.length > 0),
 })
+await flushLedger()
 return {
   label: LABEL, proposal_path: OUT,
   recurring_signals: safePatterns.recurring.length,

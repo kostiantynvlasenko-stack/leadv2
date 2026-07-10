@@ -5,13 +5,19 @@
 // OMITTED entirely, not present-as-[]). Same Function-wrap execution methodology as
 // causal-critique-harness.mjs -- runs the REAL, unmodified leadv2-learn.js source.
 //
+// WORKFLOW-BASH-FIX-01: the real Workflow runtime provides ONLY agent()/parallel()/pipeline()/
+// log()/phase()/args/budget -- there is NO bash() global. This harness previously mocked a
+// fictional `bashImpl`, which is exactly the blind spot that let 4 real `bash()` call-sites in
+// leadv2-learn.js ship broken (undefined at runtime). It now mocks only agent() (+ pipeline/
+// budget as harmless no-ops) to match the real runtime contract -- every shell command the
+// workflow needs now runs *inside* an agent() call, never via a JS-level bash() global.
+//
 // Mock surface: every agent() label the workflow can reach on this minimal path is stubbed
 // with a schema-shaped response. SYNTH_THRESHOLD is set to 1 and 'gather-signals' returns one
 // recurring signal at count=1 so the workflow proceeds past the early-exit into Propose ->
 // Shadow-Emit -> the final return statement (the exact line H2 fixed), with proposals=[] so
-// the episodic-write / shared-mem-update / shadow-emit side branches (which need TASK_ID +
+// the episodic-write / shared-mem-update / shadow-emit-batch side branches (which need TASK_ID +
 // non-empty proposals) are inert no-ops -- keeping the mock surface minimal and honest.
-import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 
 const [, , fixtureDir, workflowPath, flagState] = process.argv
@@ -23,18 +29,13 @@ function runWorkflow(args) {
   const src = fs.readFileSync(workflowPath, 'utf8')
   const body = src.replace(/^export const meta/, 'const meta')
   const wrapped = new Function(
-    'args', 'agent', 'bash', 'phase', 'log', 'parallel',
+    'args', 'agent', 'phase', 'log', 'parallel', 'pipeline', 'budget',
     `return (async () => {\n${body}\n})();`
   )
-  const bashImpl = async (cmd) => {
-    try {
-      return execSync(cmd, { shell: '/bin/bash', cwd: fixtureDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-    } catch (e) {
-      return (e.stdout || '').toString()
-    }
-  }
   const agentImpl = async (prompt, opts) => {
     switch (opts.label) {
+      case 'gather-init':
+        return { ts: '2026-01-01T00:00:00Z', durable_root: fixtureDir }
       case 'gather-signals':
         return { recurring: [{ signal: 'test-signal', count: 1, where: 'fixture', class_key: 'test:key:role:mode' }], revise_rate: '0%', summary_for_lead: 'one test signal' }
       case 'gather-rejected':
@@ -45,6 +46,8 @@ function runWorkflow(args) {
         return { freeform_recalled: [], summary_for_lead: 'no freeform candidates' }
       case 'propose':
         return { proposals: [], summary_for_lead: 'no proposals for this minimal fixture' }
+      case 'ledger-flush':
+        return 'flushed:mock'
       default:
         return null
     }
@@ -52,7 +55,9 @@ function runWorkflow(args) {
   const phaseImpl = () => {}
   const logImpl = (...a) => { if (process.env.HARNESS_VERBOSE) console.error('[wf-log]', ...a) }
   const parallelImpl = (fns) => Promise.all(fns.map((fn) => fn()))
-  return wrapped(args, agentImpl, bashImpl, phaseImpl, logImpl, parallelImpl)
+  const pipelineImpl = (fns) => Promise.all((fns || []).map((fn) => (typeof fn === 'function' ? fn() : fn)))
+  const budgetImpl = {}
+  return wrapped(args, agentImpl, phaseImpl, logImpl, parallelImpl, pipelineImpl, budgetImpl)
 }
 
 async function main() {

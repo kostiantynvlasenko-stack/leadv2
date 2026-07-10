@@ -16,7 +16,10 @@ const TASK_CLASS = a.taskClass || 'general'
 // MEM-WRITE-PATH-FIX-01 round2: same fix as leadv2-plan.js -- this was the other
 // stale consumer (finding #3) still reading solutions-archive.yaml by bare relative
 // path from the task-worktree cwd, after review.js/learn.js were already migrated.
-const _ARCHIVE_ROOT = (await bash(`_r="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null)"; [ -n "$_r" ] && [ -d "$_r/docs/leadv2" ] && printf '%s' "$_r" || pwd`)).trim() || '.'
+// WORKFLOW-BASH-FIX-01: runtime provides no bash() global. The DURABLE_ROOT resolve
+// has exactly ONE consumer (the archive-top-k agent below) -- Move 1(b): fold the
+// shell command into that single consuming agent() prompt instead of a standalone
+// bare `await bash(...)` call.
 
 // [F7] Structured, scored exemplar injection at Intake (§3 of design: extract into Workflow)
 // Lead reads shared-memory.yaml (< 200 lines) via this workflow; no inline read in lead chat.
@@ -54,7 +57,11 @@ const [memResult, archResult] = await Promise.all([
     `Otherwise return {found: true, top_exemplar: <top_exemplar_summary>, task_class_match: <matched task_class>, score: <score>}.`,
     { label: 'shared-mem-exemplar', phase: 'Enrich', model: 'haiku', effort: 'low', schema: EXEMPLAR_SCHEMA }),
   agent(
-    `Read ${_ARCHIVE_ROOT}/docs/leadv2/solutions-archive.yaml. It is a YAML list: [{task_id, task_class, score, diff_summary, ts}]. ` +
+    `First resolve the durable archive root: run this exact command via your Bash tool, verbatim -- ` +
+    `do not modify, reformat, or re-derive it -- and use its trimmed stdout as DURABLE_ROOT:\n` +
+    `_r="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null)"; [ -n "$_r" ] && [ -d "$_r/docs/leadv2" ] && printf '%s' "$_r" || pwd\n` +
+    `(If the command produces empty output, use "." as DURABLE_ROOT.)\n` +
+    `Then read DURABLE_ROOT/docs/leadv2/solutions-archive.yaml. It is a YAML list: [{task_id, task_class, score, diff_summary, ts}]. ` +
     `Filter entries where task_class == "${TASK_CLASS}". Sort by score descending. Return top-3. ` +
     `If the file does not exist or has no matches, return {found: false, exemplars: []}. ` +
     `Otherwise return {found: true, exemplars: [{task_id, score, diff_summary}]}.`,

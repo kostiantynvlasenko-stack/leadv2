@@ -53,11 +53,27 @@ const JUDGE_SCHEMA = {
 
 
 // ── C3: Ledger emit helper ────────────────────────────────────────────────────
-async function emitLedger(event, extra) {
+// WORKFLOW-BASH-FIX-01 (Move 2): runtime provides no bash() global. Accumulate
+// events in-memory (pushLedger, sync, no I/O) and flush ONCE via a single agent()
+// call right before the workflow's return, instead of one bare bash() per event.
+const ledgerEvents = []
+function pushLedger(event, extra) {
   const _taskId = (typeof TASK_ID !== 'undefined' ? TASK_ID : null) || (typeof a !== 'undefined' && a.task_id) || 'unknown'
-  const ev = Object.assign({ event, task_id: _taskId }, extra || {})
+  ledgerEvents.push(Object.assign({ event, task_id: _taskId }, extra || {}))
+}
+async function flushLedger(phaseLabel) {
+  if (ledgerEvents.length === 0) return
   const _root = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
-  try { await bash(`_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`) } catch (_) {}
+  try {
+    await agent(
+      `Append each of the following ${ledgerEvents.length} JSON objects as its own line to the ledger, ` +
+      `one at a time and in order, via this exact command per event (substitute <event-json> with the ` +
+      `object, verbatim -- it is already valid JSON, do not reformat or re-derive it):\n` +
+      `_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '<event-json>' 2>/dev/null || true\n` +
+      `Events (in order): ${JSON.stringify(ledgerEvents)}\n` +
+      `Return "flushed:<n>" where n is the number of events processed.`,
+      { label: 'ledger-flush', phase: phaseLabel || 'Select', model: 'haiku', effort: 'low' })
+  } catch (_) { /* fire-and-forget, never blocks task_close */ }
 }
 
 // synth stages: try top model, fall back on null/error
@@ -74,7 +90,7 @@ async function synthAgent(prompt, opts = {}) {
 }
 
 phase('Generate')
-await emitLedger('phase_enter', { phase: 'Generate' })
+pushLedger('phase_enter', { phase: 'Generate' })
 const gens = []
 for (let i = 0; i < N; i++) {
   const frame = FRAMES[i]
@@ -88,7 +104,7 @@ const ideas = (await parallel(gens)).filter(Boolean)
 log(`Generate: ${ideas.length}/${N} candidate ideas`)
 
 phase('Judge')
-await emitLedger('phase_enter', { phase: 'Judge' })
+pushLedger('phase_enter', { phase: 'Judge' })
 let judged = await synthAgent(
   `Score and cluster these ${ideas.length} candidate solutions for task ${TASK_ID}. ` +
   `Score each 0-10 (10=best): feasibility(0-4) + novelty(0-3) + blast-radius(0-3, higher=safer). ` +
@@ -106,7 +122,7 @@ if (judged === null) {
 }
 
 phase('Select')
-await emitLedger('phase_enter', { phase: 'Select' })
+pushLedger('phase_enter', { phase: 'Select' })
 // [F6] TopK selection: drop traps, dedupe clusters (keep highest score per cluster), take top-K by score
 const ranked = judged ? (judged.ranked || []) : []
 const nonTraps = ranked.filter(r => !r.trap)
@@ -119,6 +135,8 @@ for (const r of nonTraps) {
 const deduped = [...clusterBest.values()].sort((a, b) => b.score - a.score)
 const topK = deduped.slice(0, TOP_K)
 log(`Select: ${ranked.length} ranked -> ${nonTraps.length} non-trap -> ${deduped.length} cluster-deduped -> ${topK.length} TopK`)
+pushLedger('task_close', { phase: 'Select', top_k: topK.length })
+await flushLedger('Select')
 
 return {
   task_id: TASK_ID, divergence_path: OUT,

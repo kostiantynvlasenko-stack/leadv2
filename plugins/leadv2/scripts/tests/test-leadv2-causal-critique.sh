@@ -129,11 +129,23 @@ else
     fail "freeform-insights.jsonl missing or does not contain id=$FREEFORM_ID"
   fi
 
-  BASH_CALLS=$(printf '%s' "$GOOD_OUT" | python3 -c "import json,sys; print(json.load(sys.stdin)['calls']['bash'])")
-  if [[ "$BASH_CALLS" -gt 3 ]]; then
-    pass "Digest phase issued $BASH_CALLS real bash() calls against fixture files"
+  # WORKFLOW-BASH-FIX-01: there is no bash() global at runtime anymore -- the Digest phase's
+  # reads now happen inside the ONE 'gather-digest' agent() call. Assert the harness's mock
+  # agentImpl genuinely executed those commands (realExec count) AND that the resulting digest
+  # content (visible in the downstream causal-critique prompt) reflects REAL fixture file
+  # content, not canned values -- the direct replacement for the old bash-call-count check.
+  REAL_EXEC=$(printf '%s' "$GOOD_OUT" | python3 -c "import json,sys; print(json.load(sys.stdin)['calls']['realExec'])")
+  if [[ "$REAL_EXEC" -gt 3 ]]; then
+    pass "Digest phase genuinely executed $REAL_EXEC real shell command(s) via the gather-digest/persist agent() calls"
   else
-    fail "expected >3 bash() calls in Digest phase, got $BASH_CALLS"
+    fail "expected >3 real-executed commands in Digest/Persist, got $REAL_EXEC"
+  fi
+
+  DIGEST_REFLECTS_FIXTURE=$(printf '%s' "$GOOD_OUT" | python3 -c "import json,sys; print(json.load(sys.stdin)['digestReflectsFixture'])")
+  if [[ "$DIGEST_REFLECTS_FIXTURE" == "True" ]]; then
+    pass "gather-digest agent() call genuinely read real fixture content (context.yaml + ledger.jsonl reflected in critique prompt)"
+  else
+    fail "digest content does not reflect real fixture files -- gather-digest may be returning canned/empty values"
   fi
 fi
 

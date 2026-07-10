@@ -61,15 +61,31 @@ const ROOT_CAUSE_SCHEMA = {
 // [D4] Phase 1: symptom-classifier (haiku) — replaces monolithic trace fan-out with dynamic clusters
 
 // ── C3: Ledger emit helper ────────────────────────────────────────────────────
-async function emitLedger(event, extra) {
+// WORKFLOW-BASH-FIX-01 (Move 2): runtime provides no bash() global. Accumulate
+// events in-memory (pushLedger, sync, no I/O) and flush ONCE via a single agent()
+// call right before the workflow's return, instead of one bare bash() per event.
+const ledgerEvents = []
+function pushLedger(event, extra) {
   const _taskId = (typeof TASK_ID !== 'undefined' ? TASK_ID : null) || (typeof a !== 'undefined' && a.task_id) || 'unknown'
-  const ev = Object.assign({ event, task_id: _taskId }, extra || {})
+  ledgerEvents.push(Object.assign({ event, task_id: _taskId }, extra || {}))
+}
+async function flushLedger(phaseLabel) {
+  if (ledgerEvents.length === 0) return
   const _root = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
-  try { await bash(`_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`) } catch (_) {}
+  try {
+    await agent(
+      `Append each of the following ${ledgerEvents.length} JSON objects as its own line to the ledger, ` +
+      `one at a time and in order, via this exact command per event (substitute <event-json> with the ` +
+      `object, verbatim -- it is already valid JSON, do not reformat or re-derive it):\n` +
+      `_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '<event-json>' 2>/dev/null || true\n` +
+      `Events (in order): ${JSON.stringify(ledgerEvents)}\n` +
+      `Return "flushed:<n>" where n is the number of events processed.`,
+      { label: 'ledger-flush', phase: phaseLabel || 'Reduce', model: 'haiku', effort: 'low' })
+  } catch (_) { /* fire-and-forget, never blocks task_close */ }
 }
 
 phase('Classify')
-await emitLedger('phase_enter', { phase: 'Classify' })
+pushLedger('phase_enter', { phase: 'Classify' })
 const classified = await agent(
   `Classify symptoms for bug: ${BUG_BRIEF}. Task: ${TASK_ID}.\n` +
   `Identify up to 3 distinct symptom clusters (domain: logs|code|db|ops). ` +
@@ -90,7 +106,7 @@ log(`Classify: ${clusters.length} symptom clusters: ${clusters.map(c => c.name).
 
 // [D4] Phase 2: parallel evidence-gather per cluster (haiku, max 3 concurrent)
 phase('Trace')
-await emitLedger('phase_enter', { phase: 'Trace' })
+pushLedger('phase_enter', { phase: 'Trace' })
 const evidenceAgents = clusters.slice(0, 3).map(cl => () => agent(
   `Evidence-gather for cluster "${cl.name}" (domain: ${cl.domain}) of bug: ${BUG_BRIEF}. Task: ${TASK_ID}.\n` +
   `Symptom hint: ${cl.symptom_hint}.\n` +
@@ -125,13 +141,16 @@ async function synthAgent(prompt, opts = {}) {
 
 // [D4] Phase 3: sonnet synthesizer (unchanged interface — backward-compat)
 phase('Reduce')
-await emitLedger('phase_enter', { phase: 'Reduce' })
+pushLedger('phase_enter', { phase: 'Reduce' })
 const result = await synthAgent(
   `Merge and reduce these ${allHypotheses.length} hypotheses from ${traceResults.length} symptom clusters into a single root cause verdict for bug: ${BUG_BRIEF}.\n` +
   `Hypotheses: ${JSON.stringify(allHypotheses)}\n` +
   `Pick the most likely root_cause (high-confidence wins; corroboration across clusters upgrades confidence). ` +
   `Set evidence_files to specific files/tables implicated. Provide a concrete fix_hint. List alternates for any competing hypotheses.`,
   { label: 'reduce', phase: 'Reduce', model: 'opus', effort: 'medium', schema: ROOT_CAUSE_SCHEMA })
+
+pushLedger('task_close', { phase: 'Reduce', confidence: result ? result.confidence : 'low' })
+await flushLedger('Reduce')
 
 return result || {
   root_cause: 'Reduce agent returned null — review raw hypotheses manually',

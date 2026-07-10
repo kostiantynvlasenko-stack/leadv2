@@ -19,15 +19,37 @@ const MISSION = a.missionPath || `docs/handoff/${TASK_ID}/review-mission.md`
 const DIFF = a.diffPath || `/tmp/leadv2-review-${TASK_ID}.diff`
 const CODEX_ON = a.codexEnabled !== false
 const TASK_CLASS = a.taskClass || 'general'
-// H-1: single init-time timestamp — replay-safe on workflow resume.
-// Workflow runtime throws on Date.now()/argless new Date() — derive stamp via bash() instead.
-const TS = a.ts || (await bash("date -u +%Y-%m-%dT%H:%M:%SZ")).trim()
+// WORKFLOW-BASH-FIX-01: the real Workflow runtime provides ONLY agent()/parallel()/pipeline()/
+// log()/phase()/args/budget — there is NO bash() global. This file used to make 4 real bare
+// `await bash(...)` calls (undefined at runtime → crash): the TS derive (single consumer:
+// the archive-write entry below), emitLedger (×3 runtime), the _archiveRoot git-common-dir
+// resolve (single consumer: archive-write), and the semantic-index best-effort append (always
+// sequenced right after archive-write). All 4 are folded into the SAME existing 'archive-write'
+// / 'reflect' agent calls (Move 1 + Move 2) — zero net new agent() calls:
+//   - TS: pass-through from args.ts if the caller supplied it; else the archive-write prompt
+//     asks the agent to resolve it itself via Bash, verbatim, as one more instruction.
+//   - _archiveRoot resolve: folded into the archive-write prompt (agent resolves it itself,
+//     same pattern as leadv2-plan.js's archive-read).
+//   - semantic-index append: built as ONE fully self-contained, already-escaped shell command
+//     in JS (unchanged escaping logic — R1) and passed to the SAME archive-write agent call as
+//     a best-effort trailing instruction (never blocks Reflect on failure).
+//   - emitLedger → pure-JS in-memory ledgerEvents array (pushLedger, no I/O); flushed via the
+//     'reflect' agent call at the end — that call runs UNCONDITIONALLY regardless of verdict,
+//     so the ledger flush must live there (NOT inside the verdict==='ACCEPT' branch, since
+//     ledger events must flush every round, not just on accept).
+const TS = a.ts || ''
 // [BANDIT-WIRE-01] Consume bandit model selections from args.models (set by lead before Workflow call).
 // args.models absent (or LEADV2_ROUTE_BANDIT != 1) => falls back to existing pinned defaults.
 // Flag-off guarantee: if args.models is not provided, model values are identical to pre-BANDIT-WIRE-01.
 const _MODELS = (a.models && typeof a.models === 'object') ? a.models : {}
 const CRITIC_MODEL = _MODELS.critic || (SAFETY ? 'opus' : 'sonnet')
 const VERIFY_MODEL = _MODELS.verify || 'sonnet'
+const projRoot = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
+// Single canonical root-resolve one-liner, shared by both the archive-write prompt's own
+// resolve instruction and the self-contained semantic-index command below — kept as ONE
+// un-split literal (not concatenated across `+`-joined segments) so it stays a single
+// extractable unit, e.g. for tests/tools that locate this exact resolution pattern by content.
+const ROOT_RESOLVE_CMD = `_r="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null)"; [ -n "$_r" ] && [ -d "$_r/docs/leadv2" ] && printf '%s' "$_r" || pwd`
 const FINDINGS_SCHEMA = {
   type: 'object', additionalProperties: false,
   properties: {
@@ -62,11 +84,12 @@ const QUALITY_SCHEMA = {
 const SEV_RANK = { critical: 4, high: 3, medium: 2, low: 1, nit: 0 }
 
 // ── C3: Ledger emit helper ────────────────────────────────────────────────────
-async function emitLedger(event, extra) {
+// Move 2 (Ledger-flush): accumulate in-memory, no I/O per event. Flushed via the final
+// 'reflect' agent call, which runs unconditionally (every round, every verdict).
+const ledgerEvents = []
+function pushLedger(event, extra) {
   const _taskId = (typeof TASK_ID !== 'undefined' ? TASK_ID : null) || (typeof a !== 'undefined' && a.task_id) || 'unknown'
-  const ev = Object.assign({ event, task_id: _taskId }, extra || {})
-  const _root = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
-  try { await bash(`_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`) } catch (_) {}
+  ledgerEvents.push(Object.assign({ event, task_id: _taskId }, extra || {}))
 }
 
 // synth stages: try top model, fall back on null/error
@@ -83,7 +106,7 @@ async function synthAgent(prompt, opts = {}) {
 }
 
 phase('Review')
-await emitLedger('phase_enter', { phase: 'Review' })
+pushLedger('phase_enter', { phase: 'Review' })
 // [COST-LEVERS-01] Codex is the PRIMARY adversarial brain for Review (Lever 3). Agent critic is the fallback when CODEX_ON=false.
 // Codex runs first (unshifted to front) for highest signal-to-token ratio; critic always present as fallback.
 const reviewers = [
@@ -123,7 +146,7 @@ const prior = Array.isArray(a.priorSignatures) ? a.priorSignatures : []
 const recent = [...prior, sig]
 const stall = blocking_count > 0 && recent.length >= 2 && recent.slice(-2).every(s => s === sig)
 phase('Verify')
-await emitLedger('phase_enter', { phase: 'Verify' })
+pushLedger('phase_enter', { phase: 'Verify' })
 const MAX_VERIFY = a.maxVerify || 10
 const overflowFindings = blocking.length > MAX_VERIFY ? blocking.slice(MAX_VERIFY) : []
 const cappedBlocking = blocking.slice(0, MAX_VERIFY)
@@ -138,7 +161,7 @@ if (cappedBlocking.length > 0) {
   log(`Verify: ${cappedBlocking.length} capped (${overflowFindings.length} overflow) -> ${confirmedBlocking.length} survived refutation`)
 }
 phase('Reflect')
-await emitLedger('phase_enter', { phase: 'Reflect' })
+pushLedger('phase_enter', { phase: 'Reflect' })
 const ROUND = a.round || 1
 const maxSev = deduped.reduce((m, f) => Math.max(m, SEV_RANK[f.severity] || 0), 0)
 const ESCALATE_VERDICT = 'ESCALATE'
@@ -176,38 +199,58 @@ if (verdict === 'ACCEPT' && qualityScore !== null) {
   // git-common-dir resolve would silently land in the WRONG repo's docs/leadv2.
   // Require the resolved root to actually contain docs/leadv2/ before trusting it;
   // otherwise fail safe to ambient pwd rather than writing into a foreign repo.
-  const _archiveRoot = (await bash(
-    `_r="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null)"; [ -n "$_r" ] && [ -d "$_r/docs/leadv2" ] && printf '%s' "$_r" || pwd`
-  )).trim() || '.'
+  const diffSummaryEsc = diffSummary.replace(/"/g, "'")
+  // WORKFLOW-BASH-FIX-01: fully self-contained, already-escaped shell command built in JS
+  // (unchanged escaping logic — R1). Independently re-resolves the archive root itself so it
+  // does not depend on any shell state persisting from a prior instruction in this same
+  // agent turn. Best-effort — must never block Reflect on failure.
+  const diffSummaryShEsc = diffSummary.replace(/'/g, "'\\''")
+  const semanticIndexCmd =
+    `PLUGIN_SCRIPTS="\${CLAUDE_PLUGIN_ROOT:-}/scripts"; ` +
+    `[ -f "$PLUGIN_SCRIPTS/leadv2-semantic-index.sh" ] || exit 0; ` +
+    `text='${diffSummaryShEsc} ${TASK_CLASS}'; ` +
+    `chash=$(printf '%s' "$text" | shasum -a 1 | awk '{print $1}'); ` +
+    `_archive_root="$(${ROOT_RESOLVE_CMD})"; ` +
+    `bash "$PLUGIN_SCRIPTS/leadv2-semantic-index.sh" solutions '${TASK_ID}' "" "$chash" "$text" "$(basename "$_archive_root")" >/dev/null 2>&1 || true`
   await agent(
-    `Append a new entry to ${_archiveRoot}/docs/leadv2/solutions-archive.yaml. ` +
+    `First resolve the durable repo root by running this EXACT command via your Bash tool, ` +
+    `verbatim (do not modify it):\n${ROOT_RESOLVE_CMD}\n` +
+    `(this resolves the shared main-repo root even when cwd is a task worktree, but only trusts ` +
+    `it if docs/leadv2 actually exists there — else falls back to pwd). ` +
+    `Then append a new entry to <that_root>/docs/leadv2/solutions-archive.yaml. ` +
     `Create the file with an empty YAML list if it does not exist. ` +
     `Read the file first, append this entry to the list, then write the full file back:\n` +
     `  - task_id: "${TASK_ID}"\n` +
     `    task_class: "${TASK_CLASS}"\n` +
     `    score: ${qualityScore}\n` +
-    `    diff_summary: "${diffSummary.replace(/"/g, "'")}"\n` +
-    `    ts: "${TS}"\n` +
-    `Use python3: import yaml; load existing or []; append entry; dump back. Return "ok".`,
+    `    diff_summary: "${diffSummaryEsc}"\n` +
+    `    ts: "${TS || '<run: date -u +%Y-%m-%dT%H:%M:%SZ via Bash and use its trimmed stdout here>'}"\n` +
+    `Use python3: import yaml; load existing or []; append entry; dump back. ` +
+    `Then, best-effort (never fail this whole step if it errors — it is optional indexing, ` +
+    `not required for the archive write above to count as done), run this EXACT command via ` +
+    `Bash, verbatim (it is already fully constructed and shell-escaped, do not modify it):\n${semanticIndexCmd}\n` +
+    `Return "ok".`,
     { label: 'archive-write', phase: 'Reflect', model: 'haiku', effort: 'low' })
-
-  // MEM-SEMANTIC-RECALL-01 fix round (H3): best-effort semantic index of the
-  // new solutions-archive entry. Never blocks/throws Reflect on failure —
-  // indexing is additive-only, same fail-open contract as the other writers.
-  try {
-    const _diffSummaryEsc = diffSummary.replace(/'/g, "'\\''")
-    await bash(
-      `PLUGIN_SCRIPTS="\${CLAUDE_PLUGIN_ROOT:-}/scripts"; ` +
-      `[ -f "$PLUGIN_SCRIPTS/leadv2-semantic-index.sh" ] || exit 0; ` +
-      `text='${_diffSummaryEsc} ${TASK_CLASS}'; ` +
-      `chash=$(printf '%s' "$text" | shasum -a 1 | awk '{print $1}'); ` +
-      `bash "$PLUGIN_SCRIPTS/leadv2-semantic-index.sh" solutions '${TASK_ID}' "" "$chash" "$text" "$(basename '${_archiveRoot}')" >/dev/null 2>&1 || true`
-    )
-  } catch (_e) { /* best-effort — indexing failure must never block Reflect */ }
 }
 
+pushLedger('task_close', {
+  verdict, blocking_count: confirmedBlocking.length, total_findings: deduped.length,
+  quality_score: qualityScore,
+})
+// Move 2: ledger flush folded into this 'reflect' call, which runs UNCONDITIONALLY every
+// round regardless of verdict — events must flush every round, not just on ACCEPT.
+const ledgerFlushInstructions = ledgerEvents.length > 0
+  ? `\n\nALSO append each of these ${ledgerEvents.length} JSON objects as its own line to the ` +
+    `ledger, one at a time and in order, via this exact command per event (substitute ` +
+    `<event-json> with the object, verbatim — it is already valid JSON, do not reformat or ` +
+    `re-derive it):\n` +
+    `_EMIT="${projRoot}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '<event-json>' 2>/dev/null || true\n` +
+    `Events (in order): ${JSON.stringify(ledgerEvents)}\n`
+  : ''
 await agent(
-  `Append one line to docs/handoff/${TASK_ID}/review-signature.md (create if absent): "${TASK_ID} | verdict=${verdict} | blocking=${confirmedBlocking.length} | dims=${[...new Set(deduped.map(f => f.dimension))].join(',')} | quality=${qualityScore !== null ? qualityScore : 'n/a'}". One Bash echo, no analysis. Return "ok".`,
+  `Append one line to docs/handoff/${TASK_ID}/review-signature.md (create if absent): "${TASK_ID} | verdict=${verdict} | blocking=${confirmedBlocking.length} | dims=${[...new Set(deduped.map(f => f.dimension))].join(',')} | quality=${qualityScore !== null ? qualityScore : 'n/a'}". One Bash echo, no analysis.` +
+  ledgerFlushInstructions +
+  `Return "ok" once the review-signature append${ledgerEvents.length > 0 ? ' and the ledger-flush commands have' : ' has'} completed.`,
   { label: 'reflect', phase: 'Reflect', model: 'haiku', effort: 'low' })
 return {
   task_id: TASK_ID, verdict, round: ROUND, blocking_count: confirmedBlocking.length,

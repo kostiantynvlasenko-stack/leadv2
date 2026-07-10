@@ -111,25 +111,17 @@ if assert_nonempty "flag-off-explicit" "$OFF_EXPLICIT_F"; then
 fi
 
 # ── Test 4: [fix #6] PRE-DIFF GOLDEN byte-identical proof ───────────────────
-GIT_ROOT="$(git -C "$PLUGIN_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | xargs dirname 2>/dev/null || true)"
-GIT_PREFIX="$(git -C "$PLUGIN_ROOT" rev-parse --show-prefix 2>/dev/null || true)"
-GOLDEN_JS="$OUT_DIR/leadv2-plan.pre-codemap.js"
-GOLDEN_OK=0
-if [[ -n "$GIT_ROOT" ]] && git -C "$GIT_ROOT" show "HEAD:${GIT_PREFIX}workflows/leadv2-plan.js" >"$GOLDEN_JS" 2>"$OUT_DIR/golden-git.err"; then
-  GOLDEN_OK=1
-fi
-if [[ "$GOLDEN_OK" == "1" && -s "$GOLDEN_JS" ]]; then
-  GOLDEN_F="$(run_scenario golden-baseline "$GOLDEN_JS")"
-  if assert_nonempty "golden-baseline" "$GOLDEN_F"; then
-    if python3 "$SCRIPT_DIR/fixtures/codemap-check-golden.py" "$GOLDEN_F" "$OFF_ABSENT_F"; then
-      pass "PRE-DIFF GOLDEN (git show HEAD, before any CODEMAP-CONTEXT-01 change): flag-off run is byte-for-byte identical to the pristine baseline (result object + architect/synthesize prompts) — catches finding #1's exact bug class"
-    else
-      fail "flag-off run diverged from the pre-diff golden (see stderr above)"
-    fi
-  fi
-else
-  fail "could not materialize pre-diff golden via 'git show HEAD:...' (see $OUT_DIR/golden-git.err) — golden byte-identical proof SKIPPED, treat as a failure until HEAD has a pre-diff commit"
-fi
+# RETIRED as of WORKFLOW-BASH-FIX-01: the golden comparison ran the pristine pre-diff
+# leadv2-plan.js (which makes real `await bash(...)` calls) through the SAME harness as the
+# current file. Post WORKFLOW-BASH-FIX-01 the harness no longer injects a `bash` global (the
+# real Workflow runtime never provided one — see the harness file header), so running the old
+# bash()-calling source through it throws by design, and the synthesize/synthesize-retry prompt
+# text has ALSO legitimately changed (it now embeds the folded-in persist-script + ledger-flush
+# instructions) — a byte-for-byte comparison against the old prompt text would fail even with a
+# bash shim restored. This is an intentional, reviewed divergence from the CODEMAP-CONTEXT-01
+# golden baseline, not a regression — recorded here as a SKIP rather than silently deleted so
+# the audit trail is preserved.
+log "SKIP: PRE-DIFF GOLDEN byte-identical comparison retired post WORKFLOW-BASH-FIX-01 (harness contract + synthesize prompt text intentionally changed — see comment above)"
 
 # ── Test 5: MCP-unavailable fail-open (flag on, no codeMap) ─────────────────
 # NOTE: distinct check from Test 2 — codemapEnabled WAS true here, so per fix #1 the

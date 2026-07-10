@@ -30,6 +30,34 @@ const MODE = a.mode || 'personas'
 const REPO_DIR = a.repoDir || '.'
 const MAX_JUDGE = typeof a.maxJudge === 'number' ? a.maxJudge : 8
 
+// ── C3: Ledger emit helper ────────────────────────────────────────────────────
+// WORKFLOW-BASH-FIX-01 (Move 2): runtime provides no bash() global. Accumulate
+// events in-memory (pushLedger, sync, no I/O) and flush ONCE via a single agent()
+// call right before each return, instead of one bare bash() per event.
+// NOTE: defined here at top level (not inside the mode=personas/mode=pages blocks
+// below) so BOTH mode branches can call push/flushLedger -- the old `emitLedger`
+// was declared inside the `if (MODE === 'personas')` block only, which meant it
+// was out of scope (ReferenceError) for the mode=pages branch's call sites.
+const ledgerEvents = []
+function pushLedger(event, extra) {
+  const _taskId = (typeof TASK_ID !== 'undefined' ? TASK_ID : null) || (typeof a !== 'undefined' && a.task_id) || 'unknown'
+  ledgerEvents.push(Object.assign({ event, task_id: _taskId }, extra || {}))
+}
+async function flushLedger(phaseLabel) {
+  if (ledgerEvents.length === 0) return
+  const _root = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
+  try {
+    await agent(
+      `Append each of the following ${ledgerEvents.length} JSON objects as its own line to the ledger, ` +
+      `one at a time and in order, via this exact command per event (substitute <event-json> with the ` +
+      `object, verbatim -- it is already valid JSON, do not reformat or re-derive it):\n` +
+      `_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '<event-json>' 2>/dev/null || true\n` +
+      `Events (in order): ${JSON.stringify(ledgerEvents)}\n` +
+      `Return "flushed:<n>" where n is the number of events processed.`,
+      { label: 'ledger-flush', phase: phaseLabel || 'Close', model: 'haiku', effort: 'low' })
+  } catch (_) { /* fire-and-forget, never blocks task_close */ }
+}
+
 // ─── MODE: personas ───────────────────────────────────────────────────────────
 
 if (MODE === 'personas') {
@@ -86,19 +114,9 @@ if (MODE === 'personas') {
     required: ['rows'],
   }
 
-// ── C3: Ledger emit helper ────────────────────────────────────────────────────
-async function emitLedger(event, extra) {
-  const _taskId = (typeof TASK_ID !== 'undefined' ? TASK_ID : null) || (typeof a !== 'undefined' && a.task_id) || 'unknown'
-  const ev = Object.assign({ event, task_id: _taskId }, extra || {})
-  const _root = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
-  try { await bash(`_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`) } catch (_) {}
-}
-
-
   phase('Collect')
 
-
-  await emitLedger('phase_enter', { phase: 'Collect' })
+  pushLedger('phase_enter', { phase: 'Collect' })
   const collectResult = await agent(
     `Run the persona audit collect step in the repo at ${REPO_DIR}.
 Execute: bash scripts/audit-personas.sh --json
@@ -113,7 +131,7 @@ If the script fails or returns empty, return rows: [].`,
 
   phase('Judge')
 
-  await emitLedger('phase_enter', { phase: 'Judge' })
+  pushLedger('phase_enter', { phase: 'Judge' })
   const judgeResults = breachRows.length > 0
     ? (await parallel(breachRows.map(row => () => agent(
         `You are diagnosing a persona-engine invariant breach. Provide evidence-backed judgment.
@@ -144,7 +162,7 @@ Return: real (true=confirmed bug, false=probe artifact/race condition), root_cau
 
   if (a.fix === true && confirmed.length > 0) {
     phase('Fix')
-    await emitLedger('phase_enter', { phase: 'Fix' })
+    pushLedger('phase_enter', { phase: 'Fix' })
     const fixCandidates = confirmed.slice(0, 4)
 
     const fixResults = (await parallel(fixCandidates.map(item => async () => {
@@ -185,6 +203,9 @@ Return only those matching rows as rows[].`,
       }
     })
   }
+
+  pushLedger('task_close', { phase: 'Fix', confirmed: confirmed.length, fixed: fixed.length })
+  await flushLedger('Fix')
 
   return {
     rows_total: allRows.length,
@@ -259,8 +280,9 @@ if (MODE === 'pages') {
 
   phase('Collect')
 
-  await emitLedger('phase_enter', { phase: 'Collect' })
+  pushLedger('phase_enter', { phase: 'Collect' })
   if (PAGES.length === 0) {
+    await flushLedger('Collect')
     return { pages: 0, fail_count: 0, fix_items: [] }
   }
 
@@ -300,7 +322,7 @@ Return verdicts[] (role="Designer", criterion, result, note) and fix_items[] (pr
 
   phase('Judge')
 
-  await emitLedger('phase_enter', { phase: 'Judge' })
+  pushLedger('phase_enter', { phase: 'Judge' })
   // Merge + dedupe fix_items across all pages in JS
   const seen = new Map()
   const PRIO_RANK = { HIGH: 3, MED: 2, LOW: 1 }
@@ -320,7 +342,7 @@ Return verdicts[] (role="Designer", criterion, result, note) and fix_items[] (pr
 
   phase('Report')
 
-  await emitLedger('phase_enter', { phase: 'Report' })
+  pushLedger('phase_enter', { phase: 'Report' })
   await agent(
     `Write a vision-report.md to ${REPORT_DIR}/vision-report.md.
 
@@ -342,6 +364,9 @@ ${mergedFixItems.map(f => `- [ ] [${f.prio}] ${f.item}`).join('\n')}
 Create parent directories if needed. Return "ok".`,
     { label: 'report', phase: 'Report', model: 'haiku', effort: 'low' })
 
+  pushLedger('task_close', { phase: 'Report', pages: PAGES.length, fail_count: failCount })
+  await flushLedger('Report')
+
   return {
     pages: PAGES.length,
     fail_count: failCount,
@@ -349,4 +374,5 @@ Create parent directories if needed. Return "ok".`,
   }
 }
 
+await flushLedger('Close')
 return { error: `Unknown mode: ${MODE}. Use mode=personas or mode=pages.` }

@@ -101,15 +101,31 @@ const VERIFY_SCHEMA = {
 
 
 // ── C3: Ledger emit helper ────────────────────────────────────────────────────
-async function emitLedger(event, extra) {
+// WORKFLOW-BASH-FIX-01 (Move 2): runtime provides no bash() global. Accumulate
+// events in-memory (pushLedger, sync, no I/O) and flush ONCE via a single agent()
+// call right before the workflow's return, instead of one bare bash() per event.
+const ledgerEvents = []
+function pushLedger(event, extra) {
   const _taskId = (typeof TASK_ID !== 'undefined' ? TASK_ID : null) || (typeof a !== 'undefined' && a.task_id) || 'unknown'
-  const ev = Object.assign({ event, task_id: _taskId }, extra || {})
+  ledgerEvents.push(Object.assign({ event, task_id: _taskId }, extra || {}))
+}
+async function flushLedger(phaseLabel) {
+  if (ledgerEvents.length === 0) return
   const _root = (typeof process !== 'undefined' && process.env && process.env.LEADV2_PROJECT_ROOT) || '.'
-  try { await bash(`_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '${JSON.stringify(ev).replace(/'/g, "'\\''")}' 2>/dev/null || true`) } catch (_) {}
+  try {
+    await agent(
+      `Append each of the following ${ledgerEvents.length} JSON objects as its own line to the ledger, ` +
+      `one at a time and in order, via this exact command per event (substitute <event-json> with the ` +
+      `object, verbatim -- it is already valid JSON, do not reformat or re-derive it):\n` +
+      `_EMIT="${_root}/.claude/scripts/lv2-ledger-emit.py"; [ -f "$_EMIT" ] || _EMIT="$HOME/.claude/scripts/lv2-ledger-emit.py"; python3 "$_EMIT" '<event-json>' 2>/dev/null || true\n` +
+      `Events (in order): ${JSON.stringify(ledgerEvents)}\n` +
+      `Return "flushed:<n>" where n is the number of events processed.`,
+      { label: 'ledger-flush', phase: phaseLabel || 'Iterate', model: 'haiku', effort: 'low' })
+  } catch (_) { /* fire-and-forget, never blocks task_close */ }
 }
 
 phase('Audit')
-await emitLedger('phase_enter', { phase: 'Audit' })
+pushLedger('phase_enter', { phase: 'Audit' })
 const auditResults = (await parallel([
   () => agent(
     `You are a senior product-owner architect. Visit the deployed preprod URL: ${PREPROD_URL}
@@ -151,7 +167,7 @@ const p0p1 = audit.findings.filter(f => f.severity === 'P0' || f.severity === 'P
 log(`Audit: ${audit.findings.length} findings (${p0p1.length} P0+P1), ${criticTraps.length} critic traps`)
 
 phase('Build')
-await emitLedger('phase_enter', { phase: 'Build' })
+pushLedger('phase_enter', { phase: 'Build' })
 // Group P0+P1 findings by file in JS, disjoint ownership, cap at maxBuildGroups
 const fileMap = new Map()
 for (const f of p0p1) {
@@ -193,7 +209,7 @@ Instructions:
 log(`Build: ${buildResults.length} groups completed`)
 
 phase('Verify')
-await emitLedger('phase_enter', { phase: 'Verify' })
+pushLedger('phase_enter', { phase: 'Verify' })
 let verifyResult = await agent(
   `You are a QA engineer verifying fixes for task ${TASK_ID}, ${FEATURE}.
 Preprod URL: ${PREPROD_URL}
@@ -213,7 +229,7 @@ PASS = element + behavior verified. FAIL = missing or broken. PARTIAL = present 
 let checks = (verifyResult && verifyResult.checks) || []
 
 phase('Iterate')
-await emitLedger('phase_enter', { phase: 'Iterate' })
+pushLedger('phase_enter', { phase: 'Iterate' })
 let round = 1
 while (round <= MAX_ROUNDS) {
   const failedChecks = checks.filter(c => c.status === 'FAIL')
@@ -264,6 +280,9 @@ const finalFail = checks.filter(c => c.status === 'FAIL')
 const followups = finalFail.length > 0
   ? p0p1.filter(f => finalFail.some(c => c.finding_id === f.id))
   : []
+
+pushLedger('task_close', { phase: 'Iterate', rounds: round - 1, fail: finalFail.length })
+await flushLedger('Iterate')
 
 return {
   p0: audit.findings.filter(f => f.severity === 'P0').length,

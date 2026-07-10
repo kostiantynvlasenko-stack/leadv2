@@ -251,14 +251,17 @@ test_6_durable_root_worktree() {
 }
 
 # -- Test 7: REAL JS one-liner across main / worktree / unrelated-repo cwds --
+# WORKFLOW-BASH-FIX-01: leadv2-review.js no longer has any `await bash(...)` call-sites (the
+# runtime provides no bash() global -- the git-common-dir resolve now runs inside an agent()
+# prompt via the agent's own Bash tool). The one-liner itself is unchanged and lives in a single
+# canonical constant (ROOT_RESOLVE_CMD) reused by both consumers, so anchor on the
+# git-common-dir marker inside ANY backtick-delimited template literal instead of requiring the
+# (now-removed) `await bash(` prefix.
 _extract_js_resolve_snippet() {
-  # Must anchor on the git-common-dir marker -- the file has multiple
-  # `await bash(...)` call sites (e.g. emitLedger); a bare first-match would
-  # silently grab the wrong one.
   python3 -c "
 import re, sys
 text = open(sys.argv[1]).read()
-m = re.search(r'await bash\(\s*\`([^\`]*git-common-dir[^\`]*)\`', text)
+m = re.search(r'\`([^\`]*git-common-dir[^\`]*\|\|\s*pwd)\`', text)
 print(m.group(1) if m else '')
 " "$JS_FILE"
 }
