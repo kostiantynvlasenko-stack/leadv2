@@ -26,12 +26,34 @@ set -euo pipefail
 # Resolution order: explicit override → CLAUDE_PROJECT_DIR (v2.1.144+) → PROJECT_ROOT → cwd
 LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(pwd)}}}"
 
+# LEAD-CONTROL-PLANE-01: active.yaml is a cross-worktree registry — every
+# /leadv2 session runs in its own `git worktree add` checkout, so a
+# repo-relative docs/leadv2/active.yaml gave each session a PRIVATE copy
+# (registry saw only itself). Resolved via scripts/leadv2-state-path.sh,
+# which uses `git rev-parse --git-common-dir` — identical from every
+# worktree of the same repo.
+_leadv2_state_path_sh() {
+  printf -- '%s/scripts/leadv2-state-path.sh' "${LEADV2_PROJECT_ROOT}"
+}
+
 _leadv2_yaml_file() {
-  printf -- '%s/docs/leadv2/active.yaml' "${LEADV2_PROJECT_ROOT}"
+  local resolver
+  resolver="$(_leadv2_state_path_sh)"
+  if [[ -x "$resolver" ]]; then
+    PROJECT_ROOT="${LEADV2_PROJECT_ROOT}" "$resolver" active.yaml
+  else
+    printf -- '%s/docs/leadv2/active.yaml' "${LEADV2_PROJECT_ROOT}"
+  fi
 }
 
 _leadv2_yaml_lockfile() {
-  printf -- '%s/docs/leadv2/active.yaml.lock' "${LEADV2_PROJECT_ROOT}"
+  local resolver
+  resolver="$(_leadv2_state_path_sh)"
+  if [[ -x "$resolver" ]]; then
+    PROJECT_ROOT="${LEADV2_PROJECT_ROOT}" "$resolver" active.yaml.lock
+  else
+    printf -- '%s/docs/leadv2/active.yaml.lock' "${LEADV2_PROJECT_ROOT}"
+  fi
 }
 
 _leadv2_state_md() {

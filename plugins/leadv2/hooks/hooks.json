@@ -49,11 +49,25 @@
       "statusMessage": "Checking for pending close obligations..."
      }
     ]
+   },
+   {
+    "matcher": "compact",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/post-compact-reground.sh\""
+     }
+    ]
    }
   ],
   "UserPromptSubmit": [
    {
     "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-task-anchor.sh\"",
+      "timeout": 5
+     },
      {
       "type": "command",
       "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-user-prompt-context.sh\"",
@@ -357,6 +371,19 @@
       "timeout": 5,
       "continueOnBlock": true,
       "statusMessage": "Hard-bans anti-drift reinject..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-auto-status.sh\""
+     }
+    ]
+   },
+   {
+    "matcher": "Agent|Monitor|TaskStop|SendMessage",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-bg-watchdog-enforce.sh\""
      }
     ]
    },
@@ -496,6 +523,10 @@
       "timeout": 5,
       "continueOnBlock": true,
       "statusMessage": "Writing pre-compact checkpoint..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/pre-compact-task-freeze.sh\""
      }
     ]
    }
