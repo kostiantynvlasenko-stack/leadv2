@@ -86,7 +86,7 @@ if "$CLAIM" == "true":
     eligible["claimed_by"] = os.environ.get("LEADV2_SESSION_ID", "unknown")
     # Use parent shell PID (lead session), not ephemeral python helper PID.
     eligible["claim_pid"] = int(os.environ.get("LEADV2_LEAD_PID", os.getppid()))
-    eligible["claimed_at"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    eligible["claimed_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".queue.", suffix=".tmp")
     with os.fdopen(fd, "w") as f:
         yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False, allow_unicode=True)

@@ -78,13 +78,14 @@ fi
 # Bridge mode: prefer tasks.yaml when present; else read lane yamls directly.
 TERMINAL_STATUSES="done|poisoned|rejected|failed|archived|closed|completed|admin-closed"
 if [[ -f "$TASKS_YAML" ]]; then
-  if python3 - "$TASK_ID" "$TASKS_YAML" "$TERMINAL_STATUSES" <<'PYEOF' 2>/dev/null
-import sys, yaml, re
-task_id   = sys.argv[1]
-path      = sys.argv[2]
-terminals = set(sys.argv[3].split("|"))
-items = yaml.safe_load(open(path)) or []
-for it in (items if isinstance(items, list) else []):
+  if python3 - "$TASK_ID" "$TASKS_YAML" "$TERMINAL_STATUSES" "$SCRIPT_DIR" <<'PYEOF' 2>/dev/null
+import sys
+task_id, path, terminals_raw, scripts_dir = sys.argv[1:5]
+terminals = set(terminals_raw.split("|"))
+sys.path.insert(0, scripts_dir)
+from leadv2_tasks_yaml_common import load_tasks_items
+items = load_tasks_items(path)
+for it in items:
     if isinstance(it, dict) and str(it.get("id","")) == task_id:
         sys.exit(0 if it.get("status","") in terminals else 1)
 # Not found in tasks.yaml — check lane yamls as fallback

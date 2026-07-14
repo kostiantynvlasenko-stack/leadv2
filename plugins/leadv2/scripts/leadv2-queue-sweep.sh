@@ -64,12 +64,13 @@ if [[ -d "$CLAIMS_DIR" ]]; then
     if [[ "$DRY_RUN" -eq 0 ]]; then
       # Find which task in tasks.yaml has claim.by == _task_id (the sidecar task_id IS the claim session id)
       # We use list_status in_progress then match by claim.by field
-      _matched_id=$(python3 - "${PROJECT_ROOT}/docs/tasks.yaml" "$_task_id" <<'MATCH_PY' 2>/dev/null || true
-import sys, yaml
-tasks_file = sys.argv[1]
-claim_session = sys.argv[2]
+      _matched_id=$(python3 - "${PROJECT_ROOT}/docs/tasks.yaml" "$_task_id" "$(dirname "$0")" <<'MATCH_PY' 2>/dev/null || true
+import sys
+tasks_file, claim_session, scripts_dir = sys.argv[1:4]
+sys.path.insert(0, scripts_dir)
 try:
-    items = yaml.safe_load(open(tasks_file)) or []
+    from leadv2_tasks_yaml_common import load_tasks_items
+    items = load_tasks_items(tasks_file)
 except FileNotFoundError:
     sys.exit(0)
 for it in items:
@@ -104,7 +105,7 @@ if [[ -f "${PROJECT_ROOT}/docs/tasks.yaml" ]]; then
 import yaml, datetime, sys
 tasks_file = '${PROJECT_ROOT}/docs/tasks.yaml'
 item_id = '$_item_id'
-now = datetime.datetime.utcnow()
+now = datetime.datetime.now(datetime.timezone.utc)
 try:
     items = yaml.safe_load(open(tasks_file)) or []
 except Exception:

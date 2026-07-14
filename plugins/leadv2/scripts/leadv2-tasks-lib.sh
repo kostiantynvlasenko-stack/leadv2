@@ -45,7 +45,7 @@ TERMINAL      = {"done", "poisoned", "rejected", "failed", "archived",
                  "closed", "completed", "admin-closed"}
 
 def iso(dt): return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-def now_iso(): return iso(datetime.datetime.utcnow())
+def now_iso(): return iso(datetime.datetime.now(datetime.timezone.utc))
 
 def parse_dt(s):
     if not s: return datetime.datetime.min
@@ -67,16 +67,49 @@ def acquire_lock(shared=False):
                 print("[tasks-lib] ERROR: lock timeout", file=sys.stderr); sys.exit(1)
             time.sleep(0.1)
 
+# GATE-A2-FIX-01: docs/tasks.yaml is either a bare top-level list (native
+# tasks-lib.sh shape) or a mapping with a list-bearing key, e.g.
+# {"total_open": N, "tasks": [...]} (persona-engine's task-sync-yaml.sh
+# Truth-Surface projection). load_tasks() must tolerate both; save_tasks()
+# preserves whichever shape was read so a write-op never silently collapses
+# a generated projection's wrapper (and its sibling keys, e.g. total_open)
+# out from under its owning writer. _wrapper_key/_wrapper_extra are set by
+# load_tasks() and consumed by the very next save_tasks() in this process
+# (each _tasks_dispatch invocation is a fresh interpreter, so this is safe --
+# no cross-call state leakage).
+_wrapper_key = None
+_wrapper_extra = {}
+_LIST_KEYS = ("tasks", "items", "queues")
+
 def load_tasks():
+    global _wrapper_key, _wrapper_extra
     try:
-        with open(tasks_file) as f: return yaml.safe_load(f) or []
+        with open(tasks_file) as f: doc = yaml.safe_load(f)
     except FileNotFoundError: return []
+    if doc is None: return []
+    if isinstance(doc, list): return doc
+    if isinstance(doc, dict):
+        for key in _LIST_KEYS:
+            value = doc.get(key)
+            if isinstance(value, list):
+                _wrapper_key = key
+                _wrapper_extra = {k: v for k, v in doc.items() if k != key}
+                return value
+        return []
+    return []
 
 def save_tasks(items):
     os.makedirs(os.path.dirname(tasks_file), exist_ok=True)
     tmp = tasks_file + ".tmp"
+    if _wrapper_key:
+        payload = dict(_wrapper_extra)
+        payload[_wrapper_key] = items
+        if "total_open" in payload:
+            payload["total_open"] = len(items)
+    else:
+        payload = items
     with open(tmp, "w") as f:
-        yaml.dump(items, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        yaml.dump(payload, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     os.replace(tmp, tasks_file)
 
 def write_closed_sentinel(iid, outcome):
@@ -183,7 +216,7 @@ elif op == "claim":
             lane = str(it.get("lane","action"))
             it["status"] = "in_progress"
             it["claim"]  = {"by": session, "lease_expires": iso(
-                datetime.datetime.utcnow() + datetime.timedelta(minutes=LANE_TTL.get(lane,90)))}
+                datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=LANE_TTL.get(lane,90)))}
             save_tasks(items); sys.exit(0)
         print(f"[tasks-lib] {iid} not found", file=sys.stderr); sys.exit(1)
     finally:
@@ -211,7 +244,7 @@ elif op == "release":
     fd = acquire_lock()
     try:
         items = load_tasks()
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc)
         for it in items:
             if str(it.get("id","")) != iid: continue
             lane    = str(it.get("lane","action"))
@@ -284,7 +317,7 @@ elif op == "update":
 
 elif op == "archive":
     older_days, archive_dir = int(args[0]), args[1]
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=older_days)
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=older_days)
     fd = acquire_lock()
     try:
         items = load_tasks(); keep, by_month = [], {}

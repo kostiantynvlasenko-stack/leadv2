@@ -87,12 +87,10 @@ fi
 if [[ "${1:-}" == "--compare-tasks" ]]; then
   task_a="${2:?--compare-tasks requires <taskA>}"
   task_b="${3:?--compare-tasks requires <taskB>}"
-  python3 - "$task_a" "$task_b" "${LEADV2_PROJECT_ROOT}/docs/tasks.yaml" <<'COMPARE_PY'
+  python3 - "$task_a" "$task_b" "${LEADV2_PROJECT_ROOT}/docs/tasks.yaml" "$_COLLISION_SCRIPT_DIR" <<'COMPARE_PY'
 import sys, fnmatch, os
 
-task_a   = sys.argv[1]
-task_b   = sys.argv[2]
-tasks_yaml = sys.argv[3]
+task_a, task_b, tasks_yaml, scripts_dir = sys.argv[1:5]
 
 try:
     import yaml
@@ -100,12 +98,13 @@ except ImportError:
     print("[collision] PyYAML not available; skipping compare", file=sys.stderr)
     sys.exit(0)
 
-try:
-    with open(tasks_yaml) as f:
-        items = yaml.safe_load(f) or []
-except FileNotFoundError:
+sys.path.insert(0, scripts_dir)
+from leadv2_tasks_yaml_common import load_tasks_items
+
+if not os.path.isfile(tasks_yaml):
     print(f"[collision] tasks.yaml not found at {tasks_yaml}", file=sys.stderr)
     sys.exit(0)
+items = load_tasks_items(tasks_yaml)
 
 by_id = {str(it.get("id","")): it for it in items}
 

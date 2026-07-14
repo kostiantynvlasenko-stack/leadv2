@@ -192,7 +192,7 @@ doc["status"] = "answered"
 if not isinstance(doc.get("answer"), dict):
     doc["answer"] = {}
 doc["answer"]["selected"] = option_id
-doc["answer"]["selected_at"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+doc["answer"]["selected_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 doc["answer"]["notes"] = notes if notes else None
 
 # Atomic write

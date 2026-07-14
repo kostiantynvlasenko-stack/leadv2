@@ -11,8 +11,11 @@ Usage:
   python3 leadv2-drain-warn-check.py check_board <board_md> <key>
       Exit 0 if key found in BOARD.md content, 1 otherwise.
 """
+import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 IMPORTANCE_RE = re.compile(
     r"(?i)(CRITICAL|HIGH|TODO|FOLLOWUP|follow.?up|action.?item|decision|!!?)",
@@ -32,9 +35,8 @@ def extract_items(path: str) -> None:
 
 def check_tasks(tasks_yaml: str, key: str) -> int:
     try:
-        import yaml  # pyyaml is a project dependency
-        with open(tasks_yaml, encoding="utf-8") as fh:
-            items = yaml.safe_load(fh) or []
+        from leadv2_tasks_yaml_common import load_tasks_items  # pyyaml is a project dependency
+        items = load_tasks_items(tasks_yaml)
         key_lower = key.lower()
         for it in items:
             if key_lower in str(it.get("title", "")).lower():

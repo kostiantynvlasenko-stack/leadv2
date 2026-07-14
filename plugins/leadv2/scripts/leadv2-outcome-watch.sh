@@ -130,7 +130,7 @@ PYEOF
   due_at=$(python3 -c "
 import datetime, sys
 hours = int(sys.argv[1])
-due = datetime.datetime.utcnow() + datetime.timedelta(hours=hours)
+due = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=hours)
 print(due.strftime('%Y-%m-%dT%H:%M:%SZ'))
 " "$DELAY_HOURS")
 
@@ -154,7 +154,7 @@ if os.path.exists(watch_file):
 doc = {
     "task_id": task_id,
     "status": "pending",
-    "scheduled_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "scheduled_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "due_at": due_at,
     "delay_hours": int(delay_hours),
     "min_hours_before_check": int(min_hours) if min_hours else 0,

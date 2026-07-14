@@ -25,7 +25,7 @@ def main() -> None:
         return
 
     # Auto-populate standard fields
-    ev.setdefault("ts", datetime.datetime.utcnow().isoformat() + "Z")
+    ev.setdefault("ts", datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z")
     ev.setdefault("task_id", os.environ.get("LEADV2_TASK_ID", "unknown"))
     ev.setdefault("phase", os.environ.get("LEADV2_CURRENT_PHASE", "unknown"))
 

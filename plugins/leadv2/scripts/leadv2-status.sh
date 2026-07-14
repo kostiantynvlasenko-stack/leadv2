@@ -546,7 +546,7 @@ for report_file in smoke_files:
         if ts_str:
             try:
                 ts = datetime.datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ")
-                age_s = int((datetime.datetime.utcnow() - ts).total_seconds())
+                age_s = int((datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds())
                 age_str = f" ({age_s//60}m ago)"
             except Exception:
                 pass

@@ -1727,7 +1727,7 @@ try:
             print("[settings-refcount] hook installed (first acquirer)", file=sys.stderr)
 
         # Register session — capture birth time for PID-reuse detection (H2 fix).
-        ts    = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts    = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         birth = _get_proc_birth(int(pid))
         state["sessions"].append({"id": session_id, "pid": pid, "started": ts, "birth": birth})
         state["count"] = len(state["sessions"])

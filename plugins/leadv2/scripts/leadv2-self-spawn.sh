@@ -25,11 +25,13 @@ _budget_for_class() {
 # ── Helper: get task class from tasks.yaml ────────────────────────────────────
 _task_class() {
   local task_id="$1"
-  python3 - "$task_id" "${PROJECT_ROOT:-$(git -C "$_SCRIPT_DIR" rev-parse --show-toplevel)}/docs/tasks.yaml" 2>/dev/null <<'TASK_CLASS_PY' || printf -- 'Standard'
-import sys, yaml
-tid, tasks_file = sys.argv[1], sys.argv[2]
+  python3 - "$task_id" "${PROJECT_ROOT:-$(git -C "$_SCRIPT_DIR" rev-parse --show-toplevel)}/docs/tasks.yaml" "$_SCRIPT_DIR" 2>/dev/null <<'TASK_CLASS_PY' || printf -- 'Standard'
+import sys
+tid, tasks_file, scripts_dir = sys.argv[1:4]
+sys.path.insert(0, scripts_dir)
 try:
-    items = yaml.safe_load(open(tasks_file)) or []
+    from leadv2_tasks_yaml_common import load_tasks_items
+    items = load_tasks_items(tasks_file)
 except Exception:
     items = []
 for it in items:

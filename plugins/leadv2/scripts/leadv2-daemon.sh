@@ -135,7 +135,7 @@ create_decision_file() {
   local dec_id="${ts}-${task_id}"
   local dec_file="${DECISIONS_DIR}/${dec_id}.yaml"
   local re_ping_at; re_ping_at=$(date -u -d "+2 hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-    || python3 -c "import datetime; print((datetime.datetime.utcnow()+datetime.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+    || python3 -c "import datetime; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
 
   # Read last 3 history entries from STATE_MD
   local history_json
@@ -323,7 +323,7 @@ count = int(esc.get("re_ping_count", 0))
 count += 1
 # next ping: min(2h * 2^count, 12h)
 delay_h = min(2 * (2 ** count), 12)
-next_ping = (datetime.datetime.utcnow() + datetime.timedelta(hours=delay_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+next_ping = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=delay_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 doc["escalation"]["re_ping_count"] = count
 doc["escalation"]["re_ping_at"] = next_ping
@@ -378,7 +378,7 @@ write_status_file() {
 import datetime, sys
 try:
     s = datetime.datetime.strptime(sys.argv[1], '%Y-%m-%dT%H:%M:%SZ')
-    d = datetime.datetime.utcnow() - s
+    d = datetime.datetime.now(datetime.timezone.utc) - s
     tot = int(d.total_seconds())
     h, m = divmod(tot // 60, 60)
     print(f'{h}h{m:02d}m' if h else f'{m}m')
@@ -928,7 +928,7 @@ print('1' if age_h > 20 else '0')
       # Calculate seconds until next UTC midnight
       _midnight_sleep=$(python3 -c "
 import datetime, math
-now = datetime.datetime.utcnow()
+now = datetime.datetime.now(datetime.timezone.utc)
 midnight = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
 print(max(60, int((midnight - now).total_seconds())))
 " 2>/dev/null || echo "3600")

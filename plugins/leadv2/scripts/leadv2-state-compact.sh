@@ -154,19 +154,20 @@ fi
 _tasks_yaml="${root}/docs/tasks.yaml"
 if [[ -f "$active_yaml" ]]; then
   if [[ -f "$_tasks_yaml" ]]; then
-    python3 - "$active_yaml" "$_tasks_yaml" <<'PYEOF' 2>/dev/null || true
+    python3 - "$active_yaml" "$_tasks_yaml" "$SCRIPT_DIR" <<'PYEOF' 2>/dev/null || true
 import sys, yaml, datetime
 
-active_f   = sys.argv[1]
-tasks_file = sys.argv[2]
+active_f, tasks_file, scripts_dir = sys.argv[1:4]
+sys.path.insert(0, scripts_dir)
+from leadv2_tasks_yaml_common import load_tasks_items
 with open(active_f) as f:
     active = yaml.safe_load(f) or {}
 active_ids = {s.get('task_id','') for s in (active.get('sessions') or [])}
 
-items = yaml.safe_load(open(tasks_file)) or []
-now = datetime.datetime.utcnow()
+items = load_tasks_items(tasks_file)
+now = datetime.datetime.now(datetime.timezone.utc)
 orphans = []
-for it in (items if isinstance(items, list) else []):
+for it in items:
     if not isinstance(it, dict): continue
     if it.get('status') not in ('in_progress', 'in-progress'): continue
     if it.get('id') in active_ids: continue
@@ -199,7 +200,7 @@ with open(active_f) as f:
     active = yaml.safe_load(f) or {}
 active_ids = {s.get('task_id','') for s in (active.get('sessions') or [])}
 
-now = datetime.datetime.utcnow()
+now = datetime.datetime.now(datetime.timezone.utc)
 orphans = []
 for lane in ('action', 'recovery', 'intelligence'):
     lf = os.path.join(queue_dir, f'{lane}.yaml')
