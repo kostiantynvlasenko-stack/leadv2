@@ -156,6 +156,17 @@
     ]
    },
    {
+    "matcher": "AskUserQuestion",
+    "hooks": [
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-async-question-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Async-question routing guard..."
+     }
+    ]
+   },
+   {
     "matcher": "Read",
     "hooks": [
      {
