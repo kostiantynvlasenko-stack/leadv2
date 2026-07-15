@@ -7,7 +7,15 @@
 #
 # Usage:
 #   leadv2-fanout.sh [--n N] [--filter STR] [--tasks ID1,ID2,ID3]
-#                     [--dry-run] [--headless]
+#                     [--dry-run] [--windowed] [--model NAME] [--force]
+#
+# Background (headless) is the DEFAULT launch mode (FIX-FANOUT-LAUNCH-V2-01).
+# --headless is kept as a no-op back-compat flag; use --windowed to opt into
+# the tmux/Terminal windowed path instead. Every child launch passes
+# `claude --model NAME ...` (default NAME=sonnet) — that CLI flag is the only
+# thing that changes a child session's own model; LEADV2_MAIN_MODEL is also
+# exported for the plugin's subagent routing but does NOT change the child's
+# session model by itself.
 #
 # Task LEAD-FANOUT-01. See docs/handoff/LEAD-ANCHOR-01/mission-fanout.md.
 #
@@ -45,8 +53,9 @@ N=3
 FILTER=""
 EXPLICIT_TASKS=""
 DRY_RUN=false
-HEADLESS=false
+HEADLESS=true       # FIX-FANOUT-LAUNCH-V2-01 bug 2: background is now the default
 FORCE=false
+MODEL="sonnet"      # FIX-FANOUT-LAUNCH-V2-01 bug 1: default model for fanout children
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,10 +63,19 @@ while [[ $# -gt 0 ]]; do
     --filter)   FILTER="$2";         shift 2 ;;
     --tasks)    EXPLICIT_TASKS="$2"; shift 2 ;;
     --dry-run)  DRY_RUN=true;        shift   ;;
-    --headless) HEADLESS=true;       shift   ;;
+    --headless) HEADLESS=true;       shift   ;;  # back-compat no-op: background is already default
+    --windowed) HEADLESS=false;      shift   ;;  # opt-in to tmux/Terminal windowed launch
+    --model)    MODEL="$2";          shift 2 ;;
     --force)    FORCE=true;          shift   ;;
     -h|--help)
-      printf -- 'Usage: leadv2-fanout.sh [--n N] [--filter STR] [--tasks ID1,ID2] [--dry-run] [--headless] [--force]\n'
+      printf -- 'Usage: leadv2-fanout.sh [--n N] [--filter STR] [--tasks ID1,ID2] [--dry-run] [--windowed] [--model NAME] [--force]\n'
+      printf -- '  --windowed: launch each child in its own tmux window / Terminal tab instead\n'
+      printf -- '              of headless background (background is the default).\n'
+      printf -- '  --model NAME: model each child session runs on (default: sonnet). Passed as\n'
+      printf -- '                `claude --model NAME ...` — the CLI flag is the only thing that\n'
+      printf -- '                actually changes a child session'"'"'s model; LEADV2_MAIN_MODEL is\n'
+      printf -- '                exported too for the plugin'"'"'s subagent routing but does NOT\n'
+      printf -- '                change the child'"'"'s own session model.\n'
       printf -- '  --force: bypass active.yaml meta caps (hard_limit/standard_max/light_max/\n'
       printf -- '           heavy_strategic_solo). Never bypasses the same-task-already-active\n'
       printf -- '           check — that is the worktree-collision safety net, not a policy cap.\n'
@@ -444,20 +462,32 @@ launch_headless() {
   # fall back to a plain backgrounded nohup + disown, which still detaches
   # from the controlling terminal and keeps stdin/stdout/stderr identical on
   # both branches.
-  # FIX-FANOUT-MODEL-ROUTING-01: fanout children run their lead on Sonnet, not
-  # the repo's normal /leadv2 default (Opus) — the supervising (non-fanout)
-  # lead keeps Opus judgment; children are cheaper, parallel workers. This
-  # export is scoped to the launched subshell/process only — it never touches
-  # the parent fanout invoker's environment, so a normal (non-fanout) /leadv2
-  # session started separately is unaffected and still defaults to Opus.
+  # FIX-FANOUT-MODEL-ROUTING-01 / FIX-FANOUT-LAUNCH-V2-01 bug 1: fanout
+  # children run their lead on $MODEL (default sonnet), not the repo's normal
+  # /leadv2 default (Opus) — the supervising (non-fanout) lead keeps Opus
+  # judgment; children are cheaper, parallel workers. LEADV2_MAIN_MODEL alone
+  # does NOT change the child claude session's own model — only the
+  # `--model` CLI flag does that; LEADV2_MAIN_MODEL is exported in addition
+  # because the plugin reads it for subagent routing inside the session. Both
+  # the export and the CLI flag are scoped to the launched subshell/process
+  # only — they never touch the parent fanout invoker's environment, so a
+  # normal (non-fanout) /leadv2 session started separately is unaffected and
+  # still defaults to Opus.
+  # FIX-FANOUT-LAUNCH-V2-01 bug 2: `-p` is a single headless turn that exits
+  # once it returns — without LEADV2_DAEMON=1 the child dies after one turn
+  # instead of driving the full /leadv2 pipeline to completion.
+  # LEADV2_DAEMON=1 pairs with the pipeline's own /goal self-drive loop
+  # (read inside the running session, same convention already used by the
+  # tmux windowed path below) to keep re-invoking itself until the task is
+  # actually done, not just after the first response.
   if command -v setsid >/dev/null 2>&1; then
-    ( cd "$PROJECT_ROOT" && export LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=sonnet && exec setsid nohup "$CLAUDE_BIN" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
+    ( cd "$PROJECT_ROOT" && export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL="$MODEL" && exec setsid nohup "$CLAUDE_BIN" --model "$MODEL" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
   else
-    ( cd "$PROJECT_ROOT" && export LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=sonnet && exec nohup "$CLAUDE_BIN" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
+    ( cd "$PROJECT_ROOT" && export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL="$MODEL" && exec nohup "$CLAUDE_BIN" --model "$MODEL" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
     disown
   fi
   pid=$!
-  log "headless launch: task=${tid} pid=${pid} log=${logf}"
+  log "headless launch: task=${tid} pid=${pid} model=${MODEL} log=${logf}"
 
   _fanout_register_session "$tid" "$cls" "$pid" "leadv2: ${tid}" "true"
 }
@@ -492,16 +522,26 @@ launch_windowed() {
   if [[ -n "$tmux_target" ]]; then
     local window_name="leadv2-${tid}"
     local tmux_cmd
-    # FIX-FANOUT-MODEL-ROUTING-01: fanout children lead on Sonnet (see
-    # launch_headless comment above) — scoped to this tmux window's shell only.
+    # FIX-FANOUT-MODEL-ROUTING-01 / FIX-FANOUT-LAUNCH-V2-01 bug 1: fanout
+    # children lead on $MODEL (see launch_headless comment above), passed via
+    # --model — scoped to this tmux window's shell only.
     printf -v tmux_cmd \
-      'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=sonnet LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q; cd %q && exec %q %q' \
-      "$PROJECT_ROOT" "$PROJECT_ROOT" "$tid" "$PROJECT_ROOT" "$CLAUDE_BIN" "/leadv2 ${tid}"
+      'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=%q LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q; cd %q && exec %q --model %q %q' \
+      "$MODEL" "$PROJECT_ROOT" "$PROJECT_ROOT" "$tid" "$PROJECT_ROOT" "$CLAUDE_BIN" "$MODEL" "/leadv2 ${tid}"
     # Do NOT pipe claude stdout (`| tee`) — breaks the interactive TTY and
     # hangs claude. Logging, if ever needed, goes through `tmux pipe-pane`.
-    tmux new-window -t "$tmux_target" -n "$window_name" -c "$PROJECT_ROOT"
-    tmux send-keys -t "${tmux_target}:${window_name}" "$tmux_cmd" C-m
-    log "tmux launch: task=${tid} session=${tmux_target} window=${window_name}"
+    # FIX-FANOUT-LAUNCH-V2-01 bug 4: never target/hardcode a window index.
+    # `-t "${tmux_target}:"` (trailing colon, session only, no index) lets
+    # tmux assign the next free index itself, and `-P -F '#{window_id}'`
+    # captures the actual unique window id tmux created for THIS window so
+    # send-keys always targets a window that exists — a name-based target
+    # (`session:window_name`) can silently diverge if tmux disambiguates a
+    # duplicate window name, which is what produced "create window failed:
+    # index 1 in use" followed by "can't find window".
+    local window_id
+    window_id="$(tmux new-window -P -F '#{window_id}' -t "${tmux_target}:" -n "$window_name" -c "$PROJECT_ROOT")"
+    tmux send-keys -t "$window_id" "$tmux_cmd" C-m
+    log "tmux launch: task=${tid} session=${tmux_target} window=${window_name} window_id=${window_id} model=${MODEL}"
 
     _fanout_register_session "$tid" "$cls" "null" "$title" "false"
     return 0
@@ -517,9 +557,15 @@ launch_windowed() {
   fi
 
   local cmd
-  # FIX-FANOUT-MODEL-ROUTING-01: fanout children lead on Sonnet (see
-  # launch_headless comment above) — scoped to this Terminal/iTerm2 shell only.
-  printf -v cmd 'export LEADV2_MAIN_MODEL=sonnet && cd %q && %q %q' "$PROJECT_ROOT" "$CLAUDE_BIN" "/leadv2 ${tid}"
+  # FIX-FANOUT-LAUNCH-V2-01 bug 3: this fallback used to export ONLY
+  # LEADV2_MAIN_MODEL — children stalled on interactive AskUserQuestion
+  # (LEADV2_ASYNC_QUESTIONS missing) and silently ran on Opus (--model
+  # missing, LEADV2_MAIN_MODEL alone does not change the session model).
+  # Export the SAME full set as the tmux path above and pass --model, scoped
+  # to this Terminal/iTerm2 shell only.
+  printf -v cmd \
+    'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=%q LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q && cd %q && %q --model %q %q' \
+    "$MODEL" "$PROJECT_ROOT" "$PROJECT_ROOT" "$tid" "$PROJECT_ROOT" "$CLAUDE_BIN" "$MODEL" "/leadv2 ${tid}"
   # Escape for the AppleScript string-literal context (Bug 2,
   # FIX-FANOUT-MACOS-LAUNCH-01): shell %q backslash-escaping is not valid
   # inside an AppleScript "..." literal and previously errored with -2741.
