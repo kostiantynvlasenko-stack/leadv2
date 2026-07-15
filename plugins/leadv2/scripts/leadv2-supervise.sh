@@ -38,6 +38,52 @@ PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(cd 
 ACTIVE_YAML="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" active.yaml)"
 HANDOFF_DIR="${PROJECT_ROOT}/docs/handoff"
 SNAPSHOT="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" .supervise-last.json)"
+SUPERVISE_SENTINEL="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" .supervise-active)"
+
+# SUPERVISE-GUARD-01: (re)write the supervise-mode sentinel -- {"pid","started_at"}
+# -- consumed by hooks/leadv2-supervise-fanout-guard.sh (PreToolUse:Agent) to block
+# in-session WORKER subagent spawns while supervise mode is active; the lead must
+# dispatch new work via scripts/leadv2-fanout.sh instead. Idempotent: a live
+# sentinel keeps its original started_at; a missing/dead one is (re)written with
+# the durable claude-process pid (see leadv2-active-registry.sh:_lv2_durable_pid).
+# Cleared on Stop by hooks/leadv2-supervise-sentinel-cleanup.sh, and self-heals
+# (deleted) by the guard itself the next time it sees a dead pid.
+if [[ -f "${SCRIPT_DIR}/leadv2-active-registry.sh" ]]; then
+  # shellcheck source=leadv2-active-registry.sh
+  source "${SCRIPT_DIR}/leadv2-active-registry.sh"
+  _SUP_PID="$(_lv2_durable_pid 2>/dev/null || echo "$PPID")"
+  _SUP_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  python3 - "$SUPERVISE_SENTINEL" "$_SUP_PID" "$_SUP_TS" <<'PYSENTINEL' 2>/dev/null || true
+import sys, os, json, tempfile
+
+path, pid_str, ts = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def pid_alive(pid_val):
+    try:
+        os.kill(int(pid_val), 0)
+        return True
+    except (TypeError, ValueError, ProcessLookupError, PermissionError):
+        return False
+
+existing_started_at = None
+if os.path.isfile(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh) or {}
+        if pid_alive(d.get("pid")):
+            existing_started_at = d.get("started_at")
+    except Exception:
+        pass
+
+out = {"pid": int(pid_str), "started_at": existing_started_at or ts}
+dir_ = os.path.dirname(path)
+os.makedirs(dir_, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    json.dump(out, fh, indent=2)
+os.replace(tmp, path)
+PYSENTINEL
+fi
 
 JSON_MODE=0
 SINCE=""

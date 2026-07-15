@@ -243,6 +243,12 @@
       "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-workflow-bypass-guard.sh\"",
       "timeout": 5,
       "statusMessage": "Workflow-first guard..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-supervise-fanout-guard.sh\"",
+      "timeout": 5,
+      "statusMessage": "Supervise-mode fanout guard (coordinator-only)..."
      }
     ]
    },
@@ -505,6 +511,11 @@
       "timeout": 5,
       "continueOnBlock": true,
       "statusMessage": "BG-backstop: checking unwatched agents..."
+     },
+     {
+      "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-supervise-sentinel-cleanup.sh\"",
+      "timeout": 5
      }
     ]
    }
