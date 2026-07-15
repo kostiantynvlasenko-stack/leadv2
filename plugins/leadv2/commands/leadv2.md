@@ -41,7 +41,9 @@ synthesis/judgment (Heavy design, diverge judge, safety verdicts) — never hard
 
 1. `bash ${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-state-compact.sh` -- emits HEAD, active sessions, recent history (last 10), queue freshness, top-5 unclaimed tasks. ~30 lines total. Active session detected -> read `STATE.md limit=30` to resume.
 
-**Greet via AskUserQuestion tool** (direct tool call): top-5 unclaimed tasks, #1 marked `* Recommended`, always include "Other". After pick -> one line: `Taking TASK-XXX -> Gate 1 in ~5s.` Then auto-proceed. No chat until Phase 8 Close.
+**Explicit task id -> claim, never greet.** If invoked as `/leadv2 <task-id>` (bare token matching an existing `docs/leadv2/tasks.yaml` id or an existing `docs/handoff/<id>/`), OR with `LEADV2_ASYNC_QUESTIONS=1` set, this is a **fanned-out child session** (spawned by `leadv2-fanout.sh`/`leadv2-supervise.sh`) -- claim that task_id immediately via Phase 0 and proceed straight to CLASSIFY. **Do NOT render the greeting AskUserQuestion picker** in this path -- a picker left waiting on a headless child is a silent multi-hour stall (bug: `f83037a57907` sat 2.5h on it). The picker below is ONLY for a bare `/leadv2` / `/leadv2 next` with no task id.
+
+**Greet via AskUserQuestion tool** (direct tool call, bare `/leadv2` only): top-5 unclaimed tasks, #1 marked `* Recommended`, always include "Other". After pick -> one line: `Taking TASK-XXX -> Gate 1 in ~5s.` Then auto-proceed. No chat until Phase 8 Close.
 
 ---
 

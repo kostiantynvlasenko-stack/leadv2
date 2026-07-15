@@ -50,15 +50,20 @@ if [[ -z "${LEADV2_TASK_ID:-}" ]]; then
 fi
 [[ -n "${LEADV2_TASK_ID:-}" ]] || exit 0
 
-# Phase-aware advisory word budget — matches prose-guard hard caps
+# LEAD-ANCHOR-01 (a): supervisor-mode exemption — never nag a session watching
+# fanned-out children.
+[[ "${LEADV2_SUPERVISOR_MODE:-0}" == "1" ]] && exit 0
+
+# Phase-aware advisory word budget — matches prose-guard hard caps (raised
+# 80->120: status/questions must actually reach the founder)
 case "${LEADV2_PHASE:-}" in
-  intake|classify) WORD_LIMIT=80  ;;
+  intake|classify) WORD_LIMIT=120 ;;
   plan)            WORD_LIMIT=150 ;;
-  build)           WORD_LIMIT=80  ;;
-  review)          WORD_LIMIT=100 ;;
-  deploy|verify)   WORD_LIMIT=80  ;;
+  build)           WORD_LIMIT=120 ;;
+  review)          WORD_LIMIT=120 ;;
+  deploy|verify)   WORD_LIMIT=120 ;;
   close)           WORD_LIMIT=120 ;;
-  *)               WORD_LIMIT=80  ;;
+  *)               WORD_LIMIT=120 ;;
 esac
 
 INPUT="$(cat 2>/dev/null || true)"
@@ -111,6 +116,12 @@ TEXT_BODY="$(printf '%s' "$PARSE_OUT" | awk '/^TEXT_START$/{f=1; next} f' | head
 WORD_COUNT=$(printf '%s' "$TEXT_BODY" | wc -w | tr -d ' ')
 
 [[ "$WORD_COUNT" -le "$WORD_LIMIT" ]] && exit 0
+
+# LEAD-ANCHOR-01 (b)/(c): question-forward / status-request marker — never nag
+FIRST_TOKEN="$(printf '%s' "$TEXT_BODY" | sed -e 's/^[[:space:]]*//' | tr '[:lower:]' '[:upper:]' | head -c 20)"
+case "$FIRST_TOKEN" in
+  '[STATUS]'*|'[QUESTION-FWD]'*) exit 0 ;;
+esac
 
 # Advisory warning only — log violation and inject a reminder via additionalContext.
 # Never emit continue:false; never suppress the session.

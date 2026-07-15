@@ -11,6 +11,10 @@ trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 # Only when /leadv2 active (skip routine chat)
 [[ "${LEADV2_LEAD_GUARD:-0}" == "1" ]] || exit 0
 
+# LEAD-ANCHOR-01 (a): explicit supervisor-mode env marker — set by `/leadv2 supervise`
+# and by the fan-out launcher. Never gag a session that is watching children.
+[[ "${LEADV2_SUPERVISOR_MODE:-0}" == "1" ]] && exit 0
+
 # Resolve leadv2_dir from state-paths.yaml (fallback: docs/leadv2)
 _lv2_sp_root="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 _lv2_sp_yaml="${_lv2_sp_root}/.claude/leadv2-overrides/state-paths.yaml"
@@ -26,30 +30,41 @@ if [[ -n "$ACTIVE_YAML" ]]; then
   ACTIVE_OUT=$(python3 -c "
 import yaml, sys, os
 d = yaml.safe_load(open(sys.argv[1])) or {}
+live = []
 for sess in (d.get('sessions') or []):
     pid = sess.get('pid')
     if not pid: continue
     try:
         os.kill(int(pid), 0)
-        print(sess.get('phase','')); break
+        live.append(sess.get('phase',''))
     except (OSError, ValueError):
         pass
+if live:
+    print(live[0])
+    print(f'SESSIONS={len(live)}')
 " "$ACTIVE_YAML" 2>/dev/null || true)
   [[ -n "$ACTIVE_OUT" ]] || exit 0
-  LEADV2_PHASE="$ACTIVE_OUT"
+  LEADV2_PHASE="$(printf '%s\n' "$ACTIVE_OUT" | head -1)"
+  LIVE_SESSION_COUNT="$(printf '%s\n' "$ACTIVE_OUT" | sed -n '2p' | sed -E 's/^SESSIONS=//')"
 else
   exit 0
 fi
 
-# Pulse-mode phase caps (tight)
+# LEAD-ANCHOR-01 (a): supervisor-mode exemption — >=1 OTHER live-pid session
+# registered in active.yaml besides this one means we are fanned-out
+# (`/leadv2 supervise` or `/leadv2 fanout`). Never gag that session.
+[[ "${LIVE_SESSION_COUNT:-0}" -ge 2 ]] && exit 0
+
+# Pulse-mode phase caps — raised 80->120 (founder decision LEAD-ANCHOR-01:
+# status/questions must actually reach the founder, not just be terse)
 case "${LEADV2_PHASE:-}" in
-  intake|classify) PHASE_CAP=80  ;;
+  intake|classify) PHASE_CAP=120 ;;
   plan)            PHASE_CAP=150 ;;
-  build)           PHASE_CAP=80  ;;
-  review)          PHASE_CAP=100 ;;
-  deploy|verify)   PHASE_CAP=80  ;;
+  build)           PHASE_CAP=120 ;;
+  review)          PHASE_CAP=120 ;;
+  deploy|verify)   PHASE_CAP=120 ;;
   close)           PHASE_CAP=120 ;;
-  *)               PHASE_CAP=80  ;;
+  *)               PHASE_CAP=120 ;;
 esac
 
 INPUT="$(cat 2>/dev/null || true)"
@@ -112,6 +127,18 @@ HAS_TOOL="$(printf '%s' "$PARSE_OUT" | grep -E '^TOOL=' | head -1 | sed 's/TOOL=
 TEXT_BODY="$(printf '%s' "$PARSE_OUT" | awk '/^TEXT_START$/{f=1; next} f')"
 WORD_COUNT=$(printf '%s' "$TEXT_BODY" | wc -w | tr -d ' ')
 
+# LEAD-ANCHOR-01 (b)/(c): explicit marker exemption — forwarding a child
+# session's question, or answering a direct founder status request. Lead
+# prefixes the turn with one of these tokens (docs/leadv2-guide.md); this
+# hook never blocks a marked turn regardless of length.
+FIRST_TOKEN="$(printf '%s' "$TEXT_BODY" | sed -e 's/^[[:space:]]*//' | tr '[:lower:]' '[:upper:]' | head -c 20)"
+case "$FIRST_TOKEN" in
+  '[STATUS]'*|'[QUESTION-FWD]'*)
+    rm -f "$HOME/.claude/leadv2-prose-retry-${SESSION_ID}.txt" 2>/dev/null || true
+    exit 0
+    ;;
+esac
+
 # Apply 60% cap when tool_use present in turn
 THRESHOLD="$PHASE_CAP"
 if [[ "${HAS_TOOL:-0}" == "1" ]]; then
@@ -151,8 +178,11 @@ wc, th, cap, phase = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 print(json.dumps({
     'continue': False,
     'stopReason': (
-        f'Pulse only: emit a ≤80-word pulse line; move detail to a deliverable file. '
-        f'No reasoning narration. '
+        f'Pulse: use the space available (~{cap} words) for a clear status update — '
+        f'the goal is that it reaches the founder, not that it is maximally terse. '
+        f'Move deep detail/diffs to a deliverable file; no reasoning narration. '
+        f'Prefix with [STATUS] or [QUESTION-FWD] if forwarding a child question or '
+        f'answering a direct status request — those are never capped. '
         f'({wc} words, limit {th} [{phase} cap={cap}])'
     )
 }))

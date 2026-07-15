@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pulse hook gagged the supervisor (LEAD-ANCHOR-01)** — `leadv2-lead-prose-guard.sh`
+  (Stop hook) hard-blocked status reports and child-question forwards with `continue:false`
+  because it had no notion of supervisor mode. Fixed: (a) skip entirely when
+  `>=2` live-pid sessions are registered in `active.yaml` (fan-out/supervise) or
+  `LEADV2_SUPERVISOR_MODE=1`; (b)/(c) skip when the turn is prefixed `[STATUS]` or
+  `[QUESTION-FWD]`; base caps raised 80->120 words everywhere (founder must actually
+  receive statuses, not just terse ones). Same exemptions mirrored into the advisory
+  `leadv2-pulse-enforcer.sh` (UserPromptSubmit) to stop noisy false-positive warnings.
+  Lesson: any hard word-cap enforcement on the lead needs an explicit supervisor/forward
+  escape hatch from day one — silence protocols and human-in-the-loop reporting are in
+  direct tension and the silence protocol will always win by default.
+- **Fanned-out child session showed the greeting picker instead of claiming its task
+  (LEAD-ANCHOR-01)** — `/leadv2 <task-id>` (used verbatim by `leadv2-fanout.sh` headless
+  launch: `claude -p "/leadv2 ${tid}"`) fell through to the same `AskUserQuestion` greeting
+  picker as a bare `/leadv2`, so a headless child with no human to answer it sat stalled
+  indefinitely (`f83037a57907`, 2.5h). Fixed: `commands/leadv2.md` session-startup section
+  now states explicitly that an explicit task-id argument (or `LEADV2_ASYNC_QUESTIONS=1`)
+  must claim Phase 0 immediately and skip the picker; `leadv2-fanout.sh`'s headless launch
+  now also sets `LEADV2_ASYNC_QUESTIONS=1` so the behavior is structural, not just prompt-level.
+  Lesson: any invocation path a human never sees (headless/background) must be structurally
+  exempted from every interactive-choice affordance, not just "well-behaved by convention."
+
 - **Route-bandit never learned (PLUGIN-MONITOR-20260614)** — `leadv2-phase8-close.sh`
   spawned the bandit `update` with a trailing `&` that raced ahead of the
   `flock`-protected scorecard append, so `update` found no row and skipped every
