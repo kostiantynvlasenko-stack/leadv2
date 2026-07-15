@@ -137,9 +137,19 @@ if [[ "$DRY_RUN" == "true" ]]; then
   exit 0
 fi
 
-setsid nohup "${_spawn_cmd[@]}" \
-  </dev/null \
-  >>"$SPAWN_LOG" 2>&1 &
+# macOS has no setsid (FIX-FANOUT-MACOS-LAUNCH-01): fall back to a plain
+# backgrounded nohup + disown, which still detaches from the controlling
+# terminal; stdin/stdout/stderr redirection is identical on both branches.
+if command -v setsid >/dev/null 2>&1; then
+  setsid nohup "${_spawn_cmd[@]}" \
+    </dev/null \
+    >>"$SPAWN_LOG" 2>&1 &
+else
+  nohup "${_spawn_cmd[@]}" \
+    </dev/null \
+    >>"$SPAWN_LOG" 2>&1 &
+  disown
+fi
 
 CHILD_PID=$!
 

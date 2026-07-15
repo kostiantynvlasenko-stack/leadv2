@@ -435,21 +435,72 @@ launch_headless() {
   local task_dir="${PROJECT_ROOT}/docs/handoff/${tid}"
   mkdir -p "$task_dir"
   local logf="${task_dir}/fanout.log"
+  local pid
 
-  # exec inside the subshell so $! (of the outer &) IS the setsid pid, not an
-  # extra unexeced subshell layer — matches leadv2-session-spawner.sh's own
-  # setsid-nohup convention as closely as bash allows with an explicit cd.
-  ( cd "$PROJECT_ROOT" && exec setsid nohup "$CLAUDE_BIN" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
-  local pid=$!
+  # exec inside the subshell so $! (of the outer &) IS the detached-process
+  # pid, not an extra unexeced subshell layer — matches
+  # leadv2-session-spawner.sh's own setsid-nohup convention as closely as bash
+  # allows with an explicit cd. macOS has no setsid (FIX-FANOUT-MACOS-LAUNCH-01):
+  # fall back to a plain backgrounded nohup + disown, which still detaches
+  # from the controlling terminal and keeps stdin/stdout/stderr identical on
+  # both branches.
+  if command -v setsid >/dev/null 2>&1; then
+    ( cd "$PROJECT_ROOT" && export LEADV2_ASYNC_QUESTIONS=1 && exec setsid nohup "$CLAUDE_BIN" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
+  else
+    ( cd "$PROJECT_ROOT" && export LEADV2_ASYNC_QUESTIONS=1 && exec nohup "$CLAUDE_BIN" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
+    disown
+  fi
+  pid=$!
   log "headless launch: task=${tid} pid=${pid} log=${logf}"
 
   _fanout_register_session "$tid" "$cls" "$pid" "leadv2: ${tid}" "true"
 }
 
+# _applescript_escape — escape a string for interpolation inside an
+# AppleScript double-quoted string literal. Order matters: backslashes first,
+# then quotes, else the quote-escaping backslashes get double-escaped.
+_applescript_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
 launch_windowed() {
   local tid="$1" cls="$2"
+  local title="leadv2: ${tid}"
+
+  # Preferred path (FIX-FANOUT-MACOS-LAUNCH-01): tmux is tty-preserving and
+  # has no AppleScript-string-escaping hazard. Use the current tmux session
+  # if we're already inside one, else the dedicated "leadv2" session if it
+  # exists. Only fall back to osascript when neither is available.
+  local tmux_target=""
+  if command -v tmux >/dev/null 2>&1; then
+    if [[ -n "${TMUX:-}" ]]; then
+      tmux_target="$(tmux display-message -p '#S' 2>/dev/null || true)"
+    elif tmux has-session -t leadv2 2>/dev/null; then
+      tmux_target="leadv2"
+    fi
+  fi
+
+  if [[ -n "$tmux_target" ]]; then
+    local window_name="leadv2-${tid}"
+    local tmux_cmd
+    printf -v tmux_cmd \
+      'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q; cd %q && exec %q %q' \
+      "$PROJECT_ROOT" "$PROJECT_ROOT" "$tid" "$PROJECT_ROOT" "$CLAUDE_BIN" "/leadv2 ${tid}"
+    # Do NOT pipe claude stdout (`| tee`) — breaks the interactive TTY and
+    # hangs claude. Logging, if ever needed, goes through `tmux pipe-pane`.
+    tmux new-window -t "$tmux_target" -n "$window_name" -c "$PROJECT_ROOT"
+    tmux send-keys -t "${tmux_target}:${window_name}" "$tmux_cmd" C-m
+    log "tmux launch: task=${tid} session=${tmux_target} window=${window_name}"
+
+    _fanout_register_session "$tid" "$cls" "null" "$title" "false"
+    return 0
+  fi
+
   if [[ "$(uname -s)" != "Darwin" ]]; then
-    log_error "windowed launch requires macOS (osascript). Use --headless on this platform."
+    log_error "windowed launch requires macOS (osascript) or a running tmux session. Use --headless on this platform."
     exit 1
   fi
   if ! command -v osascript >/dev/null 2>&1; then
@@ -457,25 +508,30 @@ launch_windowed() {
     exit 1
   fi
 
-  local title="leadv2: ${tid}"
   local cmd
   printf -v cmd 'cd %q && %q %q' "$PROJECT_ROOT" "$CLAUDE_BIN" "/leadv2 ${tid}"
+  # Escape for the AppleScript string-literal context (Bug 2,
+  # FIX-FANOUT-MACOS-LAUNCH-01): shell %q backslash-escaping is not valid
+  # inside an AppleScript "..." literal and previously errored with -2741.
+  local as_cmd as_title
+  as_cmd="$(_applescript_escape "$cmd")"
+  as_title="$(_applescript_escape "$title")"
 
   if pgrep -x iTerm2 >/dev/null 2>&1; then
     osascript <<OSA
 tell application "iTerm2"
   set newWindow to (create window with default profile)
   tell current session of newWindow
-    set name to "${title}"
-    write text "${cmd}"
+    set name to "${as_title}"
+    write text "${as_cmd}"
   end tell
 end tell
 OSA
   else
     osascript <<OSA
 tell application "Terminal"
-  set newTab to do script "${cmd}"
-  set custom title of front window to "${title}"
+  set newTab to do script "${as_cmd}"
+  set custom title of front window to "${as_title}"
   activate
 end tell
 OSA
