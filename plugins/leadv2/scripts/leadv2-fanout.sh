@@ -56,6 +56,13 @@ DRY_RUN=false
 HEADLESS=true       # FIX-FANOUT-LAUNCH-V2-01 bug 2: background is now the default
 FORCE=false
 MODEL="sonnet"      # FIX-FANOUT-LAUNCH-V2-01 bug 1: default model for fanout children
+# LEADV2-FANOUT-MAXIMIZE-CHEAP-MODELS-01: default-on directive telling child
+# sessions to maximize Codex (plan/review/fitting-dev) + GLM (bulk/background)
+# routing and minimize Claude-Max spend. Consumed by
+# hooks/leadv2-codex-first-nudge.sh inside the child session — this script
+# only exports it into the child env. Kill switch: set
+# LEADV2_MAXIMIZE_CHEAP_MODELS=0 in the parent's env before fanning out.
+MAXIMIZE_CHEAP_MODELS="${LEADV2_MAXIMIZE_CHEAP_MODELS:-1}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -481,9 +488,9 @@ launch_headless() {
   # tmux windowed path below) to keep re-invoking itself until the task is
   # actually done, not just after the first response.
   if command -v setsid >/dev/null 2>&1; then
-    ( cd "$PROJECT_ROOT" && export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL="$MODEL" && exec setsid nohup "$CLAUDE_BIN" --model "$MODEL" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
+    ( cd "$PROJECT_ROOT" && export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL="$MODEL" LEADV2_MAXIMIZE_CHEAP_MODELS="$MAXIMIZE_CHEAP_MODELS" && exec setsid nohup "$CLAUDE_BIN" --model "$MODEL" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
   else
-    ( cd "$PROJECT_ROOT" && export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL="$MODEL" && exec nohup "$CLAUDE_BIN" --model "$MODEL" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
+    ( cd "$PROJECT_ROOT" && export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL="$MODEL" LEADV2_MAXIMIZE_CHEAP_MODELS="$MAXIMIZE_CHEAP_MODELS" && exec nohup "$CLAUDE_BIN" --model "$MODEL" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
     disown
   fi
   pid=$!
@@ -526,8 +533,8 @@ launch_windowed() {
     # children lead on $MODEL (see launch_headless comment above), passed via
     # --model — scoped to this tmux window's shell only.
     printf -v tmux_cmd \
-      'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=%q LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q; cd %q && exec %q --model %q %q' \
-      "$MODEL" "$PROJECT_ROOT" "$PROJECT_ROOT" "$tid" "$PROJECT_ROOT" "$CLAUDE_BIN" "$MODEL" "/leadv2 ${tid}"
+      'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=%q LEADV2_MAXIMIZE_CHEAP_MODELS=%q LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q; cd %q && exec %q --model %q %q' \
+      "$MODEL" "$MAXIMIZE_CHEAP_MODELS" "$PROJECT_ROOT" "$PROJECT_ROOT" "$tid" "$PROJECT_ROOT" "$CLAUDE_BIN" "$MODEL" "/leadv2 ${tid}"
     # Do NOT pipe claude stdout (`| tee`) — breaks the interactive TTY and
     # hangs claude. Logging, if ever needed, goes through `tmux pipe-pane`.
     # FIX-FANOUT-LAUNCH-V2-01 bug 4: never target/hardcode a window index.
@@ -564,8 +571,8 @@ launch_windowed() {
   # Export the SAME full set as the tmux path above and pass --model, scoped
   # to this Terminal/iTerm2 shell only.
   printf -v cmd \
-    'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=%q LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q && cd %q && %q --model %q %q' \
-    "$MODEL" "$PROJECT_ROOT" "$PROJECT_ROOT" "$tid" "$PROJECT_ROOT" "$CLAUDE_BIN" "$MODEL" "/leadv2 ${tid}"
+    'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=%q LEADV2_MAXIMIZE_CHEAP_MODELS=%q LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q && cd %q && %q --model %q %q' \
+    "$MODEL" "$MAXIMIZE_CHEAP_MODELS" "$PROJECT_ROOT" "$PROJECT_ROOT" "$tid" "$PROJECT_ROOT" "$CLAUDE_BIN" "$MODEL" "/leadv2 ${tid}"
   # Escape for the AppleScript string-literal context (Bug 2,
   # FIX-FANOUT-MACOS-LAUNCH-01): shell %q backslash-escaping is not valid
   # inside an AppleScript "..." literal and previously errored with -2741.
