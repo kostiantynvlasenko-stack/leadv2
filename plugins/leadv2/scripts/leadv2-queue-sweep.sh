@@ -105,7 +105,7 @@ if [[ -f "${PROJECT_ROOT}/docs/tasks.yaml" ]]; then
 import yaml, datetime, sys
 tasks_file = '${PROJECT_ROOT}/docs/tasks.yaml'
 item_id = '$_item_id'
-now = datetime.datetime.now(datetime.timezone.utc)
+now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 try:
     items = yaml.safe_load(open(tasks_file)) or []
 except Exception:

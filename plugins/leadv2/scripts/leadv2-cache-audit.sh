@@ -150,7 +150,7 @@ if not started_at and os.path.isfile(state_md):
 
 if not closed_at:
     import datetime
-    closed_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    closed_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 task_window = {"start": started_at, "end": closed_at}
 

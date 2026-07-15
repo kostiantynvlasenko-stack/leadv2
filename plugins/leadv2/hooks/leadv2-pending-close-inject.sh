@@ -6,6 +6,7 @@
 # Deleted by: leadv2-phase8-close.sh on successful close.
 # Contract: non-blocking, exit 0 always. stdout = JSON {additionalContext: "..."}.
 set -euo pipefail
+export PYTHONWARNINGS="ignore::DeprecationWarning"  # LEAD-ANCHOR-01: never let py warnings hit stderr as a hook error
 trap 'exit 0' ERR
 
 INPUT="$(cat 2>/dev/null || true)"

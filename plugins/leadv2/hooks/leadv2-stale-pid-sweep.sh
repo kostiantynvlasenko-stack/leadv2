@@ -2,6 +2,7 @@
 # SessionStart hook: drop active.yaml sessions whose pid is no longer alive.
 # Stops stale `claimed` entries from firing pulse/prose guards in unrelated chats.
 set -euo pipefail
+export PYTHONWARNINGS="ignore::DeprecationWarning"  # LEAD-ANCHOR-01: never let py warnings hit stderr as a hook error
 trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 
 PROJECT_ROOT="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"

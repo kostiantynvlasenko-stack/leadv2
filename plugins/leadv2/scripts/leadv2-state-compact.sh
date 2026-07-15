@@ -165,7 +165,7 @@ with open(active_f) as f:
 active_ids = {s.get('task_id','') for s in (active.get('sessions') or [])}
 
 items = load_tasks_items(tasks_file)
-now = datetime.datetime.now(datetime.timezone.utc)
+now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 orphans = []
 for it in items:
     if not isinstance(it, dict): continue
@@ -200,7 +200,7 @@ with open(active_f) as f:
     active = yaml.safe_load(f) or {}
 active_ids = {s.get('task_id','') for s in (active.get('sessions') or [])}
 
-now = datetime.datetime.now(datetime.timezone.utc)
+now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 orphans = []
 for lane in ('action', 'recovery', 'intelligence'):
     lf = os.path.join(queue_dir, f'{lane}.yaml')

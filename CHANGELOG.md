@@ -20,6 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Lesson: any hard word-cap enforcement on the lead needs an explicit supervisor/forward
   escape hatch from day one — silence protocols and human-in-the-loop reporting are in
   direct tension and the silence protocol will always win by default.
+- **`datetime.datetime.utcnow()` deprecation warnings tripping hook-error status** —
+  17 leadv2 scripts (plugin `scripts/` + `~/.claude/leadv2-shared/scripts/`, incl.
+  `leadv2-tasks-lib.sh`, `leadv2-daemon.sh`, `leadv2-state-compact.sh`, `leadv2-status.sh`,
+  `lv2-ledger-emit.py`) called `datetime.datetime.utcnow()`, deprecated since Python 3.12,
+  which prints a `DeprecationWarning` to stderr. Claude Code's hook runner treats any
+  non-empty stderr from a `SessionStart` hook as a non-blocking "hook error" banner. Fixed:
+  all replaced with `datetime.datetime.now(datetime.timezone.utc)` (and the
+  `__import__("datetime")` variant in `leadv2-cost-estimate.sh`). Defensive layer added:
+  the 7 registered `SessionStart` hooks now `export PYTHONWARNINGS="ignore::DeprecationWarning"`
+  so a future stray warning from any python3 subprocess never surfaces as a hook error again.
+  Lesson: hook stderr is not just log output — Claude Code's UI treats ANY stderr byte from
+  a hook as a failure signal; hooks that shell out to `python3 -c` must own their warning
+  policy, not rely on the interpreter default.
 - **Fanned-out child session showed the greeting picker instead of claiming its task
   (LEAD-ANCHOR-01)** — `/leadv2 <task-id>` (used verbatim by `leadv2-fanout.sh` headless
   launch: `claude -p "/leadv2 ${tid}"`) fell through to the same `AskUserQuestion` greeting

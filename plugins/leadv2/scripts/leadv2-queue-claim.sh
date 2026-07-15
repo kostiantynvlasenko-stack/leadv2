@@ -86,7 +86,7 @@ top_n       = int(sys.argv[1])
 queue_dir   = sys.argv[2]
 lane_order  = sys.argv[3].split()
 
-now = datetime.datetime.now(datetime.timezone.utc)
+now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 PRIORITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 def parse_dt(s: str) -> datetime.datetime:

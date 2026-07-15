@@ -68,7 +68,7 @@ except Exception:
 
 con = sqlite3.connect(db_path)
 cur = con.cursor()
-now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+now = int(datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).timestamp())
 
 # remove old FTS entry
 cur.execute("DELETE FROM wiki_fts WHERE path = ?", (filepath,))

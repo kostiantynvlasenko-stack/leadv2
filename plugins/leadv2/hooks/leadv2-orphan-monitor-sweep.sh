@@ -6,6 +6,7 @@
 # Strategy: any zsh -c containing "codex-task.sh status" running >15min, or whose
 # CODEX_COMPANION_SESSION_ID points to a non-alive claude session, gets SIGKILL.
 set -euo pipefail
+export PYTHONWARNINGS="ignore::DeprecationWarning"  # LEAD-ANCHOR-01: never let py warnings hit stderr as a hook error
 trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 
 # Collect candidate orphan PIDs

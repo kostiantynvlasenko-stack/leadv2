@@ -258,7 +258,7 @@ estimate_block = {
     "within_cap": within_cap,
     "sonnet_equivalent_cost_usd": round(sonnet_cost, 4),
     "opus_premium_usd": round(opus_premium, 4),
-    "generated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "generated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }
 
 output = {"estimate": estimate_block}

@@ -104,7 +104,7 @@ if "$CLAIM" == "true":
     target["status"] = "in_progress"
     target["claimed_by"] = os.environ.get("LEADV2_SESSION_ID", "unknown")
     target["claim_pid"] = int(os.environ.get("LEADV2_LEAD_PID", os.getpid()))
-    target["claimed_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    target["claimed_at"] = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 if "$RELEASE" == "true":
     for k in ("claimed_by", "claim_pid", "claimed_at"):

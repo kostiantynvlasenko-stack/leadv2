@@ -84,7 +84,7 @@ def extract_id(line: str) -> str:
 def strip_checkbox(line: str) -> str:
     return re.sub(r'^-\s*\[[ x?]\]\s*(\[.*?\]\s*)?', '', line).strip()
 
-now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+now_iso = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 with open(queue_file) as f:
     lines = f.readlines()

@@ -4,6 +4,7 @@
 # so that `bash .claude/scripts/lv2 <script>` works without manual setup.
 # Silent on success. Never fails the session (exits 0 always).
 set -uo pipefail
+export PYTHONWARNINGS="ignore::DeprecationWarning"  # LEAD-ANCHOR-01: never let py warnings hit stderr as a hook error
 
 _install_dispatcher() {
   local source="${CLAUDE_PLUGIN_ROOT:-}/scripts/lv2"

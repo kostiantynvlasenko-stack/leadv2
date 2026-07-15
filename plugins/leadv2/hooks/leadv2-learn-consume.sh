@@ -8,6 +8,7 @@
 #   - Non-blocking: trap '... exit 0' ERR on any failure.
 #   - Deletes .learn-trigger after consuming it (idempotent one-shot).
 set -euo pipefail
+export PYTHONWARNINGS="ignore::DeprecationWarning"  # LEAD-ANCHOR-01: never let py warnings hit stderr as a hook error
 trap 'exit 0' ERR
 
 INPUT="$(cat 2>/dev/null || true)"

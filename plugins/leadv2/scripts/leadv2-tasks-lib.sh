@@ -45,7 +45,7 @@ TERMINAL      = {"done", "poisoned", "rejected", "failed", "archived",
                  "closed", "completed", "admin-closed"}
 
 def iso(dt): return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-def now_iso(): return iso(datetime.datetime.now(datetime.timezone.utc))
+def now_iso(): return iso(datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None))
 
 def parse_dt(s):
     if not s: return datetime.datetime.min
@@ -216,7 +216,7 @@ elif op == "claim":
             lane = str(it.get("lane","action"))
             it["status"] = "in_progress"
             it["claim"]  = {"by": session, "lease_expires": iso(
-                datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=LANE_TTL.get(lane,90)))}
+                datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(minutes=LANE_TTL.get(lane,90)))}
             save_tasks(items); sys.exit(0)
         print(f"[tasks-lib] {iid} not found", file=sys.stderr); sys.exit(1)
     finally:
@@ -244,7 +244,7 @@ elif op == "release":
     fd = acquire_lock()
     try:
         items = load_tasks()
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         for it in items:
             if str(it.get("id","")) != iid: continue
             lane    = str(it.get("lane","action"))
@@ -317,7 +317,7 @@ elif op == "update":
 
 elif op == "archive":
     older_days, archive_dir = int(args[0]), args[1]
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=older_days)
+    cutoff = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(days=older_days)
     fd = acquire_lock()
     try:
         items = load_tasks(); keep, by_month = [], {}

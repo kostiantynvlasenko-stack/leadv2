@@ -11,6 +11,7 @@
 # On Supabase failure: injects failure notice. NEVER falls back to disk caches.
 # Non-blocking: exits 0 always. curl max-time 5s.
 set -euo pipefail
+export PYTHONWARNINGS="ignore::DeprecationWarning"  # LEAD-ANCHOR-01: never let py warnings hit stderr as a hook error
 trap 'exit 0' ERR
 
 INPUT="$(python3 -c "import sys; print(sys.stdin.read())" 2>/dev/null || true)"

@@ -216,7 +216,7 @@ pathlib.Path(digest_path).write_text('\n'.join(out))
 # === INDEX (yaml, machine-readable for /leadv2 prior-art lookup) ===
 idx = {
     'meta': {
-        'generated_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'generated_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'project': project_slug,
         'session_count': len(sessions),
     },
