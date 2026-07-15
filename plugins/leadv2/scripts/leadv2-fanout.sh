@@ -444,10 +444,16 @@ launch_headless() {
   # fall back to a plain backgrounded nohup + disown, which still detaches
   # from the controlling terminal and keeps stdin/stdout/stderr identical on
   # both branches.
+  # FIX-FANOUT-MODEL-ROUTING-01: fanout children run their lead on Sonnet, not
+  # the repo's normal /leadv2 default (Opus) — the supervising (non-fanout)
+  # lead keeps Opus judgment; children are cheaper, parallel workers. This
+  # export is scoped to the launched subshell/process only — it never touches
+  # the parent fanout invoker's environment, so a normal (non-fanout) /leadv2
+  # session started separately is unaffected and still defaults to Opus.
   if command -v setsid >/dev/null 2>&1; then
-    ( cd "$PROJECT_ROOT" && export LEADV2_ASYNC_QUESTIONS=1 && exec setsid nohup "$CLAUDE_BIN" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
+    ( cd "$PROJECT_ROOT" && export LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=sonnet && exec setsid nohup "$CLAUDE_BIN" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
   else
-    ( cd "$PROJECT_ROOT" && export LEADV2_ASYNC_QUESTIONS=1 && exec nohup "$CLAUDE_BIN" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
+    ( cd "$PROJECT_ROOT" && export LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=sonnet && exec nohup "$CLAUDE_BIN" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
     disown
   fi
   pid=$!
@@ -486,8 +492,10 @@ launch_windowed() {
   if [[ -n "$tmux_target" ]]; then
     local window_name="leadv2-${tid}"
     local tmux_cmd
+    # FIX-FANOUT-MODEL-ROUTING-01: fanout children lead on Sonnet (see
+    # launch_headless comment above) — scoped to this tmux window's shell only.
     printf -v tmux_cmd \
-      'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q; cd %q && exec %q %q' \
+      'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=sonnet LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q; cd %q && exec %q %q' \
       "$PROJECT_ROOT" "$PROJECT_ROOT" "$tid" "$PROJECT_ROOT" "$CLAUDE_BIN" "/leadv2 ${tid}"
     # Do NOT pipe claude stdout (`| tee`) — breaks the interactive TTY and
     # hangs claude. Logging, if ever needed, goes through `tmux pipe-pane`.
@@ -509,7 +517,9 @@ launch_windowed() {
   fi
 
   local cmd
-  printf -v cmd 'cd %q && %q %q' "$PROJECT_ROOT" "$CLAUDE_BIN" "/leadv2 ${tid}"
+  # FIX-FANOUT-MODEL-ROUTING-01: fanout children lead on Sonnet (see
+  # launch_headless comment above) — scoped to this Terminal/iTerm2 shell only.
+  printf -v cmd 'export LEADV2_MAIN_MODEL=sonnet && cd %q && %q %q' "$PROJECT_ROOT" "$CLAUDE_BIN" "/leadv2 ${tid}"
   # Escape for the AppleScript string-literal context (Bug 2,
   # FIX-FANOUT-MACOS-LAUNCH-01): shell %q backslash-escaping is not valid
   # inside an AppleScript "..." literal and previously errored with -2741.
