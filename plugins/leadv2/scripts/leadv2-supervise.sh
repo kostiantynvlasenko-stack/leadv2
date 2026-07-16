@@ -94,6 +94,57 @@ fi
 ACTIVE_YAML="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" active.yaml)"
 HANDOFF_DIR="${PROJECT_ROOT}/docs/handoff"
 SNAPSHOT="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" .supervise-last.json)"
+SUPERVISE_SENTINEL="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" .supervise-active)"
+
+# SUPERVISE-GUARD-01 (restored, SUPERVISE-V2-01 fix-1 C1): (re)write the
+# supervise-mode sentinel -- {"pid","started_at"} -- consumed by
+# hooks/leadv2-supervise-fanout-guard.sh (PreToolUse:Agent) to block
+# in-session WORKER subagent spawns while supervise mode is active; the lead
+# must dispatch new work via scripts/leadv2-fanout.sh instead. Idempotent: a
+# live sentinel keeps its original started_at; a missing/dead one is
+# (re)written with the durable claude-process pid (see
+# leadv2-active-registry.sh:_lv2_durable_pid). Cleared on Stop by
+# hooks/leadv2-supervise-sentinel-cleanup.sh, and self-heals (deleted) by the
+# guard itself the next time it sees a dead pid. Deleted by 799dc99's B1
+# root-resolution refactor and never re-added -- guard was silently inert
+# (lying-green: hook installed, reads a file nobody wrote) until this fix.
+if [[ -f "${SCRIPT_DIR}/leadv2-active-registry.sh" ]]; then
+  # shellcheck source=leadv2-active-registry.sh
+  source "${SCRIPT_DIR}/leadv2-active-registry.sh"
+  _SUP_PID="$(_lv2_durable_pid 2>/dev/null || echo "$PPID")"
+  _SUP_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  python3 - "$SUPERVISE_SENTINEL" "$_SUP_PID" "$_SUP_TS" <<'PYSENTINEL' 2>/dev/null || true
+import sys, os, json, tempfile
+
+path, pid_str, ts = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def pid_alive(pid_val):
+    try:
+        os.kill(int(pid_val), 0)
+        return True
+    except (TypeError, ValueError, ProcessLookupError, PermissionError):
+        return False
+
+existing_started_at = None
+if os.path.isfile(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh) or {}
+        if pid_alive(d.get("pid")):
+            existing_started_at = d.get("started_at")
+    except Exception:
+        pass
+
+out = {"pid": int(pid_str), "started_at": existing_started_at or ts}
+dir_ = os.path.dirname(path)
+os.makedirs(dir_, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    json.dump(out, fh, indent=2)
+os.replace(tmp, path)
+PYSENTINEL
+fi
+
 # LEAD-ANCHOR-01: true control-plane questions dir — shared across every
 # worktree of this repo, unlike HANDOFF_DIR above.
 CP_QUESTIONS_DIR="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" questions)"
@@ -306,7 +357,13 @@ if cp_questions_dir and os.path.isdir(cp_questions_dir):
             import yaml
             with open(qf, encoding="utf-8") as fh:
                 qd = yaml.safe_load(fh) or {}
-        except Exception:
+        except Exception as e:
+            # M2 fix (SUPERVISE-V2-01 fix-1): a malformed/unreadable
+            # control-plane question file used to vanish silently -- a
+            # blocked child could disappear from requires_founder with no
+            # warning. Loud-fail philosophy (same as the active.yaml/
+            # snapshot warnings above): record it, never drop it quietly.
+            warnings.append(f"control-plane question {qf} unreadable/malformed ({e.__class__.__name__}: {e}) — skipped")
             continue
         if not isinstance(qd, dict) or qd.get("status") != "pending":
             continue
@@ -399,10 +456,18 @@ for tid, s in sorted(current.items()):
     # windowed backend before tmux was added).
     where = s.get("where") or ("headless" if s.get("daemon_mode") else "terminal")
 
+    # M3 fix (SUPERVISE-V2-01 fix-1): leadv2-active-registry.sh:register op
+    # comment claims "reader-side infers protocol_version: 1 ... see
+    # leadv2-supervise.sh" -- that inference did not actually exist anywhere
+    # in this file. Implement it: a row registered before item 3 (D-d
+    # registry-honesty fields) simply lacks the key -- absence means V1.
+    protocol_version = s.get("protocol_version", 1)
+
     table.append({
         "task_id": tid, "phase": phase,
         "minutes_in_phase": minutes if minutes is not None else "?",
         "status": status, "waiting": is_waiting, "where": where,
+        "protocol_version": protocol_version,
     })
 
 table = table[:CAP_ROWS]
