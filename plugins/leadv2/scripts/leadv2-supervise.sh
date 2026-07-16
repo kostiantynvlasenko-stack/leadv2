@@ -260,16 +260,28 @@ PYPROBE
   else
     TRUTH_BREACHES_JSON='{"status":"no_probe_configured","breaches":[]}'
   fi
+  # Best-effort ONLY (per header comment above: "informational only, never
+  # read as fail-open-to-clear"). An unwritable state dir must NOT kill this
+  # script here — the real B1 fail-closed contract belongs to the snapshot
+  # write in the python core below, which already emits a typed
+  # state_write_error. Regression (test-supervise-failclosed.sh Test 5):
+  # this block used to die under `set -e` on a failed redirect/mv before the
+  # typed-error path ever ran, producing rc=1 with EMPTY stdout instead of
+  # {"error":"state_write_error",...}. Every write attempt below is now
+  # guarded so a permission failure degrades silently and falls through to
+  # the real fail-closed check.
   TRUTH_BREACHES_FILE="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" truth-breaches-last.json)"
-  mkdir -p "$(dirname "$TRUTH_BREACHES_FILE")"
+  mkdir -p "$(dirname "$TRUTH_BREACHES_FILE")" 2>/dev/null || true
   _TB_TMP="${TRUTH_BREACHES_FILE}.tmp.$$"
   python3 -c '
 import json, sys, datetime
 d = json.loads(sys.argv[1])
 d["observed_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 print(json.dumps(d))
-' "$TRUTH_BREACHES_JSON" > "$_TB_TMP" 2>/dev/null || printf -- '%s' "$TRUTH_BREACHES_JSON" > "$_TB_TMP"
-  mv "$_TB_TMP" "$TRUTH_BREACHES_FILE"
+' "$TRUTH_BREACHES_JSON" > "$_TB_TMP" 2>/dev/null || printf -- '%s' "$TRUTH_BREACHES_JSON" > "$_TB_TMP" 2>/dev/null || true
+  if [[ -f "$_TB_TMP" ]]; then
+    mv "$_TB_TMP" "$TRUTH_BREACHES_FILE" 2>/dev/null || rm -f "$_TB_TMP" 2>/dev/null || true
+  fi
 fi
 
 python3 - "$ACTIVE_YAML" "$HANDOFF_DIR" "$SNAPSHOT" "$JSON_MODE" "$SINCE" "$CP_QUESTIONS_DIR" "${BUS_JSONL:-}" "${BUS_OFFSET_FILE:-}" "$TRUTH_BREACHES_JSON" "$TMUX_WINDOWS_TSV" "$TMUX_PANES_TSV" "$TASKS_YAML_PATH" "$ACTIVE_LOCKFILE" "$TOMBSTONES_FILE" "$OBSERVE_ONLY" "$SCRIPT_DIR" <<'PY'
@@ -525,9 +537,14 @@ apply_prunes = [p for p in pending_prunes if not p["gated"]]
 applied_adopts = []
 if (pending_adopts or apply_prunes) and not observe_only:
     import fcntl as _fcntl
-    os.makedirs(os.path.dirname(active_lockfile), exist_ok=True)
-    _lf = open(active_lockfile, "a+")
+    # B1 fail-closed (test-supervise-failclosed.sh Test 5 regression guard):
+    # any OSError while writing active.yaml/tombstones under an unwritable
+    # state dir must surface as the typed state_write_error contract, never
+    # an unhandled traceback (untyped stdout + non-JSON crash).
     try:
+      os.makedirs(os.path.dirname(active_lockfile), exist_ok=True)
+      _lf = open(active_lockfile, "a+")
+      try:
         _fcntl.flock(_lf, _fcntl.LOCK_EX)
         with open(active_yaml, encoding="utf-8") as fh:
             _d = yaml.safe_load(fh) or {}
@@ -558,15 +575,15 @@ if (pending_adopts or apply_prunes) and not observe_only:
         with open(_tmp, "w", encoding="utf-8") as fh:
             yaml.dump(_d, fh, default_flow_style=False, sort_keys=False)
         os.replace(_tmp, active_yaml)
-    finally:
+      finally:
         _fcntl.flock(_lf, _fcntl.LOCK_UN)
         _lf.close()
 
-    # Tombstone BEFORE this call reports the prune as done (write already
-    # happened above under the same lock pass — tombstone write is a
-    # SEPARATE file/lock, ordered here, still ahead of any caller believing
-    # the row is gone: this whole block is synchronous within one call).
-    if apply_prunes:
+      # Tombstone BEFORE this call reports the prune as done (write already
+      # happened above under the same lock pass — tombstone write is a
+      # SEPARATE file/lock, ordered here, still ahead of any caller believing
+      # the row is gone: this whole block is synchronous within one call).
+      if apply_prunes:
         _tlock = tombstones_file + ".lock"
         os.makedirs(os.path.dirname(tombstones_file), exist_ok=True)
         _tlf = open(_tlock, "a+")
@@ -612,6 +629,8 @@ if (pending_adopts or apply_prunes) and not observe_only:
                     )
                 except Exception as e:
                     warnings.append(f"dead-escalation ask failed for {p['task_id']}: {e.__class__.__name__}: {e}")
+    except OSError as e:
+        emit_fatal("state_write_error", f"could not write active.yaml/tombstones mutation: {e.__class__.__name__}: {e}")
 
 # Reflect mutations in THIS call's in-memory view without re-reading the file.
 for tid in applied_adopts:
