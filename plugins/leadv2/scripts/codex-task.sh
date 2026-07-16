@@ -213,7 +213,35 @@ _run_node() {
   if [[ -n "$_TIMEOUT_CMD" ]]; then
     "$_TIMEOUT_CMD" "$_CODEX_TIMEOUT" node "$COMPANION" "$@" || _exit_code=$?
   else
-    node "$COMPANION" "$@" || _exit_code=$?
+    # M4/Codex#3 (SUPERVISE-V2-01 fix-1): stock macOS ships neither gtimeout
+    # nor timeout(1) -- the wrapper used to silently run node with NO deadline
+    # at all, making the tier-aware CODEX_TIMEOUT + exit-124 auto-retry
+    # completely inert. Loud WARN + a portable bash fallback (background
+    # sleep+kill watcher) that enforces the SAME deadline contract and
+    # explicitly reports it as exit 124, same as gtimeout/timeout(1) would.
+    printf '[codex-task] WARN: neither gtimeout nor timeout(1) on PATH -- enforcing the %ss deadline via a portable sleep+kill watcher instead. Install coreutils (brew install coreutils) for the standard implementation.\n' "$_CODEX_TIMEOUT" >&2
+    node "$COMPANION" "$@" &
+    local _node_pid=$!
+    local _fired_file
+    _fired_file="$(mktemp)"
+    (
+      sleep "$_CODEX_TIMEOUT"
+      if kill -0 "$_node_pid" 2>/dev/null; then
+        : > "$_fired_file"
+        kill -TERM "$_node_pid" 2>/dev/null || true
+        sleep 2
+        kill -KILL "$_node_pid" 2>/dev/null || true
+      fi
+    ) &
+    local _watcher_pid=$!
+    wait "$_node_pid" 2>/dev/null
+    _exit_code=$?
+    kill "$_watcher_pid" 2>/dev/null || true
+    wait "$_watcher_pid" 2>/dev/null || true
+    if [[ -s "$_fired_file" ]]; then
+      _exit_code=124
+    fi
+    rm -f "$_fired_file"
   fi
   if [[ "$_exit_code" -eq 124 ]]; then
     printf 'CODEX TIMED OUT after %ss -- proceeding without Codex\n' "$_CODEX_TIMEOUT" >&2
@@ -251,9 +279,79 @@ _extract_model_arg() {
 }
 DISPATCH_MODEL="$(_extract_model_arg "$@")"
 
+# Codex#4 (SUPERVISE-V2-01 fix-1): tier one-level-lower retry on a real
+# timeout (exit 124). Before this fix a timeout left `_run_with_fallback`
+# retrying only 5.6 HTTP-400 failures -- a genuine timeout was simply
+# abandoned, the tier-aware CODEX_TIMEOUT default existed but nothing acted
+# on the exit-124 event. Single retry only: top->standard, standard->volume;
+# volume (already the cheapest/fastest tier) has nowhere lower to go.
+_tier_down() {
+  case "$1" in
+    top)      echo "standard" ;;
+    standard) echo "volume" ;;
+    *)        echo "" ;;
+  esac
+}
+
+_tier_timeout_for() {
+  case "$1" in
+    top)      echo 1800 ;;
+    standard) echo 900 ;;
+    *)        echo 600 ;;
+  esac
+}
+
+# Sets TIER_MODEL_OUT / WIRE_EFFORT_OUT for the given tier name. Same
+# resolution table as the --tier extraction block above.
+_tier_model_effort() {
+  local _t="$1" _mc _eff
+  _mc="${CODEX_MODELS_CACHE:-$HOME/.codex/models_cache.json}"
+  case "$_t" in
+    top)
+      if command -v jq >/dev/null 2>&1 && [[ -f "$_mc" ]] \
+         && jq -e '.models[]? | select(.slug=="gpt-5.6-sol")' "$_mc" >/dev/null 2>&1; then
+        TIER_MODEL_OUT="gpt-5.6-sol"; _eff="high"
+      else
+        TIER_MODEL_OUT="gpt-5.6-terra"; _eff="ultra"
+      fi
+      ;;
+    standard) TIER_MODEL_OUT="gpt-5.6-terra"; _eff="medium" ;;
+    volume)   TIER_MODEL_OUT="gpt-5.6-luna";  _eff="low" ;;
+    *)        TIER_MODEL_OUT="gpt-5.6-terra"; _eff="medium" ;;
+  esac
+  WIRE_EFFORT_OUT="$_eff"
+  [[ "$WIRE_EFFORT_OUT" == "ultra" ]] && WIRE_EFFORT_OUT="xhigh"
+}
+
 _run_with_fallback() {
   local rc=0 out
   out="$(_run_node "$@" 2>&1)" && rc=0 || rc=$?
+
+  if [[ $rc -eq 124 && -n "$_TIER" ]]; then
+    local _next_tier
+    _next_tier="$(_tier_down "$_TIER")"
+    if [[ -n "$_next_tier" ]]; then
+      echo "[codex-task] CODEX_RETRY_EVENT from_tier=$_TIER to_tier=$_next_tier reason=timeout" >&2
+      _tier_model_effort "$_next_tier"
+      local retry_args=() _prev=""
+      for _a in "$@"; do
+        if [[ "$_prev" == "--model" || "$_prev" == "-m" ]]; then
+          retry_args+=("$TIER_MODEL_OUT")
+        elif [[ "$_prev" == "--effort" ]]; then
+          retry_args+=("$WIRE_EFFORT_OUT")
+        else
+          retry_args+=("$_a")
+        fi
+        _prev="$_a"
+      done
+      _TIER="$_next_tier"
+      _CODEX_TIMEOUT="$(_tier_timeout_for "$_next_tier")"
+      DISPATCH_MODEL="$TIER_MODEL_OUT"
+      out="$(_run_node "${retry_args[@]}" 2>&1)" && rc=0 || rc=$?
+      echo "[codex-task] CODEX_RETRY_EVENT tier=$_next_tier result=$([[ $rc -eq 0 ]] && echo ok || echo rc=$rc)" >&2
+    fi
+  fi
+
   if [[ $rc -ne 0 && "$DISPATCH_MODEL" == gpt-5.6* ]] \
      && printf '%s' "$out" | grep -qE '"status":[[:space:]]*400|is not supported when using Codex|requires a newer version of Codex'; then
     echo "[codex-task] FALLBACK: model '$DISPATCH_MODEL' rejected by Codex CLI -- retrying once with ${_FALLBACK_MODEL} (effort ${_FALLBACK_EFFORT})" >&2
