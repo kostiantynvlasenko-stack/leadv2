@@ -368,6 +368,306 @@ SH
   fi
 }
 
+# ── Test 7: R2-3 AND-condition death matrix (window+PID BOTH required) ─────
+
+test_7_and_condition_death_matrix() {
+  log "Test 7: R2-3 death requires BOTH window-missing AND pid-issue (tmux backend) — fix the OR"
+
+  local repo state active_path snap sock
+  read -r repo state < <(_new_fixture)
+  active_path="$(_active_yaml "$repo" "$state")"
+  snap="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    PROJECT_ROOT="$repo" bash "$STATE_PATH_SH" .supervise-last.json)"
+  mkdir -p "$(dirname "$snap")"
+
+  # 7a: window MISSING (no tmux session at all) but PID is genuinely alive
+  # (this test's own $$, birth stored correctly) -- single-signal evidence,
+  # must NOT corroborate as dead across 2 polls.
+  # Compute birth via the EXACT same normalization leadv2-supervise.sh's
+  # _pid_birth_of() uses (" ".join(b.split())) -- a raw `tr -s ' '` can leave
+  # a leading space that the python side strips, causing a false birth
+  # mismatch (window-missing WOULD then pair with a spurious pid-issue and
+  # wrongly satisfy the AND -- exactly the false-positive this test guards
+  # against, just from a test-fixture bug instead of the real one).
+  local birth_self
+  birth_self="$(python3 -c "
+import subprocess
+r = subprocess.run(['ps', '-o', 'lstart=', '-p', '$$'], capture_output=True, text=True)
+print(' '.join(r.stdout.split()))
+")"
+  mkdir -p "$(dirname "$active_path")"
+  cat > "$active_path" <<YAML
+sessions:
+  - task_id: LIVE-WINDOW-FLAP
+    session_id: s7a
+    started_at: "2020-01-01T00:00:00+00:00"
+    phase: build
+    pid: $$
+    pid_birth: "$birth_self"
+    protocol_version: 2
+    backend: tmux
+    tmux_window: LIVE-WINDOW-FLAP
+    last_pulse_at: "2020-01-01T00:00:00+00:00"
+    stale: false
+YAML
+  printf -- '{"rendered_at":"2020-01-01T00:00:00+00:00","tasks":{},"reported_events":[],"dead_candidates":{},"reconcile_cycle_count":5}' > "$snap"
+
+  local sock7a
+  sock7a="sv2-t7a-$$-$RANDOM"
+  TMUX_SOCKETS+=("$sock7a")   # never started -- has-session fails -> tmux_windows empty -> window "missing"
+
+  local out7a_1 out7a_2
+  out7a_1="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7a" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+    || { fail "Test 7a: poll 1 exited nonzero"; return; }
+  out7a_2="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7a" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+    || { fail "Test 7a: poll 2 exited nonzero"; return; }
+  local dead7a still7a
+  dead7a="$(printf -- '%s' "$out7a_2" | json_get "any(x['task_id']=='LIVE-WINDOW-FLAP' for x in d.get('dead', []))")"
+  still7a="$(python3 -c "
+import yaml
+d = yaml.safe_load(open('$active_path')) or {}
+print(any(s.get('task_id')=='LIVE-WINDOW-FLAP' for s in d.get('sessions', [])))
+")"
+  if [[ "$dead7a" == False && "$still7a" == True ]]; then
+    pass "Test 7a: window-missing ALONE (pid alive) -> NOT dead, row kept"
+  else
+    fail "Test 7a: dead=$dead7a still_present=$still7a (window-missing alone must not corroborate death)"
+  fi
+
+  # 7b: window PRESENT (real tmux window with matching name) but PID is dead
+  # -- single-signal evidence, must NOT corroborate as dead across 2 polls.
+  local sock7b
+  sock7b="sv2-t7b-$$-$RANDOM"
+  TMUX_SOCKETS+=("$sock7b")
+  tmux -L "$sock7b" new-session -d -s leadv2 -n DEAD-PID-LIVE-WINDOW 'sleep 60' 2>/dev/null
+
+  cat > "$active_path" <<'YAML'
+sessions:
+  - task_id: DEAD-PID-LIVE-WINDOW
+    session_id: s7b
+    started_at: "2020-01-01T00:00:00+00:00"
+    phase: build
+    pid: 999999
+    pid_birth: null
+    protocol_version: 2
+    backend: tmux
+    tmux_window: DEAD-PID-LIVE-WINDOW
+    last_pulse_at: "2020-01-01T00:00:00+00:00"
+    stale: false
+YAML
+  printf -- '{"rendered_at":"2020-01-01T00:00:00+00:00","tasks":{},"reported_events":[],"dead_candidates":{},"reconcile_cycle_count":5}' > "$snap"
+
+  local out7b_1 out7b_2
+  out7b_1="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7b" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+    || { fail "Test 7b: poll 1 exited nonzero"; return; }
+  out7b_2="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7b" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+    || { fail "Test 7b: poll 2 exited nonzero"; return; }
+  local dead7b still7b
+  dead7b="$(printf -- '%s' "$out7b_2" | json_get "any(x['task_id']=='DEAD-PID-LIVE-WINDOW' for x in d.get('dead', []))")"
+  still7b="$(python3 -c "
+import yaml
+d = yaml.safe_load(open('$active_path')) or {}
+print(any(s.get('task_id')=='DEAD-PID-LIVE-WINDOW' for s in d.get('sessions', [])))
+")"
+  if [[ "$dead7b" == False && "$still7b" == True ]]; then
+    pass "Test 7b: pid-dead ALONE (window present) -> NOT dead, row kept"
+  else
+    fail "Test 7b: dead=$dead7b still_present=$still7b (pid-dead alone on a tmux lane must not corroborate death)"
+  fi
+
+  # 7c: BOTH signals together (window missing AND pid dead) -- control case,
+  # confirms the AND-fix still correctly detects a genuinely dead lane.
+  local sock7c
+  sock7c="sv2-t7c-$$-$RANDOM"
+  TMUX_SOCKETS+=("$sock7c")  # never started -- window missing
+
+  cat > "$active_path" <<'YAML'
+sessions:
+  - task_id: TRULY-DEAD
+    session_id: s7c
+    started_at: "2020-01-01T00:00:00+00:00"
+    phase: build
+    pid: 999999
+    pid_birth: null
+    protocol_version: 2
+    backend: tmux
+    tmux_window: TRULY-DEAD
+    last_pulse_at: "2020-01-01T00:00:00+00:00"
+    stale: false
+YAML
+  printf -- '{"rendered_at":"2020-01-01T00:00:00+00:00","tasks":{},"reported_events":[],"dead_candidates":{},"reconcile_cycle_count":5}' > "$snap"
+
+  local out7c_1 out7c_2
+  out7c_1="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7c" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+    || { fail "Test 7c: poll 1 exited nonzero"; return; }
+  out7c_2="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7c" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+    || { fail "Test 7c: poll 2 exited nonzero"; return; }
+  local removed7c
+  removed7c="$(python3 -c "
+import yaml
+d = yaml.safe_load(open('$active_path')) or {}
+print(not any(s.get('task_id')=='TRULY-DEAD' for s in d.get('sessions', [])))
+")"
+  if [[ "$removed7c" == True ]]; then
+    pass "Test 7c: window-missing AND pid-dead TOGETHER -> corroborated dead, pruned (control case)"
+  else
+    fail "Test 7c: removed=$removed7c (both signals together must still corroborate death)"
+  fi
+}
+
+# ── Test 8: R2-4 tombstone-write-failure keeps the row (never a silent prune) ─
+
+test_8_tombstone_failure_keeps_row() {
+  log "Test 8: R2-4 tombstone write failure -> row KEPT in active.yaml, warning emitted"
+
+  local repo state active_path snap tombstones
+  read -r repo state < <(_new_fixture)
+  active_path="$(_active_yaml "$repo" "$state")"
+  mkdir -p "$(dirname "$active_path")"
+  cat > "$active_path" <<'YAML'
+sessions:
+  - task_id: DEAD-TOMBFAIL
+    session_id: d8
+    started_at: "2020-01-01T00:00:00+00:00"
+    phase: build
+    pid: 999999
+    pid_birth: null
+    protocol_version: 1
+    backend: tmux
+    tmux_window: DEAD-TOMBFAIL
+    last_pulse_at: "2020-01-01T00:00:00+00:00"
+    stale: false
+YAML
+  snap="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    PROJECT_ROOT="$repo" bash "$STATE_PATH_SH" .supervise-last.json)"
+  mkdir -p "$(dirname "$snap")"
+  cat > "$snap" <<'JSON'
+{"rendered_at":"2020-01-01T00:00:00+00:00","tasks":{},"reported_events":[],
+ "dead_candidates":{"DEAD-TOMBFAIL":"2020-01-01T00:00:00+00:00"},"reconcile_cycle_count":5}
+JSON
+
+  # Sabotage the tombstone write: pre-create tombstones.yaml AS A DIRECTORY.
+  # The writer's os.replace(tmp, tombstones_file) then fails with
+  # IsADirectoryError (an OSError) -- isolated to the tombstone code path,
+  # never touching active.yaml's own write. This avoids chmod-based sandbox
+  # cleanup hazards while still exercising a real OS-level write failure.
+  tombstones="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    PROJECT_ROOT="$repo" bash "$STATE_PATH_SH" tombstones.yaml)"
+  mkdir -p "$tombstones"
+
+  local out8
+  out8="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_OBSERVE_ONLY=0 bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+    || { fail "Test 8: supervise.sh exited nonzero (expected 0 -- tombstone failure is non-fatal)"; return; }
+
+  local still_present warn_has
+  still_present="$(python3 -c "
+import yaml
+d = yaml.safe_load(open('$active_path')) or {}
+print(any(s.get('task_id')=='DEAD-TOMBFAIL' for s in d.get('sessions', [])))
+")"
+  warn_has="$(printf -- '%s' "$out8" | json_get "any('tombstone write failed' in w for w in d.get('warnings', []))")"
+  if [[ "$still_present" == True && "$warn_has" == True ]]; then
+    pass "Test 8: tombstone write failure -> row KEPT in active.yaml, warning present"
+  else
+    fail "Test 8: still_present=$still_present warn_has=$warn_has out=$out8"
+  fi
+}
+
+# ── Test 9: R2-5 DEAD event dedup through new_events (once, not every poll) ─
+
+test_9_dead_event_dedup() {
+  log "Test 9: R2-5 DEAD urgent line reported once per liveness change, not every delta poll"
+
+  local repo state active_path snap sock
+  read -r repo state < <(_new_fixture)
+  active_path="$(_active_yaml "$repo" "$state")"
+  mkdir -p "$(dirname "$active_path")"
+  cat > "$active_path" <<'YAML'
+sessions:
+  - task_id: DEAD-DEDUP
+    session_id: d9
+    started_at: "2020-01-01T00:00:00+00:00"
+    phase: build
+    pid: 999999
+    pid_birth: null
+    protocol_version: 1
+    backend: tmux
+    tmux_window: DEAD-DEDUP
+    last_pulse_at: "2020-01-01T00:00:00+00:00"
+    stale: false
+YAML
+  snap="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    PROJECT_ROOT="$repo" bash "$STATE_PATH_SH" .supervise-last.json)"
+  mkdir -p "$(dirname "$snap")"
+  cat > "$snap" <<'JSON'
+{"rendered_at":"2020-01-01T00:00:00+00:00","tasks":{},"reported_events":[],
+ "dead_candidates":{"DEAD-DEDUP":"2020-01-01T00:00:00+00:00"},"reconcile_cycle_count":5}
+JSON
+
+  sock="sv2-t9-$$-$RANDOM"
+  TMUX_SOCKETS+=("$sock")  # never started -- window missing (AND'd with pid-dead -> corroborates)
+
+  # observe_only=1 keeps the row alive+re-evaluated identically across
+  # repeated polls -- exactly the scenario that used to spam a DEAD line
+  # every 5s (finding 5).
+  local out9_poll1 out9_poll2
+  out9_poll1="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock" LEADV2_SUPERVISE_OBSERVE_ONLY=1 \
+    bash "$SUPERVISE_SH" --json --since 2020-01-01T00:00:00Z 2>/dev/null)" \
+    || { fail "Test 9: poll 1 exited nonzero"; return; }
+  out9_poll2="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock" LEADV2_SUPERVISE_OBSERVE_ONLY=1 \
+    bash "$SUPERVISE_SH" --json --since 2020-01-01T00:00:00Z 2>/dev/null)" \
+    || { fail "Test 9: poll 2 exited nonzero"; return; }
+
+  local dead_poll1 dead_poll2
+  dead_poll1="$(printf -- '%s' "$out9_poll1" | json_get "any(x['task_id']=='DEAD-DEDUP' for x in d.get('dead', []))")"
+  dead_poll2="$(printf -- '%s' "$out9_poll2" | json_get "any(x['task_id']=='DEAD-DEDUP' for x in d.get('dead', []))")"
+  if [[ "$dead_poll1" == True && "$dead_poll2" == False ]]; then
+    pass "Test 9: DEAD reported on the corroborating poll, suppressed (deduped) on the next unchanged poll"
+  else
+    fail "Test 9: poll1_dead=$dead_poll1 poll2_dead=$dead_poll2 (expected True then False)"
+  fi
+}
+
+# ── Test 10: R2-2 --ensure atomic attach (no clobber of a live owner) ──────
+
+test_10_ensure_atomic_attach() {
+  log "Test 10: R2-2 --ensure attaches to a live sentinel without rewriting it"
+
+  local repo state sentinel birth before after out
+  read -r repo state < <(_new_fixture)
+  sentinel="$(LEADV2_PROJECT_ROOT="$repo" LEADV2_STATE_ROOT="$state" PROJECT_ROOT="$repo" \
+    bash "$STATE_PATH_SH" .supervise-loop.json)"
+  mkdir -p "$(dirname "$sentinel")"
+  birth="$(python3 -c "
+import subprocess
+r = subprocess.run(['ps', '-o', 'lstart=', '-p', '$$'], capture_output=True, text=True)
+print(' '.join(r.stdout.split()))
+")"
+  python3 -c "
+import json
+json.dump({'pid': $$, 'pid_birth': '$birth', 'started_at': '2020-01-01T00:00:00Z'}, open('$sentinel', 'w'))
+"
+  before="$(cat "$sentinel")"
+  out="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    timeout 10 bash "$LOOP_SH" --ensure)" || { fail "Test 10: --ensure exited nonzero"; return; }
+  after="$(cat "$sentinel")"
+
+  if [[ "$out" == *"already running"* && "$before" == "$after" ]]; then
+    pass "Test 10: --ensure attaches to the live owner, sentinel untouched (no clobber)"
+  else
+    fail "Test 10: out=$out before=$before after=$after"
+  fi
+}
+
 # ── Test 6: bash -n syntax on all three scripts ─────────────────────────────
 
 test_6_syntax() {
@@ -394,6 +694,10 @@ test_2_pick_schema
 test_3_adoption_triple_proof
 test_4_tombstone_before_prune
 test_5_truth_probe_timeout
+test_7_and_condition_death_matrix
+test_8_tombstone_failure_keeps_row
+test_9_dead_event_dedup
+test_10_ensure_atomic_attach
 
 echo
 log "=== Results: PASS=$PASS FAIL=$FAIL ==="
