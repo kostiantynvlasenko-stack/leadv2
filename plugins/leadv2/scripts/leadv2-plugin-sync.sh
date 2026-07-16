@@ -111,6 +111,21 @@ _sync_project_root() {
     _rsync_or_dry "project/scripts[${root##*/}]" "${src}" "${proj_scripts}" --recursive
   fi
 
+  # (c2) Some repos ALSO vendor leadv2-* scripts at <root>/scripts/ (top-level, NOT
+  # .claude/scripts/) — e.g. persona-engine's out-of-worktree control plane
+  # (2026-07-14, 6321bf2). This second location was never covered by (c) above, so it
+  # silently drifted (SUPERVISE-V2-01 found it missing leadv2-supervise-loop.sh /
+  # leadv2-supervise-pick.sh entirely + a stale leadv2-supervise.sh). Additive-only,
+  # leadv2-* filter — mirrors (e)'s pattern — and only touches repos that already use
+  # this pattern (>=1 leadv2-* file present), so it never injects vendoring into repos
+  # that don't use it (m3-market, respiro-ios currently don't).
+  local proj_scripts_toplevel="${root}/scripts"
+  if [[ -d "${proj_scripts_toplevel}" ]] && compgen -G "${proj_scripts_toplevel}/leadv2-*" > /dev/null 2>&1; then
+    log "Syncing -> project top-level scripts (c2, out-of-worktree control plane): ${proj_scripts_toplevel} [leadv2-* only, additive]"
+    _rsync_or_dry "project/scripts-toplevel[${root##*/}]" "${src}" "${proj_scripts_toplevel}" \
+      --include='leadv2-*' --exclude='*' -d
+  fi
+
   log "Syncing -> project contracts (d): ${proj_contracts}"
   for schema_file in leadv2-scorecard.schema.json leadv2-shadow-proposal.schema.json; do
     local schema_src="${PLUGIN_ROOT}/contracts/${schema_file}"
