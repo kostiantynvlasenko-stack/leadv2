@@ -23,8 +23,20 @@
 set -euo pipefail
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-# Resolution order: explicit override → CLAUDE_PROJECT_DIR (v2.1.144+) → PROJECT_ROOT → cwd
-LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(pwd)}}}"
+# B1 fail-closed root resolution (SUPERVISE-V2-01 item 2), same order as
+# leadv2-supervise.sh: LEADV2_PROJECT_ROOT -> CLAUDE_PROJECT_DIR -> git
+# toplevel of cwd. NEVER a bare ambient `$PROJECT_ROOT`/`$(pwd)` fallback —
+# an unrelated garbage PROJECT_ROOT env var must not be trusted silently.
+if [[ -n "${LEADV2_PROJECT_ROOT:-}" ]]; then
+  :
+elif [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
+  LEADV2_PROJECT_ROOT="$CLAUDE_PROJECT_DIR"
+elif _lv2ar_top="$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null)"; then
+  LEADV2_PROJECT_ROOT="$_lv2ar_top"
+else
+  printf -- '[leadv2-active-registry] root_error: could not resolve project root — set LEADV2_PROJECT_ROOT or CLAUDE_PROJECT_DIR, or run from inside a git worktree (cwd=%s)\n' "$(pwd)" >&2
+  return 1 2>/dev/null || exit 1
+fi
 
 # LEAD-CONTROL-PLANE-01: active.yaml is a cross-worktree registry — every
 # /leadv2 session runs in its own `git worktree add` checkout, so a

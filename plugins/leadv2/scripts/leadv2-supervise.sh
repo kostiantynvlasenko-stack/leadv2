@@ -27,8 +27,14 @@
 # Usage:
 #   leadv2-supervise.sh [--json] [--since <ISO>]
 #
-# Exit codes: 0 = always (this is a read-only status probe; a broken/missing
-# active.yaml is reported as a warning, never a hard failure).
+# Exit codes: 0 = reconciled snapshot rendered (table may legitimately be
+# empty). Non-zero = fail-closed (B1, SUPERVISE-V2-01): unresolvable project
+# root, missing/malformed active.yaml, or an unwritable snapshot path all
+# exit non-zero with a typed JSON error ({"error": "root_error"|"registry_
+# error"|"state_write_error", "message": ...} in --json mode, `[supervise]
+# <kind>: <message>` on stderr otherwise). Only a registry that PARSED
+# CLEANLY may report `table: []` — a missing/malformed registry is never
+# silently treated as "no sessions".
 #
 # lean: minutes-in-phase uses last_pulse_at (freshness) falling back to
 # started_at (session age) — active.yaml has no per-phase-entry timestamp.
@@ -37,24 +43,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}}}"
 
-# LEAD-CONTROL-PLANE-01: active.yaml lives in the control plane (outside any
-# worktree) — resolved via leadv2-state-path.sh, never hardcoded here.
-ACTIVE_YAML="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" active.yaml)"
-HANDOFF_DIR="${PROJECT_ROOT}/docs/handoff"
-SNAPSHOT="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" .supervise-last.json)"
-# LEAD-ANCHOR-01: true control-plane questions dir — shared across every
-# worktree of this repo, unlike HANDOFF_DIR above.
-CP_QUESTIONS_DIR="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" questions)"
-# SUPERVISOR-RETRO-01 §5: consume the `closed` bus event published by
-# scripts/leadv2-finish.sh — a second, independent signal alongside the
-# phase8-passed.flag diff above (a task can close via leadv2-finish.sh from
-# a HOST outside this worktree, where the flag file may not be visible yet).
-LEADV2_DIR_RESOLVED="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" 2>/dev/null || true)"
-BUS_JSONL="${LEADV2_DIR_RESOLVED:+${LEADV2_DIR_RESOLVED}/bus.jsonl}"
-BUS_OFFSET_FILE="${LEADV2_DIR_RESOLVED:+${LEADV2_DIR_RESOLVED}/.bus-offsets/supervise-closed-consumer}"
-
+# ── B1 fail-closed arg parse (BEFORE root resolution — a root error must
+# know whether to render as JSON or plain stderr) ──────────────────────────
 JSON_MODE=0
 SINCE=""
 
@@ -72,6 +63,47 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# ── B1 fail-closed root resolution (SUPERVISE-V2-01 D-b/item-2) ────────────
+# Order: LEADV2_PROJECT_ROOT -> CLAUDE_PROJECT_DIR -> `git -C "$PWD" rev-parse
+# --show-toplevel`. NEVER a script-dir fallback (that let a wrong/empty root
+# silently resolve to this script's OWN parent dir and report a false-clean
+# empty registry) and NEVER a bare ambient `$PROJECT_ROOT`/`$(pwd)` fallback
+# (an unrelated/garbage PROJECT_ROOT env var must not be trusted silently).
+PROJECT_ROOT=""
+if [[ -n "${LEADV2_PROJECT_ROOT:-}" ]]; then
+  PROJECT_ROOT="$LEADV2_PROJECT_ROOT"
+elif [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
+  PROJECT_ROOT="$CLAUDE_PROJECT_DIR"
+elif _lv2_git_top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"; then
+  PROJECT_ROOT="$_lv2_git_top"
+fi
+
+if [[ -z "$PROJECT_ROOT" ]]; then
+  _lv2_err_msg="root_error: could not resolve project root — set LEADV2_PROJECT_ROOT or CLAUDE_PROJECT_DIR, or run from inside a git worktree (cwd=${PWD})"
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    printf -- '{"error":"root_error","message":%s}\n' "$(printf '%s' "$_lv2_err_msg" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')"
+  else
+    printf -- '[supervise] %s\n' "$_lv2_err_msg" >&2
+  fi
+  exit 1
+fi
+
+# LEAD-CONTROL-PLANE-01: active.yaml lives in the control plane (outside any
+# worktree) — resolved via leadv2-state-path.sh, never hardcoded here.
+ACTIVE_YAML="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" active.yaml)"
+HANDOFF_DIR="${PROJECT_ROOT}/docs/handoff"
+SNAPSHOT="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" .supervise-last.json)"
+# LEAD-ANCHOR-01: true control-plane questions dir — shared across every
+# worktree of this repo, unlike HANDOFF_DIR above.
+CP_QUESTIONS_DIR="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" questions)"
+# SUPERVISOR-RETRO-01 §5: consume the `closed` bus event published by
+# scripts/leadv2-finish.sh — a second, independent signal alongside the
+# phase8-passed.flag diff above (a task can close via leadv2-finish.sh from
+# a HOST outside this worktree, where the flag file may not be visible yet).
+LEADV2_DIR_RESOLVED="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" 2>/dev/null || true)"
+BUS_JSONL="${LEADV2_DIR_RESOLVED:+${LEADV2_DIR_RESOLVED}/bus.jsonl}"
+BUS_OFFSET_FILE="${LEADV2_DIR_RESOLVED:+${LEADV2_DIR_RESOLVED}/.bus-offsets/supervise-closed-consumer}"
 
 # SUPERVISOR-RETRO-01 item 3: run the phase reconciliation backfill from the
 # supervisor heartbeat (this script IS the repeated /leadv2 heartbeat poll —
@@ -130,28 +162,44 @@ def pid_alive(pid_val):
     except (TypeError, ValueError, ProcessLookupError, PermissionError):
         return False
 
-# ── Load active.yaml (warn, never crash, on broken file) ───────────────────
+def emit_fatal(kind, message):
+    """B1 fail-closed: registry_error / state_write_error. Never a successful
+    empty table — only a registry that PARSED CLEANLY may return table: []."""
+    if json_mode:
+        print(json.dumps({"error": kind, "message": message}, indent=2))
+    else:
+        print(f"[supervise] {kind}: {message}", file=sys.stderr)
+    sys.exit(1)
+
+# ── Load active.yaml — fail closed on missing/malformed registry ───────────
+# Only a file that exists AND parses to a dict with a `sessions` list is a
+# "successfully reconciled" registry (individual malformed rows are dropped
+# with a warning, per-row — that's reconciliation, not a registry defect).
 warnings = []
 sessions = []
+if not os.path.isfile(active_yaml):
+    emit_fatal("registry_error", f"active.yaml not found at {active_yaml} (never initialized — run leadv2-active-registry.sh to create it)")
 try:
     import yaml
     with open(active_yaml, encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
-    raw_sessions = data.get("sessions") if isinstance(data, dict) else None
-    if raw_sessions is None:
-        raw_sessions = []
-    if not isinstance(raw_sessions, list):
-        warnings.append(f"active.yaml: sessions is not a list ({type(raw_sessions).__name__}) — treating as empty")
-        raw_sessions = []
-    for s in raw_sessions:
-        if not isinstance(s, dict) or not s.get("task_id"):
-            warnings.append("active.yaml: dropped malformed session entry")
-            continue
-        sessions.append(s)
-except FileNotFoundError:
-    warnings.append(f"active.yaml not found at {active_yaml}")
 except Exception as e:
-    warnings.append(f"active.yaml parse error ({e.__class__.__name__}: {e}) — treating as no live sessions")
+    emit_fatal("registry_error", f"active.yaml parse error ({e.__class__.__name__}: {e}) at {active_yaml}")
+
+if not isinstance(data, dict):
+    emit_fatal("registry_error", f"active.yaml root is not a mapping ({type(data).__name__}) at {active_yaml}")
+
+raw_sessions = data.get("sessions")
+if raw_sessions is None:
+    raw_sessions = []
+if not isinstance(raw_sessions, list):
+    emit_fatal("registry_error", f"active.yaml: sessions is not a list ({type(raw_sessions).__name__}) at {active_yaml}")
+
+for s in raw_sessions:
+    if not isinstance(s, dict) or not s.get("task_id"):
+        warnings.append("active.yaml: dropped malformed session entry")
+        continue
+    sessions.append(s)
 
 current = {s["task_id"]: s for s in sessions}  # last-write-wins on dup task_id
 
@@ -366,7 +414,10 @@ for tid in closed_now:
 
 new_events = current_events - prev_reported if delta_mode else current_events
 
-# ── Persist snapshot ─────────────────────────────────────────────────────────
+# ── Persist snapshot — unwritable state is fatal (B1), not a warning ───────
+# A snapshot write failure means the delta cursor / closed-event dedupe is
+# silently broken for every future --since call; that must fail loud now,
+# not degrade into repeated false "nothing changed" on a later poll.
 try:
     os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
     tmp = snapshot_path + ".tmp"
@@ -378,7 +429,7 @@ try:
         }, fh, indent=2)
     os.replace(tmp, snapshot_path)
 except Exception as e:
-    warnings.append(f"could not write snapshot: {e}")
+    emit_fatal("state_write_error", f"could not write snapshot to {snapshot_path}: {e.__class__.__name__}: {e}")
 
 # ── Filter output items to only the ones whose event_key is in new_events ──
 def event_key_waiting(q):
