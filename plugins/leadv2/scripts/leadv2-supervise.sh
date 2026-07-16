@@ -23,6 +23,13 @@
 # Writes:
 #   docs/leadv2/.supervise-last.json                 — snapshot state (for
 #     --since delta mode and for "closed since last snapshot" detection)
+#   active.yaml — D-d (SUPERVISE-V2-01 item 4) ONLY: adopts a triple-proof
+#     tmux orphan row, and tombstones+prunes a row corroborated dead across
+#     two consecutive calls. Both writes are additive/subtractive only —
+#     never rewrites a live row, never restarts/kills a process. Gated
+#     observe_only (env or automatic D-e 2-cycle rollout window) skips both.
+#   <control-plane>/tombstones.yaml — one entry per pruned dead row, written
+#     BEFORE the prune under a separate lock.
 #
 # Usage:
 #   leadv2-supervise.sh [--json] [--since <ISO>]
@@ -156,6 +163,34 @@ LEADV2_DIR_RESOLVED="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-
 BUS_JSONL="${LEADV2_DIR_RESOLVED:+${LEADV2_DIR_RESOLVED}/bus.jsonl}"
 BUS_OFFSET_FILE="${LEADV2_DIR_RESOLVED:+${LEADV2_DIR_RESOLVED}/.bus-offsets/supervise-closed-consumer}"
 
+# ── D-d tmux reconciliation + honest death (SUPERVISE-V2-01 item 4) ────────
+# Gathered on EVERY call (delta and full) — corroborated death requires two
+# CONSECUTIVE 5s event polls to see the same evidence, not just the 300s
+# pulse. Portable: real tmux binary, no GNU-only flags; "|||" delimiter
+# (never a raw tab) avoids shell tab-escaping ambiguity in -F format strings.
+# LEADV2_SUPERVISE_TMUX_SOCKET lets tests point at an isolated `tmux -L`
+# server without ever touching a real "leadv2" session.
+TMUX_SESSION_NAME="${LEADV2_FANOUT_TMUX_SESSION:-leadv2}"
+TMUX_SOCKET_ARGS=()
+if [[ -n "${LEADV2_SUPERVISE_TMUX_SOCKET:-}" ]]; then
+  TMUX_SOCKET_ARGS=(-L "$LEADV2_SUPERVISE_TMUX_SOCKET")
+fi
+TMUX_WINDOWS_TSV=""
+TMUX_PANES_TSV=""
+if command -v tmux >/dev/null 2>&1 && tmux "${TMUX_SOCKET_ARGS[@]}" has-session -t "$TMUX_SESSION_NAME" 2>/dev/null; then
+  TMUX_WINDOWS_TSV="$(tmux "${TMUX_SOCKET_ARGS[@]}" list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name}' 2>/dev/null || true)"
+  TMUX_PANES_TSV="$(tmux "${TMUX_SOCKET_ARGS[@]}" list-panes -t "$TMUX_SESSION_NAME" -F '#{window_name}|||#{pane_pid}' 2>/dev/null || true)"
+fi
+TASKS_YAML_PATH="${PROJECT_ROOT}/docs/tasks.yaml"
+TOMBSTONES_FILE="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" tombstones.yaml)"
+ACTIVE_LOCKFILE="${ACTIVE_YAML}.lock"
+# D-e: first 2 full-call reconciliation cycles after rollout are ALWAYS
+# observe-only for legacy rows (enforced cycle-counted in the python core
+# below via the persisted snapshot, not just this env flag). This env flag
+# additionally lets a caller force observe-only at ANY time (verification.md
+# canary command uses it).
+OBSERVE_ONLY="${LEADV2_SUPERVISE_OBSERVE_ONLY:-0}"
+
 # SUPERVISOR-RETRO-01 item 3: run the phase reconciliation backfill from the
 # supervisor heartbeat (this script IS the repeated /leadv2 heartbeat poll —
 # founder-facing Monitor loops call it on a cadence). The Write|Edit hook
@@ -237,10 +272,14 @@ print(json.dumps(d))
   mv "$_TB_TMP" "$TRUTH_BREACHES_FILE"
 fi
 
-python3 - "$ACTIVE_YAML" "$HANDOFF_DIR" "$SNAPSHOT" "$JSON_MODE" "$SINCE" "$CP_QUESTIONS_DIR" "${BUS_JSONL:-}" "${BUS_OFFSET_FILE:-}" "$TRUTH_BREACHES_JSON" <<'PY'
-import sys, os, json, glob, datetime
+python3 - "$ACTIVE_YAML" "$HANDOFF_DIR" "$SNAPSHOT" "$JSON_MODE" "$SINCE" "$CP_QUESTIONS_DIR" "${BUS_JSONL:-}" "${BUS_OFFSET_FILE:-}" "$TRUTH_BREACHES_JSON" "$TMUX_WINDOWS_TSV" "$TMUX_PANES_TSV" "$TASKS_YAML_PATH" "$ACTIVE_LOCKFILE" "$TOMBSTONES_FILE" "$OBSERVE_ONLY" "$SCRIPT_DIR" <<'PY'
+import sys, os, json, glob, datetime, subprocess
+from collections import deque
 
-active_yaml, handoff_dir, snapshot_path, json_mode, since, cp_questions_dir, bus_jsonl, bus_offset_file, truth_breaches_json = sys.argv[1:10]
+(active_yaml, handoff_dir, snapshot_path, json_mode, since, cp_questions_dir,
+ bus_jsonl, bus_offset_file, truth_breaches_json, tmux_windows_tsv,
+ tmux_panes_tsv, tasks_yaml_path, active_lockfile, tombstones_file,
+ observe_only_env, script_dir) = sys.argv[1:17]
 json_mode = json_mode == "1"
 delta_mode = bool(since)
 
@@ -331,6 +370,260 @@ prev_tasks = prev.get("tasks", {}) if isinstance(prev, dict) else {}
 prev_reported = set(prev.get("reported_events", []) if isinstance(prev, dict) else [])
 
 now = datetime.datetime.now(datetime.timezone.utc)
+
+# ── D-d: tmux reconciliation, triple-proof adoption, corroborated death ────
+# (SUPERVISE-V2-01 item 4). Runs every call (delta and full) so death
+# corroboration can span two consecutive 5s event polls, per D-d spec.
+def _ps_tree():
+    try:
+        r = subprocess.run(["ps", "-eo", "pid,ppid,comm"], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return {}, {}
+    children_, comms_ = {}, {}
+    for line in r.stdout.splitlines()[1:]:
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid_v, ppid_v = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        comms_[pid_v] = parts[2].split("/")[-1].lower()
+        children_.setdefault(ppid_v, []).append(pid_v)
+    return children_, comms_
+
+def _find_claude_descendant(pane_pid, children_, comms_):
+    if pane_pid is None:
+        return None
+    seen, q = set(), deque([pane_pid])
+    while q:
+        p = q.popleft()
+        if p in seen:
+            continue
+        seen.add(p)
+        if "claude" in comms_.get(p, ""):
+            return p
+        for c in children_.get(p, []):
+            q.append(c)
+    return None
+
+def _pid_birth_of(pid_val):
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid_val)], capture_output=True, text=True, timeout=5)
+        b = r.stdout.strip()
+        return " ".join(b.split()) if b else None
+    except Exception:
+        return None
+
+tmux_windows = {w.strip() for w in tmux_windows_tsv.splitlines() if w.strip()}
+tmux_panes = {}
+for line in tmux_panes_tsv.splitlines():
+    if "|||" not in line:
+        continue
+    wname, pane_pid_s = line.split("|||", 1)
+    wname = wname.strip()
+    try:
+        tmux_panes[wname] = int(pane_pid_s.strip())
+    except ValueError:
+        continue
+
+known_task_ids = set()
+try:
+    if os.path.isfile(tasks_yaml_path):
+        with open(tasks_yaml_path, encoding="utf-8") as fh:
+            _td = yaml.safe_load(fh)
+        _items = []
+        if isinstance(_td, list):
+            _items = _td
+        elif isinstance(_td, dict):
+            for _k in ("tasks", "items", "queues"):
+                if isinstance(_td.get(_k), list):
+                    _items = _td[_k]
+                    break
+        for it in _items:
+            if isinstance(it, dict) and it.get("id"):
+                known_task_ids.add(str(it["id"]))
+except Exception as e:
+    warnings.append(f"tasks.yaml unreadable for tmux-adoption id check: {e.__class__.__name__}: {e}")
+# mission D-d: "tid in tasks.yaml/active" — an already-live registry row also
+# satisfies the id-membership leg of the triple proof.
+known_task_ids |= set(current.keys())
+
+children_map, comms_map = (_ps_tree() if (tmux_windows or current) else ({}, {}))
+
+orphans = []
+pending_adopts = []  # triple-proof-satisfied candidates this call
+for wname in sorted(tmux_windows):
+    if wname in current:
+        continue  # matching live row already exists — nothing to adopt
+    pane_pid = tmux_panes.get(wname)
+    claude_pid = _find_claude_descendant(pane_pid, children_map, comms_map)
+    if wname in known_task_ids and claude_pid is not None:
+        pending_adopts.append({
+            "task_id": wname, "window": wname, "pane_pid": pane_pid,
+            "pid": claude_pid, "pid_birth": _pid_birth_of(claude_pid),
+        })
+    else:
+        reason = "unknown_task_id" if wname not in known_task_ids else "no_live_claude_pid"
+        orphans.append({"window": wname, "reason": reason})
+
+# D-e: the first 2 FULL (non-delta) reconciliation cycles after rollout are
+# ALWAYS observe-only for legacy protocol_version==1 rows — counted here
+# (never in a delta call) so a burst of 5s polls can't fast-forward past it.
+reconcile_cycle = int(prev.get("reconcile_cycle_count", 0)) if isinstance(prev, dict) else 0
+if not delta_mode:
+    reconcile_cycle += 1
+force_observe_only = reconcile_cycle <= 2
+observe_only = force_observe_only or (observe_only_env == "1")
+
+SPAWN_GRACE_MIN = 5
+prev_dead_candidates = (prev.get("dead_candidates") or {}) if isinstance(prev, dict) else {}
+dead_candidates_next = {}
+dead_now = []
+pending_prunes = []
+
+for tid, s in list(current.items()):
+    started_at_dt = parse_iso(s.get("started_at"))
+    if started_at_dt and (now - started_at_dt).total_seconds() < SPAWN_GRACE_MIN * 60:
+        continue  # spawning grace — never a death candidate this young
+    backend = s.get("backend") or ("tmux" if s.get("tmux_window") else ("headless" if s.get("daemon_mode") else "terminal"))
+    reasons = []
+    if backend == "tmux":
+        win = s.get("tmux_window") or tid
+        if win not in tmux_windows:
+            reasons.append("tmux window missing")
+    pid = s.get("pid")
+    if pid is None or not pid_alive(pid):
+        reasons.append("pid dead")
+    else:
+        stored_birth = s.get("pid_birth")
+        cur_birth = _pid_birth_of(pid)
+        if stored_birth and cur_birth and stored_birth != cur_birth:
+            reasons.append("pid birth mismatch (reuse)")
+
+    if not reasons:
+        continue  # evidence clears any prior candidate marker — not carried forward
+
+    is_legacy = s.get("protocol_version", 1) == 1
+    if tid in prev_dead_candidates:
+        # corroborated on a second consecutive poll — ALWAYS computed, even
+        # under observe_only (honesty: a candidate must be visible via
+        # would_prune, never silently dropped just because the write is
+        # gated). Only the actual write below is observe_only-gated.
+        dead_now.append({"task_id": tid, "reasons": reasons, "legacy": is_legacy})
+        dead_candidates_next[tid] = prev_dead_candidates[tid]
+        pending_prunes.append({"task_id": tid, "reasons": reasons, "last_state": dict(s),
+                                "gated": observe_only or (is_legacy and force_observe_only)})
+    else:
+        dead_candidates_next[tid] = now_iso()
+
+apply_prunes = [p for p in pending_prunes if not p["gated"]]
+
+# ── Apply mutations under the SAME lock leadv2-active-registry.sh uses ─────
+# (extends active.yaml, never rewrites the registry's own lock primitive —
+# this is a direct, independent flock on the identical lockfile path).
+applied_adopts = []
+if (pending_adopts or apply_prunes) and not observe_only:
+    import fcntl as _fcntl
+    os.makedirs(os.path.dirname(active_lockfile), exist_ok=True)
+    _lf = open(active_lockfile, "a+")
+    try:
+        _fcntl.flock(_lf, _fcntl.LOCK_EX)
+        with open(active_yaml, encoding="utf-8") as fh:
+            _d = yaml.safe_load(fh) or {}
+        _sess = _d.setdefault("sessions", [])
+        _by_tid = {s.get("task_id"): s for s in _sess}
+        for a in pending_adopts:
+            if a["task_id"] in _by_tid:
+                continue  # raced with another writer — never clobber
+            _row = {
+                "session_id": f"tmux-adopt-{a['task_id']}-{int(now.timestamp())}",
+                "task_id": a["task_id"], "worktree": None, "branch": None,
+                "started_at": now_iso(), "phase": "unknown", "class": "Standard",
+                "pulse_log": None, "pid": a["pid"], "pid_birth": a["pid_birth"],
+                "parent_session_id": None, "daemon_mode": False,
+                "last_pulse_at": now_iso(), "stale": False,
+                "note": f"adopted from tmux window {a['window']}",
+                "protocol_version": 2, "backend": "tmux", "origin": "adopted",
+                "phase_started_at": now_iso(), "updated_at": now_iso(),
+                "tmux_window": a["window"], "tmux_pane": a.get("pane_pid"),
+                "log_path": None, "provider_receipts": [],
+            }
+            _sess.append(_row)
+            applied_adopts.append(a["task_id"])
+        _prune_ids = {p["task_id"] for p in apply_prunes}
+        if _prune_ids:
+            _d["sessions"] = [s for s in _sess if s.get("task_id") not in _prune_ids]
+        _tmp = active_yaml + f".tmp.{os.getpid()}"
+        with open(_tmp, "w", encoding="utf-8") as fh:
+            yaml.dump(_d, fh, default_flow_style=False, sort_keys=False)
+        os.replace(_tmp, active_yaml)
+    finally:
+        _fcntl.flock(_lf, _fcntl.LOCK_UN)
+        _lf.close()
+
+    # Tombstone BEFORE this call reports the prune as done (write already
+    # happened above under the same lock pass — tombstone write is a
+    # SEPARATE file/lock, ordered here, still ahead of any caller believing
+    # the row is gone: this whole block is synchronous within one call).
+    if apply_prunes:
+        _tlock = tombstones_file + ".lock"
+        os.makedirs(os.path.dirname(tombstones_file), exist_ok=True)
+        _tlf = open(_tlock, "a+")
+        try:
+            _fcntl.flock(_tlf, _fcntl.LOCK_EX)
+            _existing = []
+            if os.path.isfile(tombstones_file):
+                try:
+                    with open(tombstones_file, encoding="utf-8") as fh:
+                        _existing = yaml.safe_load(fh) or []
+                    if not isinstance(_existing, list):
+                        _existing = []
+                except Exception:
+                    _existing = []
+            for p in apply_prunes:
+                _existing.append({
+                    "task_id": p["task_id"], "tombstoned_at": now_iso(),
+                    "reasons": p["reasons"], "last_state": p["last_state"],
+                    "log_path": p["last_state"].get("log_path"),
+                })
+            _ttmp = tombstones_file + f".tmp.{os.getpid()}"
+            with open(_ttmp, "w", encoding="utf-8") as fh:
+                yaml.dump(_existing, fh, default_flow_style=False, sort_keys=False)
+            os.replace(_ttmp, tombstones_file)
+        finally:
+            _fcntl.flock(_tlf, _fcntl.LOCK_UN)
+            _tlf.close()
+
+        # Best-effort founder escalation via the existing canonical question
+        # channel — never a second question mechanism, never auto-restart.
+        _ask_sh = os.path.join(script_dir, "leadv2-ask.sh")
+        if os.path.isfile(_ask_sh):
+            for p in apply_prunes:
+                try:
+                    subprocess.run(
+                        [_ask_sh, p["task_id"],
+                         f"Task {p['task_id']} corroborated dead: {'; '.join(p['reasons'])}. Escalate.",
+                         "--option", "inspect|inspect logs first",
+                         "--option", "restart|restart the task",
+                         "--option", "abandon|mark abandoned",
+                         "--no-block"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                except Exception as e:
+                    warnings.append(f"dead-escalation ask failed for {p['task_id']}: {e.__class__.__name__}: {e}")
+
+# Reflect mutations in THIS call's in-memory view without re-reading the file.
+for tid in applied_adopts:
+    a = next(x for x in pending_adopts if x["task_id"] == tid)
+    current[tid] = {
+        "task_id": tid, "phase": "unknown", "started_at": now_iso(),
+        "last_pulse_at": now_iso(), "pid": a["pid"], "stale": False,
+        "protocol_version": 2, "backend": "tmux", "tmux_window": a["window"],
+    }
+for p in pending_prunes:
+    current.pop(p["task_id"], None)
+sessions = list(current.values())
 
 # ── has_flag (closed) per known task_id ─────────────────────────────────────
 def flag_path(tid):
@@ -566,6 +859,11 @@ try:
             "rendered_at": now_iso(),
             "tasks": new_snapshot_tasks,
             "reported_events": sorted(current_events),
+            # D-d bookkeeping (item 4): carried forward so death corroboration
+            # spans two consecutive calls and the D-e 2-cycle observe-only
+            # rollout window survives across invocations of this script.
+            "dead_candidates": dead_candidates_next,
+            "reconcile_cycle_count": reconcile_cycle,
         }, fh, indent=2)
     os.replace(tmp, snapshot_path)
 except Exception as e:
@@ -602,6 +900,27 @@ if json_mode:
         # must not read that as "clear".
         "truth_probe": truth_probe_status,
         "truth_breaches": truth_breaches,
+        # D-d (item 4): orphans are reported, NEVER silently adopted; dead
+        # rows are corroborated-twice and already tombstoned+pruned above
+        # (or reported only, if observe_only) — the loop's pulse renderer
+        # excludes any task_id present here from the N-lane count.
+        "orphans": orphans,
+        "adopted": applied_adopts,
+        # Honesty (CONTROL-TRUTH discipline): a triple-proof-eligible
+        # candidate must never go INVISIBLE just because observe_only
+        # skipped the write — that is exactly the "control renders, engine
+        # never reads it" lying-green pattern. would_adopt/would_prune list
+        # every candidate that passed proof but was not applied this call.
+        "would_adopt": [a["task_id"] for a in pending_adopts if a["task_id"] not in applied_adopts],
+        # Fixed observe_only visibility gap: report every GATED prune
+        # (per-item p["gated"], not just the global observe_only flag) —
+        # a legacy row individually gated by D-e's 2-cycle window while
+        # global observe_only is false must still surface here, never be
+        # silently dropped.
+        "would_prune": [p["task_id"] for p in pending_prunes if p["gated"]],
+        "dead": dead_now,
+        "observe_only": observe_only,
+        "reconcile_cycle": reconcile_cycle,
     }
     print(json.dumps(result, indent=2))
     sys.exit(0)
