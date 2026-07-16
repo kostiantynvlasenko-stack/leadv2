@@ -91,6 +91,11 @@ EVENT_POLL_S="${LEADV2_SUPERVISE_EVENT_POLL_S:-5}"
 PULSE_S="${LEADV2_SUPERVISE_PULSE_S:-300}"
 MAX_CYCLES="${LEADV2_SUPERVISE_LOOP_MAX_CYCLES:-0}"
 
+# EFFICIENCY-TUNE-01 C: job-registry stall/done detection.
+JOB_STALL_MIN="${LEADV2_JOB_STALL_MIN:-10}"
+JOB_REG_ROOT="/tmp/leadv2-job-registry"
+JOB_REG_SEEN="$(PROJECT_ROOT="$PROJECT_ROOT" "$STATE_PATH_SH" job-registry-seen.json)"
+
 _now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 _pid_birth() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' || true; }
 _pid_alive() { kill -0 "$1" 2>/dev/null; }
@@ -321,6 +326,82 @@ with open(log_path, "a", encoding="utf-8") as fh:
 PYPULSE
 }
 
+# EFFICIENCY-TUNE-01 C: scans /tmp/leadv2-job-registry/*/<job_id> entries
+# (written by codex-task.sh / glm-coder.sh at spawn, cleared at their own
+# completion point) for entries whose run_dir falls under this project.
+# Presence + age >= JOB_STALL_MIN -> URGENT stalled line; an entry seen last
+# tick but gone now -> DONE line (best-effort progress.log tail).
+# lean: codex --background dispatches clear their registry entry immediately
+# after parsing jobId (codex-task.sh's own comment, not real job completion),
+# and codex's registry line's run_dir field is the spawning cwd, not a
+# per-job dir -- codex DONE/URGENT here only reflects synchronous/--wait
+# invocations, with a generic "completed" DONE summary (no progress.log to
+# tail); true background-job completion stays tracked via codex-guard.sh's
+# jobId watch. glm-coder.sh's run_dir IS the real per-job dir and tails
+# cleanly. upgrade when codex-task.sh's companion writes a per-job run_dir
+# into the registry line instead of $PWD.
+_render_job_registry() {
+  python3 - "$JOB_REG_ROOT" "$JOB_REG_SEEN" "$PROJECT_ROOT" "$JOB_STALL_MIN" "$LOG_FILE" <<'PYJOBS'
+import sys, os, json, glob, datetime, tempfile
+
+reg_root, seen_path, project_root, stall_min_s, log_path = sys.argv[1:6]
+stall_min = float(stall_min_s)
+now = datetime.datetime.now(datetime.timezone.utc)
+
+try:
+    with open(seen_path, encoding="utf-8") as fh:
+        seen = json.load(fh) or {}
+except Exception:
+    seen = {}
+
+current = {}
+for path in glob.glob(os.path.join(reg_root, "*", "*")):
+    job_id = os.path.basename(path)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            line = fh.readline().rstrip("\n")
+        run_dir, started_at, kind = line.split("\t", 2)
+    except Exception:
+        continue
+    if not run_dir.startswith(project_root):
+        continue
+    try:
+        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path), tz=datetime.timezone.utc)
+    except Exception:
+        mtime = now
+    current[job_id] = {"run_dir": run_dir, "started_at": started_at, "kind": kind}
+    age_min = (now - mtime).total_seconds() / 60.0
+    if age_min >= stall_min:
+        now_s = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        line_out = f"{now_s} [SUPERVISE-URGENT] JOB_STALLED {kind} job={job_id} age={int(age_min)}m"
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(line_out[:220] + "\n")
+
+for job_id, meta in seen.items():
+    if job_id in current:
+        continue
+    run_dir = meta.get("run_dir", "")
+    kind = meta.get("kind", "?")
+    tail = ""
+    try:
+        with open(os.path.join(run_dir, "progress.log"), encoding="utf-8") as fh:
+            lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
+        tail = lines[-1][:80] if lines else ""
+    except Exception:
+        tail = ""
+    now_s = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    line_out = f"{now_s} [supervise-loop] DONE {kind} job={job_id} {tail or 'completed'}"
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(line_out[:220] + "\n")
+
+os.makedirs(os.path.dirname(seen_path) or ".", exist_ok=True)
+tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(seen_path) or ".", suffix=".tmp")
+with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+    json.dump(current, fh)
+os.replace(tmp_path, seen_path)
+PYJOBS
+}
+
 LAST_PULSE_EPOCH=0
 if [[ "${LEADV2_SUPERVISE_LOOP_PULSE_ON_START:-0}" == "1" ]]; then
   LAST_PULSE_EPOCH=0
@@ -347,6 +428,7 @@ while true; do
     if [[ "$RC" -eq 0 ]]; then
       _render_pulse "$PULSE_JSON"
     fi
+    _render_job_registry
     LAST_PULSE_EPOCH=$NOW_EPOCH
   fi
 

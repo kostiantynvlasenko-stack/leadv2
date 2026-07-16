@@ -57,6 +57,24 @@ set -- "${_pre_tier_args[@]}"
 
 SUB="${1:-}"
 
+# EFFICIENCY-TUNE-01 C: job registry for supervise-loop stall detection.
+# One line per spawn: /tmp/leadv2-job-registry/<session_id>/<job_id> = "run_dir\tstarted_at\tkind".
+# Registry-clear rides the wrapper's own EXIT trap — the completion point that
+# actually exists in this synchronous/--wait wrapper (foreground `node` call
+# returning). Detached `--background` dispatches exit the wrapper immediately
+# after parsing jobId, so their registry entry is cleared then too — no
+# completion-tracking regression vs today (background completion is already
+# tracked separately via codex-guard.sh's jobId watch, not this registry).
+if [[ "$SUB" == "task" || "$SUB" == "review" || "$SUB" == "adversarial-review" ]]; then
+  _JOB_REG_SID="${CLAUDE_SESSION_ID:-nosession}"
+  _JOB_REG_DIR="/tmp/leadv2-job-registry/${_JOB_REG_SID}"
+  _JOB_REG_ID="${SUB}-$(date +%s)-$$"
+  mkdir -p "$_JOB_REG_DIR" 2>/dev/null \
+    && printf -- '%s\t%s\t%s\n' "$PWD" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "codex" \
+       > "${_JOB_REG_DIR}/${_JOB_REG_ID}" 2>/dev/null || true
+  trap 'rm -f "${_JOB_REG_DIR}/${_JOB_REG_ID}" 2>/dev/null || true' EXIT
+fi
+
 _has_flag() {
   # _has_flag <long> <short> "$@" -- true if either flag literal is present
   local long="$1" short="$2"; shift 2

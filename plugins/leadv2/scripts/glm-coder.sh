@@ -946,6 +946,9 @@ cmd_supervise() {
   finalize_meta "${run_dir}" "${status}" "${exit_code}" "${duration}" "${tokens_in}" "${tokens_out}" "${turns}"
 
   [[ -n "${repo_hash}" ]] && release_lock "${repo_hash}"
+
+  # EFFICIENCY-TUNE-01 C: clear job registry entry at real completion.
+  rm -f "/tmp/leadv2-job-registry/${CLAUDE_SESSION_ID:-nosession}/$(basename "${run_dir}")" 2>/dev/null || true
 }
 
 cmd_bg() {
@@ -1001,6 +1004,12 @@ cmd_bg() {
   local run_dir="${RUNS_DIR}/${run_id}"
   mkdir -p "${run_dir}"
   chmod 700 "${run_dir}"
+
+  # EFFICIENCY-TUNE-01 C: job registry for supervise-loop stall detection.
+  local _job_reg_dir="/tmp/leadv2-job-registry/${CLAUDE_SESSION_ID:-nosession}"
+  mkdir -p "${_job_reg_dir}" 2>/dev/null \
+    && printf -- '%s\t%s\t%s\n' "${run_dir}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "glm" \
+       > "${_job_reg_dir}/${run_id}" 2>/dev/null || true
 
   local resolved_prompt="${prompt}"
   if [[ "${prompt}" == @* ]]; then
