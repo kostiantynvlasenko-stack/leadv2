@@ -180,12 +180,76 @@ if [[ "$JSON_MODE" -eq 0 && -z "$SINCE" ]]; then
   fi
 fi
 
-python3 - "$ACTIVE_YAML" "$HANDOFF_DIR" "$SNAPSHOT" "$JSON_MODE" "$SINCE" "$CP_QUESTIONS_DIR" "${BUS_JSONL:-}" "${BUS_OFFSET_FILE:-}" <<'PY'
+# ── F2 truth-probe generic hook contract (SUPERVISE-V2-01 item 3) ──────────
+# Runs ONLY on a full (non-delta, SINCE empty) snapshot call — the loop's own
+# 300s pulse cadence is what makes those calls, so this naturally runs "once
+# per 300s pulse" without a separate timer here. If
+# <repo>/.claude/leadv2-overrides/supervise-truth-probe.sh exists+executable,
+# invoke it with a 10s PORTABLE timeout (python3 subprocess.run(timeout=...),
+# never the GNU-only `timeout` binary) and require JSON stdout shaped
+# {"breaches": [{id, severity, summary, evidence_cmd}, ...]}. ANY failure —
+# missing hook, non-zero exit, timeout, malformed JSON — degrades to
+# status:"unavailable" with breaches:[] (fail-open-to-EMPTY). This must NEVER
+# be read as "no breaches confirmed clear" (fail-open-to-clear) — callers
+# (leadv2-supervise-pick.sh, the loop's URGENT renderer) key off `status`,
+# not just an empty breaches list. The persona-engine probe INSTANCE is
+# written elsewhere (GLM-FIRST-01, out of this task's scope) — this is only
+# the generic contract + cache writer.
+TRUTH_BREACHES_JSON='{"status":"skipped","breaches":[]}'
+if [[ -z "$SINCE" ]]; then
+  TRUTH_PROBE_SH="${PROJECT_ROOT}/.claude/leadv2-overrides/supervise-truth-probe.sh"
+  if [[ -x "$TRUTH_PROBE_SH" ]]; then
+    TRUTH_BREACHES_JSON="$(python3 - "$TRUTH_PROBE_SH" <<'PYPROBE'
+import subprocess, sys, json
+
+probe_path = sys.argv[1]
+try:
+    r = subprocess.run([probe_path], capture_output=True, text=True, timeout=10)
+    if r.returncode != 0:
+        print(json.dumps({"status": "unavailable", "breaches": [], "reason": f"exit {r.returncode}"}))
+    else:
+        try:
+            d = json.loads(r.stdout)
+            breaches = d.get("breaches") if isinstance(d, dict) else None
+            if not isinstance(breaches, list):
+                breaches = []
+            print(json.dumps({"status": "checked", "breaches": breaches}))
+        except Exception as e:
+            print(json.dumps({"status": "unavailable", "breaches": [], "reason": f"malformed_json:{e.__class__.__name__}"}))
+except subprocess.TimeoutExpired:
+    print(json.dumps({"status": "unavailable", "breaches": [], "reason": "timeout"}))
+except Exception as e:
+    print(json.dumps({"status": "unavailable", "breaches": [], "reason": e.__class__.__name__}))
+PYPROBE
+)"
+  else
+    TRUTH_BREACHES_JSON='{"status":"no_probe_configured","breaches":[]}'
+  fi
+  TRUTH_BREACHES_FILE="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" truth-breaches-last.json)"
+  mkdir -p "$(dirname "$TRUTH_BREACHES_FILE")"
+  _TB_TMP="${TRUTH_BREACHES_FILE}.tmp.$$"
+  python3 -c '
+import json, sys, datetime
+d = json.loads(sys.argv[1])
+d["observed_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+print(json.dumps(d))
+' "$TRUTH_BREACHES_JSON" > "$_TB_TMP" 2>/dev/null || printf -- '%s' "$TRUTH_BREACHES_JSON" > "$_TB_TMP"
+  mv "$_TB_TMP" "$TRUTH_BREACHES_FILE"
+fi
+
+python3 - "$ACTIVE_YAML" "$HANDOFF_DIR" "$SNAPSHOT" "$JSON_MODE" "$SINCE" "$CP_QUESTIONS_DIR" "${BUS_JSONL:-}" "${BUS_OFFSET_FILE:-}" "$TRUTH_BREACHES_JSON" <<'PY'
 import sys, os, json, glob, datetime
 
-active_yaml, handoff_dir, snapshot_path, json_mode, since, cp_questions_dir, bus_jsonl, bus_offset_file = sys.argv[1:9]
+active_yaml, handoff_dir, snapshot_path, json_mode, since, cp_questions_dir, bus_jsonl, bus_offset_file, truth_breaches_json = sys.argv[1:10]
 json_mode = json_mode == "1"
 delta_mode = bool(since)
+
+try:
+    _truth = json.loads(truth_breaches_json)
+except Exception:
+    _truth = {"status": "unavailable", "breaches": []}
+truth_probe_status = _truth.get("status", "unavailable")
+truth_breaches = _truth.get("breaches") or []
 
 STUCK_MIN = 25
 CAP_ROWS = 20
@@ -532,6 +596,12 @@ if json_mode:
         "waiting": bool(out_waiting),
         "stuck": out_stuck,
         "closed_since_last": out_closed,
+        # F2 truth-probe contract (SUPERVISE-V2-01 item 3): only populated on
+        # a full (non-delta) call — see the bash block above. delta_mode
+        # calls always report status "skipped" with an empty list; consumers
+        # must not read that as "clear".
+        "truth_probe": truth_probe_status,
+        "truth_breaches": truth_breaches,
     }
     print(json.dumps(result, indent=2))
     sys.exit(0)

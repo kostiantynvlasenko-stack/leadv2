@@ -260,6 +260,14 @@ with open(log_path, "a", encoding="utf-8") as fh:
     fh.write(f"--- pulse {now} ({len(lines)} lane(s)) ---\n")
     for ln in lines:
         fh.write(ln + "\n")
+    # F2 truth-probe (item 3): the hook runs only on this full-call cadence
+    # (once per 300s pulse) — surface any breach as a typed URGENT line here,
+    # never as a silent "clear" when status != "checked".
+    if d.get("truth_probe") == "checked":
+        for b in (d.get("truth_breaches") or []):
+            summary = str(b.get("summary", ""))[:80]
+            line = f"{now} [SUPERVISE-URGENT] TRUTH_RED {b.get('id', '?')} {b.get('severity', '?')} {summary}"
+            fh.write(line[:220] + "\n")
 PYPULSE
 }
 
