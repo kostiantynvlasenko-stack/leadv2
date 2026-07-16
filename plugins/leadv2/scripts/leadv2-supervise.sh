@@ -579,6 +579,7 @@ apply_prunes = [p for p in pending_prunes if not p["gated"]]
 # (extends active.yaml, never rewrites the registry's own lock primitive —
 # this is a direct, independent flock on the identical lockfile path).
 applied_adopts = []
+tombstoned_ids = []  # R2-4: only these task_ids may ever be pruned from active.yaml
 if (pending_adopts or apply_prunes) and not observe_only:
     import fcntl as _fcntl
     # B1 fail-closed (test-supervise-failclosed.sh Test 5 regression guard):
@@ -590,6 +591,58 @@ if (pending_adopts or apply_prunes) and not observe_only:
       _lf = open(active_lockfile, "a+")
       try:
         _fcntl.flock(_lf, _fcntl.LOCK_EX)
+
+        # R2-4 fix (codex-review-2.md finding 4): tombstone FIRST, prune
+        # SECOND. The prior order wrote active.yaml with the dead rows
+        # ALREADY REMOVED before the tombstone file was even opened — a
+        # tombstone write failure (or a crash between the two writes) meant
+        # a row was permanently pruned with no historical record at all,
+        # violating "tombstone before prune". Now: a row is only removed
+        # from active.yaml if its tombstone write DURABLY SUCCEEDED this
+        # call; a tombstone failure keeps the row live in active.yaml (and
+        # in `current`, below) and surfaces a warning — never a silent
+        # permanent prune with no tombstone.
+        if apply_prunes:
+          _tlock = tombstones_file + ".lock"
+          try:
+            os.makedirs(os.path.dirname(tombstones_file), exist_ok=True)
+            _tlf = open(_tlock, "a+")
+            try:
+                _fcntl.flock(_tlf, _fcntl.LOCK_EX)
+                _existing = []
+                if os.path.isfile(tombstones_file):
+                    try:
+                        with open(tombstones_file, encoding="utf-8") as fh:
+                            _existing = yaml.safe_load(fh) or []
+                        if not isinstance(_existing, list):
+                            _existing = []
+                    except Exception:
+                        _existing = []
+                for p in apply_prunes:
+                    _existing.append({
+                        "task_id": p["task_id"], "tombstoned_at": now_iso(),
+                        "reasons": p["reasons"], "last_state": p["last_state"],
+                        "log_path": p["last_state"].get("log_path"),
+                    })
+                _ttmp = tombstones_file + f".tmp.{os.getpid()}"
+                with open(_ttmp, "w", encoding="utf-8") as fh:
+                    yaml.dump(_existing, fh, default_flow_style=False, sort_keys=False)
+                os.replace(_ttmp, tombstones_file)
+                tombstoned_ids = [p["task_id"] for p in apply_prunes]
+            finally:
+                _fcntl.flock(_tlf, _fcntl.LOCK_UN)
+                _tlf.close()
+          except OSError as e:
+            # Tombstone write failed — do NOT prune. Every intended-prune
+            # row stays in active.yaml this cycle; loud warning, never a
+            # swallowed failure (same loud-fail philosophy as the
+            # control-plane question read above).
+            warnings.append(
+                f"tombstone write failed for {[p['task_id'] for p in apply_prunes]} "
+                f"({e.__class__.__name__}: {e}) — row(s) KEPT, prune skipped this cycle"
+            )
+            tombstoned_ids = []
+
         with open(active_yaml, encoding="utf-8") as fh:
             _d = yaml.safe_load(fh) or {}
         _sess = _d.setdefault("sessions", [])
@@ -612,7 +665,9 @@ if (pending_adopts or apply_prunes) and not observe_only:
             }
             _sess.append(_row)
             applied_adopts.append(a["task_id"])
-        _prune_ids = {p["task_id"] for p in apply_prunes}
+        # Only tombstone-confirmed ids are removed — a tombstone-failed
+        # prune candidate is left in place (see above).
+        _prune_ids = set(tombstoned_ids)
         if _prune_ids:
             _d["sessions"] = [s for s in _sess if s.get("task_id") not in _prune_ids]
         _tmp = active_yaml + f".tmp.{os.getpid()}"
@@ -623,44 +678,15 @@ if (pending_adopts or apply_prunes) and not observe_only:
         _fcntl.flock(_lf, _fcntl.LOCK_UN)
         _lf.close()
 
-      # Tombstone BEFORE this call reports the prune as done (write already
-      # happened above under the same lock pass — tombstone write is a
-      # SEPARATE file/lock, ordered here, still ahead of any caller believing
-      # the row is gone: this whole block is synchronous within one call).
-      if apply_prunes:
-        _tlock = tombstones_file + ".lock"
-        os.makedirs(os.path.dirname(tombstones_file), exist_ok=True)
-        _tlf = open(_tlock, "a+")
-        try:
-            _fcntl.flock(_tlf, _fcntl.LOCK_EX)
-            _existing = []
-            if os.path.isfile(tombstones_file):
-                try:
-                    with open(tombstones_file, encoding="utf-8") as fh:
-                        _existing = yaml.safe_load(fh) or []
-                    if not isinstance(_existing, list):
-                        _existing = []
-                except Exception:
-                    _existing = []
-            for p in apply_prunes:
-                _existing.append({
-                    "task_id": p["task_id"], "tombstoned_at": now_iso(),
-                    "reasons": p["reasons"], "last_state": p["last_state"],
-                    "log_path": p["last_state"].get("log_path"),
-                })
-            _ttmp = tombstones_file + f".tmp.{os.getpid()}"
-            with open(_ttmp, "w", encoding="utf-8") as fh:
-                yaml.dump(_existing, fh, default_flow_style=False, sort_keys=False)
-            os.replace(_ttmp, tombstones_file)
-        finally:
-            _fcntl.flock(_tlf, _fcntl.LOCK_UN)
-            _tlf.close()
-
-        # Best-effort founder escalation via the existing canonical question
-        # channel — never a second question mechanism, never auto-restart.
+      # Best-effort founder escalation via the existing canonical question
+      # channel — never a second question mechanism, never auto-restart.
+      # Only for rows that were ACTUALLY tombstoned+pruned this call.
+      if tombstoned_ids:
         _ask_sh = os.path.join(script_dir, "leadv2-ask.sh")
         if os.path.isfile(_ask_sh):
             for p in apply_prunes:
+                if p["task_id"] not in tombstoned_ids:
+                    continue
                 try:
                     subprocess.run(
                         [_ask_sh, p["task_id"],
@@ -684,8 +710,12 @@ for tid in applied_adopts:
         "last_pulse_at": now_iso(), "pid": a["pid"], "stale": False,
         "protocol_version": 2, "backend": "tmux", "tmux_window": a["window"],
     }
+# R2-4: only actually-tombstoned rows are removed from the in-memory view —
+# a gated (observe_only) OR tombstone-failed candidate stays visible in
+# `current`/table, never silently vanishes just because a prune was skipped.
 for p in pending_prunes:
-    current.pop(p["task_id"], None)
+    if p["task_id"] in tombstoned_ids:
+        current.pop(p["task_id"], None)
 sessions = list(current.values())
 
 # ── has_flag (closed) per known task_id ─────────────────────────────────────
