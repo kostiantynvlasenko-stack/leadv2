@@ -64,6 +64,14 @@ readonly RUNS_DIR="${GLM_RUNS_DIR:-${HOME}/.claude/cache/glm-runs}"
 # SOLE bound on a stuck run (the overload-specific detector was removed
 # entirely after 4 review rounds each found a new race in it).
 readonly GLM_TIMEOUT="${GLM_TIMEOUT:-900}"
+# GLM-REVIVE-01 (2026-07-16): earlier, separate bound than GLM_TIMEOUT above.
+# Watched by watchdog_loop independently of the full-run timeout: if
+# progress.log stops growing (no new TOKENS/TOOL line) for GLM_STALL_S, the
+# run is killed EARLY and auto-retried once under a fresh run-id (see
+# cmd_supervise). Root cause this fixes: GLM calling the Agent tool trips the
+# nested-spawn permission gate and then hangs completely silent -- with only
+# GLM_TIMEOUT as a bound, that silent hang ate the full 900s every time.
+readonly GLM_STALL_S="${GLM_STALL_S:-300}"
 readonly GLM_MAX_TURNS="${GLM_MAX_TURNS:-40}"
 # Dedicated non-zero exit code for "GLM gave up, fall back to sonnet" —
 # distinct from 75 (lock busy, pre-existing) and from ordinary shell exit 1.
@@ -87,6 +95,12 @@ readonly FINISH_CONTRACT_TRAILER='
 
 ---
 FINISH CONTRACT: before ending — pop any stash you created; either commit your work with a descriptive message OR state NOT-COMMITTED with reasons; your final message MUST be a report: files changed, test results (honest), commit hash or NOT-COMMITTED. Never end with work only in a stash.'
+
+# GLM-REVIVE-01 (2026-07-16): prompt-level belt to the --disallowedTools
+# suspenders below. Prepended to every real mission prompt (never cmd_test).
+readonly AGENT_BAN_PREAMBLE='NOTE: the Agent/Task/sub-agent tool is disabled for this session. Do all work directly in this one context -- never attempt to spawn a sub-agent or delegate to another agent.
+
+'
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2; }
 log_error() { log "ERROR: $*"; }
@@ -179,7 +193,7 @@ run_claude() {
     resolved_prompt="$(cat "${prompt_file}")"
   fi
   if [[ "${add_finish_contract}" == "1" ]]; then
-    resolved_prompt="${resolved_prompt}${FINISH_CONTRACT_TRAILER}"
+    resolved_prompt="${AGENT_BAN_PREAMBLE}${resolved_prompt}${FINISH_CONTRACT_TRAILER}"
   fi
 
   local exit_code=0
@@ -194,6 +208,7 @@ run_claude() {
     export API_TIMEOUT_MS=3000000
     command "${GLM_CLAUDE_BIN}" -p "${resolved_prompt}" \
       --dangerously-skip-permissions \
+      --disallowedTools "Agent" \
       --model sonnet
   ) >"${out_file}" 2>&1 || exit_code=$?
 
@@ -448,6 +463,17 @@ for raw in sys.stdin:
                 except Exception:
                     return "?"
             print("PROVIDER_RETRY status=" + _num(ev.get("error_status")) + " attempt=" + _num(ev.get("attempt")))
+        elif etype == "result":
+            # GLM-REVIVE-01 (2026-07-16): z.ai/GLM streaming leaves every
+            # per-turn assistant.message.usage at {0,0} (confirmed live,
+            # 260716-194916 run) -- the ONLY place real accumulated tokens
+            # appears is the single terminal type:"result" event, top-level
+            # usage field. Emitted once per completed run, so this adds
+            # exactly one real TOKENS line (no double-count against the
+            # always-zero assistant-branch lines above).
+            usage = ev.get("usage") or {}
+            if usage:
+                print("TOKENS in=" + str(usage.get("input_tokens", 0)) + " out=" + str(usage.get("output_tokens", 0)))
         elif etype == "assistant":
             msg = ev.get("message") or {}
             for block in (msg.get("content") or []):
@@ -680,6 +706,7 @@ cmd_run_child() {
       --verbose \
       --max-turns "${max_turns}" \
       --permission-mode bypassPermissions \
+      --disallowedTools "Agent" \
       2> >(redact_stream >> "${run_dir}/stderr.log")
   ) | tee "${run_dir}/journal.jsonl" | ( parse_stream >> "${run_dir}/progress.log" 2>>"${run_dir}/parser-error.log" || true )
   echo "${PIPESTATUS[0]}" > "${run_dir}/exit_code"
@@ -687,8 +714,15 @@ cmd_run_child() {
 }
 
 watchdog_loop() {
-  local child_pid="$1" timeout_s="$2" run_dir="$3"
+  local child_pid="$1" timeout_s="$2" run_dir="$3" stall_s="${4:-${GLM_STALL_S}}"
   local waited=0 interval=2
+  # GLM-REVIVE-01: independent, earlier stall bound. Tracked via
+  # progress.log's byte size -- any TOOL/TOKENS/PROVIDER_RETRY line appended
+  # by parse_stream resets the clock. A silent hang (e.g. GLM stuck on the
+  # nested-spawn permission gate after calling the Agent tool) now gets
+  # caught at stall_s instead of riding the full timeout_s to the floor.
+  local last_size=-1 last_change_ts
+  last_change_ts="$(date +%s)"
   while [[ ! -f "${run_dir}/.done" ]]; do
     if [[ "${waited}" -ge "${timeout_s}" ]]; then
       # fix-round-1 H1 (KEEP item from fix-round-4): touch the marker FIRST,
@@ -708,6 +742,34 @@ watchdog_loop() {
       kill -KILL "-${child_pid}" 2>/dev/null || true
       return 0
     fi
+
+    local cur_size now
+    # -f guard first: progress.log doesn't exist yet for the first ~0-2s
+    # while cmd_run_child is still spawning claude/tee/parse_stream -- an
+    # unguarded `wc -c < missing-file` under set -e would abort this whole
+    # backgrounded watchdog subshell silently on that startup race.
+    if [[ -f "${run_dir}/progress.log" ]]; then
+      cur_size="$(wc -c < "${run_dir}/progress.log" 2>/dev/null || echo 0)"
+    else
+      cur_size=0
+    fi
+    cur_size="$(printf '%s' "${cur_size}" | tr -d ' ')"
+    cur_size="${cur_size:-0}"
+    now="$(date +%s)"
+    if [[ "${cur_size}" != "${last_size}" ]]; then
+      last_size="${cur_size}"
+      last_change_ts="${now}"
+    elif [[ $(( now - last_change_ts )) -ge "${stall_s}" ]]; then
+      # Same touch-before-kill ordering rationale as the timeout branch above.
+      touch "${run_dir}/.stalled"
+      printf '[%s] STALL_KILL after=%ss -- no progress; killing process group %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "${stall_s}" "${child_pid}" >> "${run_dir}/progress.log"
+      kill -TERM "-${child_pid}" 2>/dev/null || true
+      sleep 5
+      kill -KILL "-${child_pid}" 2>/dev/null || true
+      return 0
+    fi
+
     sleep "${interval}"
     waited=$((waited + interval))
   done
@@ -740,13 +802,50 @@ cmd_supervise() {
     echo "${child_pid}" > "$(lock_dir_for "${repo_hash}")/pgid" 2>/dev/null || true
   fi
 
-  ( watchdog_loop "${child_pid}" "${timeout_s}" "${run_dir}" ) &
+  ( watchdog_loop "${child_pid}" "${timeout_s}" "${run_dir}" "${GLM_STALL_S}" ) &
   local watchdog_pid=$!
 
   wait "${child_pid}" 2>/dev/null || true
   touch "${run_dir}/.done"
   kill "${watchdog_pid}" 2>/dev/null || true
   wait "${watchdog_pid}" 2>/dev/null || true
+
+  # GLM-REVIVE-01 (2026-07-16): a STALL_KILL (caught early by watchdog_loop,
+  # distinct from a full .timed_out) gets exactly ONE auto-retry under a
+  # fresh run-id before falling through to the normal finalize path below.
+  # `revived_from` in THIS run_dir's own meta.yaml is the recursion guard —
+  # only present when this cmd_supervise invocation IS itself the retry, in
+  # which case a second stall falls straight through to the unchanged
+  # GLM_FALLBACK_TO_SONNET sentinel path (no coherent result, no .timed_out).
+  if [[ -f "${run_dir}/.stalled" ]]; then
+    local already_revived
+    already_revived="$(meta_get "${run_dir}" revived_from)"
+    if [[ -z "${already_revived}" ]]; then
+      local new_run_id new_run_dir max_turns_val repo_name
+      repo_name="$(basename "${cwd_dir}")"
+      new_run_id="$(date '+%y%m%d-%H%M%S')-${repo_name}-$(printf '%04x' $((RANDOM % 65536)))"
+      new_run_dir="${RUNS_DIR}/${new_run_id}"
+      mkdir -p "${new_run_dir}"
+      chmod 700 "${new_run_dir}"
+      cp "${run_dir}/prompt.txt" "${new_run_dir}/prompt.txt"
+      max_turns_val="$(meta_get "${run_dir}" max_turns)"
+      write_meta_initial "${new_run_dir}" "${new_run_id}" "${repo_name}" "${cwd_dir}" "${max_turns_val}" "${timeout_s}" "$$"
+      printf 'revived_from: %s\n' "$(meta_get "${run_dir}" run_id)" >> "${new_run_dir}/meta.yaml"
+      printf '%s\n' "${repo_hash}" > "${new_run_dir}/.lockref"
+
+      extract_result "${run_dir}"
+      echo "REVIVED -> new_run_id=${new_run_id}" >> "${run_dir}/progress.log"
+      finalize_meta "${run_dir}" "revived" "0" "$(( $(date +%s) - start_ts ))" \
+        "$(sum_tokens "${run_dir}" in)" "$(sum_tokens "${run_dir}" out)" \
+        "$(grep -c '^TOKENS ' "${run_dir}/progress.log" 2>/dev/null || echo 0)"
+      printf 'revived_to: %s\n' "${new_run_id}" >> "${run_dir}/meta.yaml"
+
+      # Lock stays held (same repo_hash) — the recursive call's own finalize
+      # path releases it exactly once, at the true end of this retry chain.
+      cmd_supervise "${new_run_dir}"
+      return 0
+    fi
+  fi
 
   # fix-round-1 H1/H3 (KEEP item): `.timed_out` is AUTHORITATIVE and checked
   # FIRST, unconditionally -- watchdog_loop touches it BEFORE sending TERM
@@ -913,7 +1012,7 @@ cmd_bg() {
     fi
     resolved_prompt="$(cat "${prompt_file}")"
   fi
-  printf '%s%s' "${resolved_prompt}" "${FINISH_CONTRACT_TRAILER}" > "${run_dir}/prompt.txt"
+  printf '%s%s%s' "${AGENT_BAN_PREAMBLE}" "${resolved_prompt}" "${FINISH_CONTRACT_TRAILER}" > "${run_dir}/prompt.txt"
 
   write_meta_initial "${run_dir}" "${run_id}" "${repo}" "${cwd_dir}" "${max_turns}" "${timeout_s}" "$$"
   printf '%s\n' "${repo_hash}" > "${run_dir}/.lockref"
