@@ -320,8 +320,12 @@ if cp_questions_dir and os.path.isdir(cp_questions_dir):
             "qid": qid,
             "task_id": qd.get("task_id", "?"),
             "question": question_text,
-            "summary_for_lead": question_text[:60],
+            "summary_for_lead": qd.get("summary_for_lead") or question_text[:60],
             "options": opt_labels,
+            # D-a dual-read tagging (SUPERVISE-V2-01 item 4): control-plane
+            # store has no worktree-local sibling file — legacy_path is null.
+            "store": "control-plane",
+            "legacy_path": None,
         })
 
 cp_by_task = {}
@@ -363,7 +367,14 @@ for tid, s in sorted(current.items()):
             except Exception:
                 pass
             open_qs.append({"qid": qid, "task_id": tid, "question": question,
-                             "summary_for_lead": summary, "options": options})
+                             "summary_for_lead": summary, "options": options,
+                             # D-a dual-read tagging: this item came from the
+                             # legacy worktree-local handoff store — the
+                             # answer dispatcher needs legacy_path to wake
+                             # the exact old poller (leadv2-reply.sh), never
+                             # leadv2-answer.sh (that store is control-plane
+                             # only). No new writer may create these files.
+                             "store": "legacy-handoff", "legacy_path": pf})
     open_qs.extend(cp_by_task.get(tid, []))
     is_waiting = bool(open_qs)
     waiting_items.extend(open_qs)

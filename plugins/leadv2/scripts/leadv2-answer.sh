@@ -53,16 +53,22 @@ try:
     fcntl.flock(lockf, fcntl.LOCK_EX)
     with open(qfile, encoding="utf-8") as f:
         doc = yaml.safe_load(f) or {}
-    if doc.get("status") == "answered":
+    # Compare-and-set: only a `pending` record may transition to `answered`.
+    if doc.get("status") != "pending":
         print("ALREADY_ANSWERED")
         sys.exit(0)
     labels = [o.get("label") for o in (doc.get("options") or []) if isinstance(o, dict)]
     if option not in labels:
         print("INVALID_OPTION|" + ",".join(str(label) for label in labels))
         sys.exit(0)
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     doc["status"] = "answered"
-    doc["answer"] = option
-    doc["answered_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # V2 inline answer object (SUPERVISE-V2-01 D-a): selected/decided_by/
+    # answered_at. decided_by is always the founder — this script is the
+    # canonical human-decision path; automated timeouts elsewhere mark a
+    # lane `waiting`, never write a synthetic answer here.
+    doc["answer"] = {"selected": option, "decided_by": "founder", "answered_at": now}
+    doc["answered_at"] = now  # top-level mirror, back-compat for readers of the old flat field
     tmp = qfile + f".tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         yaml.safe_dump(doc, f, sort_keys=False)

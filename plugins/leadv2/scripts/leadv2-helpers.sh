@@ -2227,6 +2227,34 @@ yaml.safe_dump(d, sys.stdout, allow_unicode=True, default_flow_style=False)
 " "$task_id" "$phase" "$qid" "$summary" "$question" "$options_json" "$auto_decide" \
   "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > "$tmp"
   mv "$tmp" "$pending"
+
+  # SUPERVISE-V2-01 D-a: compat wrapper over leadv2-ask.sh — mirror into the
+  # canonical control-plane V2 store (cross-worktree visible to the
+  # supervising lead) via its --no-block write path. Strictly ADDITIVE and
+  # best-effort: the legacy questions-async pending file above is the only
+  # record leadv2_wait_answer (and the 5 live children's auto-decide/
+  # hard-block semantics) ever reads — this mirror never replaces it, and a
+  # mirror failure is silently non-fatal to the caller's ask.
+  # lean: mirror qid is independent of the legacy qid (no cross-store
+  # correlation yet) — upgrade when the supervisor answer dispatcher needs
+  # to resolve a V2 qid back to this legacy pending file.
+  local _ask_sh="$(dirname "${BASH_SOURCE[0]}")/leadv2-ask.sh"
+  if [[ -x "$_ask_sh" ]]; then
+    local _opt_args=() _opt_label _opt_text
+    while IFS= read -r _opt_label; do
+      [[ -n "$_opt_label" ]] && _opt_args+=(--option "${_opt_label}|${_opt_label}")
+    done < <(python3 -c "
+import yaml, sys
+opts = yaml.safe_load(sys.argv[1]) or []
+for o in opts:
+    print(o.get('label','') if isinstance(o, dict) else str(o))
+" "$options_json" 2>/dev/null || true)
+    if [[ "${#_opt_args[@]}" -gt 0 ]]; then
+      bash "$_ask_sh" "$task_id" "$question" "${_opt_args[@]}" --phase "$phase" --no-block \
+        >/dev/null 2>&1 || true
+    fi
+  fi
+
   echo "$qid"
 }
 

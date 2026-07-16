@@ -47,6 +47,10 @@ TASK_ID="$1"; QUESTION="$2"; shift 2
 
 OPTIONS=()
 TIMEOUT=1800
+PHASE=""
+PRIORITY="normal"
+WAIT_POLICY="blocking"
+NO_BLOCK=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --option)
@@ -58,6 +62,29 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || usage
       TIMEOUT="$2"
       shift 2
+      ;;
+    --phase)
+      [[ $# -ge 2 ]] || usage
+      PHASE="$2"
+      shift 2
+      ;;
+    --priority)
+      [[ $# -ge 2 ]] || usage
+      PRIORITY="$2"
+      shift 2
+      ;;
+    --wait-policy)
+      [[ $# -ge 2 ]] || usage
+      WAIT_POLICY="$2"
+      shift 2
+      ;;
+    --no-block)
+      # Write the V2 record and print the qid immediately — skip the poll
+      # loop. Used by leadv2_ask_async's compat wrapper (leadv2-helpers.sh),
+      # which owns its own non-blocking/auto-decide semantics and only wants
+      # this script's V2 control-plane write for cross-worktree visibility.
+      NO_BLOCK=1
+      shift
       ;;
     *)
       printf -- '[leadv2-ask] unknown arg: %s\n' "$1" >&2
@@ -79,12 +106,16 @@ QID="q-$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
 QFILE="${QDIR}/${QID}.yaml"
 ASKED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-python3 - "$QFILE" "$LOCK" "$TASK_ID" "$QUESTION" "$ASKED_AT" "${OPTIONS[@]}" <<'PYEOF'
+# V2 schema (SUPERVISE-V2-01 D-a): schema_version, qid, task_id, phase,
+# summary_for_lead, question, options[], priority, asked_at, wait_policy,
+# status: pending|answered|cancelled, inline answer object
+# (selected/decided_by/answered_at — all null until answered).
+python3 - "$QFILE" "$LOCK" "$QID" "$TASK_ID" "$QUESTION" "$ASKED_AT" "$PHASE" "$PRIORITY" "$WAIT_POLICY" "${OPTIONS[@]}" <<'PYEOF'
 import fcntl, os, sys
 import yaml
 
-qfile, lock_path, task_id, question, asked_at = sys.argv[1:6]
-raw_options = sys.argv[6:]
+qfile, lock_path, qid, task_id, question, asked_at, phase, priority, wait_policy = sys.argv[1:10]
+raw_options = sys.argv[10:]
 
 options = []
 for raw in raw_options:
@@ -95,12 +126,18 @@ for raw in raw_options:
     options.append({"label": label.strip(), "text": text.strip()})
 
 doc = {
+    "schema_version": 2,
+    "qid": qid,
     "task_id": task_id,
+    "phase": phase or None,
+    "summary_for_lead": question[:60],
     "question": question,
     "options": options,
+    "priority": priority or "normal",
     "asked_at": asked_at,
+    "wait_policy": wait_policy or "blocking",
     "status": "pending",
-    "answer": None,
+    "answer": {"selected": None, "decided_by": None, "answered_at": None},
 }
 
 lockf = open(lock_path, "a+")
@@ -119,6 +156,11 @@ PYEOF
 
 printf -- '[leadv2-ask] qid=%s task_id=%s file=%s\n' "$QID" "$TASK_ID" "$QFILE" >&2
 
+if [[ "$NO_BLOCK" -eq 1 ]]; then
+  printf -- '%s\n' "$QID"
+  exit 0
+fi
+
 POLL_INTERVAL="${LEADV2_ASK_POLL_INTERVAL:-3}"
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
 
@@ -132,7 +174,9 @@ try:
 except FileNotFoundError:
     print("missing|")
     sys.exit(0)
-print(f"{doc.get('status', 'pending')}|{doc.get('answer') or ''}")
+ans = doc.get("answer")
+selected = (ans or {}).get("selected") if isinstance(ans, dict) else ans  # tolerate pre-V2 flat scalar
+print(f"{doc.get('status', 'pending')}|{selected or ''}")
 PYEOF
 )"
   STATUS="${STATUS_AND_ANSWER%%|*}"
