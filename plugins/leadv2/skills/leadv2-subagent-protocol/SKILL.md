@@ -18,6 +18,12 @@ allowed-tools:
 
 > **Turn-cap (COST-LEVERS-01):** Hard limit — **30 tool calls per subagent run**. At call 30 without reaching Acceptance: write `DELIVERABLE_BLOCKED: turn-cap reached at <step>` and stop. Do NOT loop past 30 hoping it resolves. [lean: cap enforced by self-monitoring only — upgrade when workflow runtime exposes a hard stop hook]
 
+> **Token-checkpoint (EFFICIENCY-TUNE-01):** After EVERY completed mission item (not every tool call) write ONE line to `docs/handoff/<task-id>/<role>.progress.log`: `<UTC-ts> item=<N> done=<what> next=<what>`. This is your resume anchor. Missions with >3 items and no progress.log by item 2 are a protocol violation.
+
+## Mission-size cap & resume (EFFICIENCY-TUNE-01)
+Missions with >6 file-touching items should be split at authoring time (lead's job). Mid-mission, past ~150K tokens (rule of thumb: >15 files Read OR >20 tool results): stop at the next clean item boundary, write progress.log, return `DELIVERABLE_BLOCKED: token-checkpoint — N/M items done`.
+Lead-side (informational): on death or that marker, lead auto-resumes ONCE via a fresh subagent reading progress.log + context.yaml (never the dead transcript). If that also dies/blocks, lead spawns a fresh "finisher" with a NARROWED mission (remaining items only, re-stated) — never a 3rd blind resume of the same mission text.
+
 > **Context-first (COST-LEVERS-01):** Lead pre-specifies files, paths, and facts in the mission. **Use the `## Graph context` block and explicit `Reads:` list as your first source — do NOT re-discover what is already injected.** Every re-discovery turn wastes ~2K tokens and compounds across all parallel subagents.
 
 Rules for operating as a subagent inside a /leadv2 run. These apply whether you're spawned via `claude-subsession.sh` (isolated process) or via Agent tool (shared parent session).

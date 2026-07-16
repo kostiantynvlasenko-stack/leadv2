@@ -58,6 +58,9 @@ If you hit turn 30 in one task → something's wrong (founder asking too much fo
 - Lead pre-warms graph queries in Phase 0/1 via `mcp__codebase-memory-mcp__*` and writes results to `tasks/<id>/graph-snapshot.yaml`.
 - Subagents reference snapshot. They do NOT run their own search_graph/trace_path. This alone saves 30-40% on Standard+ tasks.
 
+### 3b. When discovery IS needed — graph first
+If a subagent hits an unrecognized entity (subagent-protocol §6.5) needing one probe: search_graph/trace_path/search_code BEFORE Grep/Read sweeps. Grep only config/JSON/migrations where the graph has zero coverage. Does not relax §3 — still no re-deriving what the lead's snapshot already answers.
+
 ### 4. Mission ≤100 lines, prompt ≤300 words
 - `leadv2-mission-lint.sh` and `leadv2-prompt-lint.sh` enforce.
 - Lead prompt orients (cwd, branch, deliverable, word cap). Subagent reads context.yaml + mission itself.
