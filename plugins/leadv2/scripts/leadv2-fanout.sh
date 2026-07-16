@@ -1,27 +1,35 @@
 #!/usr/bin/env bash
 # leadv2-fanout.sh — dispatch N independent /leadv2 sessions, each in its own
-# terminal window (macOS) or headless background process, each in its own
-# git worktree (worktree isolation is handled by Phase 0 of the spawned
-# /leadv2 session itself — this script only SELECTS tasks and LAUNCHES
-# sessions; it never creates worktrees).
+# tmux window, terminal window (macOS osascript), or headless background
+# process, each in its own git worktree (worktree isolation is handled by
+# Phase 0 of the spawned /leadv2 session itself — this script only SELECTS
+# tasks and LAUNCHES sessions; it never creates worktrees).
+#
+# Backend selection (LEAD-ANCHOR-01 tmux launch backend, 2026-07-14):
+#   --tmux      force tmux backend: one shared tmux session named "leadv2",
+#               one WINDOW per task (named after the task id). Reuses the
+#               existing "leadv2" session if present instead of creating a
+#               second one. Survives Terminal.app window close/quit — this is
+#               why it exists: an accidental Terminal.app window close used to
+#               kill a live /leadv2 session outright.
+#   --windows   force the old Terminal.app/iTerm2 osascript backend.
+#   --headless  background nohup/setsid process, no terminal at all.
+#   (none)      DEFAULT on macOS: tmux if `tmux` is on PATH, else --windows
+#               with a warning on stderr. Non-macOS default: --windows (errors
+#               asking for --headless, unchanged prior behavior).
 #
 # Usage:
 #   leadv2-fanout.sh [--n N] [--filter STR] [--tasks ID1,ID2,ID3]
-#                     [--dry-run] [--windowed] [--model NAME] [--force]
-#
-# Background (headless) is the DEFAULT launch mode (FIX-FANOUT-LAUNCH-V2-01).
-# --headless is kept as a no-op back-compat flag; use --windowed to opt into
-# the tmux/Terminal windowed path instead. Every child launch passes
-# `claude --model NAME ...` (default NAME=sonnet) — that CLI flag is the only
-# thing that changes a child session's own model; LEADV2_MAIN_MODEL is also
-# exported for the plugin's subagent routing but does NOT change the child's
-# session model by itself.
+#                     [--dry-run] [--tmux|--windows|--headless]
 #
 # Task LEAD-FANOUT-01. See docs/handoff/LEAD-ANCHOR-01/mission-fanout.md.
 #
 # Env overrides (test hook):
 #   LEADV2_PROJECT_ROOT / CLAUDE_PROJECT_DIR / PROJECT_ROOT — repo root
 #   LEADV2_FANOUT_CLAUDE_BIN — override the `claude` binary (tests stub this)
+#   LEADV2_FANOUT_TMUX_SESSION — override the tmux session name (default
+#     "leadv2"). Tests use this to avoid ever touching a real "leadv2"
+#     session; never override this for a real launch.
 #
 # Exit codes: 0 = ran (dry-run or real). 1 = hard failure (broken active.yaml,
 # unsupported platform, bad args). Fail-CLOSED: any doubt about session
@@ -53,48 +61,71 @@ N=3
 FILTER=""
 EXPLICIT_TASKS=""
 DRY_RUN=false
-HEADLESS=true       # FIX-FANOUT-LAUNCH-V2-01 bug 2: background is now the default
+HEADLESS=false
 FORCE=false
-MODEL="sonnet"      # FIX-FANOUT-LAUNCH-V2-01 bug 1: default model for fanout children
-# LEADV2-FANOUT-MAXIMIZE-CHEAP-MODELS-01: default-on directive telling child
-# sessions to maximize Codex (plan/review/fitting-dev) + GLM (bulk/background)
-# routing and minimize Claude-Max spend. Consumed by
-# hooks/leadv2-codex-first-nudge.sh inside the child session — this script
-# only exports it into the child env. Kill switch: set
-# LEADV2_MAXIMIZE_CHEAP_MODELS=0 in the parent's env before fanning out.
-MAXIMIZE_CHEAP_MODELS="${LEADV2_MAXIMIZE_CHEAP_MODELS:-1}"
+TMUX_FLAG=false
+WINDOWS_FLAG=false
+LEAD_MODEL_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --n)        N="$2";              shift 2 ;;
-    --filter)   FILTER="$2";         shift 2 ;;
-    --tasks)    EXPLICIT_TASKS="$2"; shift 2 ;;
-    --dry-run)  DRY_RUN=true;        shift   ;;
-    --headless) HEADLESS=true;       shift   ;;  # back-compat no-op: background is already default
-    --windowed) HEADLESS=false;      shift   ;;  # opt-in to tmux/Terminal windowed launch
-    --model)    MODEL="$2";          shift 2 ;;
-    --force)    FORCE=true;          shift   ;;
+    --n)          N="$2";                  shift 2 ;;
+    --filter)     FILTER="$2";             shift 2 ;;
+    --tasks)      EXPLICIT_TASKS="$2";     shift 2 ;;
+    --dry-run)    DRY_RUN=true;            shift   ;;
+    --headless)   HEADLESS=true;           shift   ;;
+    --tmux)       TMUX_FLAG=true;          shift   ;;
+    --windows)    WINDOWS_FLAG=true;       shift   ;;
+    --force)      FORCE=true;              shift   ;;
+    --lead-model) LEAD_MODEL_OVERRIDE="$2"; shift 2 ;;
     -h|--help)
-      printf -- 'Usage: leadv2-fanout.sh [--n N] [--filter STR] [--tasks ID1,ID2] [--dry-run] [--windowed] [--model NAME] [--force]\n'
-      printf -- '  --windowed: launch each child in its own tmux window / Terminal tab instead\n'
-      printf -- '              of headless background (background is the default).\n'
-      printf -- '  --model NAME: model each child session runs on (default: sonnet). Passed as\n'
-      printf -- '                `claude --model NAME ...` — the CLI flag is the only thing that\n'
-      printf -- '                actually changes a child session'"'"'s model; LEADV2_MAIN_MODEL is\n'
-      printf -- '                exported too for the plugin'"'"'s subagent routing but does NOT\n'
-      printf -- '                change the child'"'"'s own session model.\n'
+      printf -- 'Usage: leadv2-fanout.sh [--n N] [--filter STR] [--tasks ID1,ID2] [--dry-run] [--tmux|--windows|--headless] [--force] [--lead-model MODEL]\n'
+      printf -- '  --tmux: one shared tmux session "leadv2", one window per task. Default\n'
+      printf -- '          backend on macOS when tmux is on PATH.\n'
+      printf -- '  --windows: force Terminal.app/iTerm2 osascript windows (old default).\n'
+      printf -- '  --headless: background nohup process, no terminal/tmux at all.\n'
       printf -- '  --force: bypass active.yaml meta caps (hard_limit/standard_max/light_max/\n'
       printf -- '           heavy_strategic_solo). Never bypasses the same-task-already-active\n'
       printf -- '           check — that is the worktree-collision safety net, not a policy cap.\n'
+      printf -- '  --lead-model MODEL: override the per-task classifier model for EVERY child\n'
+      printf -- '           launched by this invocation (default: classifier picks sonnet for\n'
+      printf -- '           Light/Standard, opus for Heavy/Strategic). Use `--lead-model opus`\n'
+      printf -- '           when the founder explicitly wants an Opus child; never on by default.\n'
       exit 0
       ;;
     *) log_error "unknown arg: $1"; exit 1 ;;
   esac
 done
 
+if [[ -n "$LEAD_MODEL_OVERRIDE" ]]; then
+  log "--lead-model override active: every launch this run uses model=${LEAD_MODEL_OVERRIDE} (classifier's per-task pick is ignored for model; effort is unaffected)"
+fi
+
 if ! [[ "$N" =~ ^[0-9]+$ ]]; then
   log_error "--n must be a non-negative integer, got '$N'"
   exit 1
+fi
+
+# ── Backend resolution ──────────────────────────────────────────────────────
+# Precedence: --headless > --tmux > --windows > platform default. Platform
+# default (no flag given) is tmux on macOS when tmux is on PATH, else
+# windowed with a stderr warning (fail-soft, never fail-closed on backend
+# choice — worktree-collision safety net above is the only fail-closed gate).
+if [[ "$HEADLESS" == "true" ]]; then
+  BACKEND="headless"
+elif [[ "$TMUX_FLAG" == "true" ]]; then
+  BACKEND="tmux"
+elif [[ "$WINDOWS_FLAG" == "true" ]]; then
+  BACKEND="windows"
+elif [[ "$(uname -s)" == "Darwin" ]] && command -v tmux >/dev/null 2>&1; then
+  BACKEND="tmux"
+else
+  BACKEND="windows"
+fi
+
+if [[ "$BACKEND" == "tmux" ]] && ! command -v tmux >/dev/null 2>&1; then
+  log_error "tmux requested/defaulted but not found on PATH — falling back to --windows"
+  BACKEND="windows"
 fi
 
 # ── Fail-CLOSED: active.yaml must exist and parse cleanly ─────────────────
@@ -134,10 +165,10 @@ fi
 # bypass the same-task-already-active exclusion, which is the actual
 # worktree-collision safety net this task exists to protect.
 set +e
-PLAN_TSV="$(python3 - "$TASKS_YAML" "$ACTIVE_YAML" "$N" "$FILTER" "$EXPLICIT_TASKS" "$FORCE" <<'PYEOF'
-import sys, yaml
+PLAN_TSV="$(python3 - "$TASKS_YAML" "$ACTIVE_YAML" "$N" "$FILTER" "$EXPLICIT_TASKS" "$FORCE" "$SCRIPT_DIR" <<'PYEOF'
+import os, subprocess, sys, yaml
 
-tasks_yaml, active_yaml, n_str, filt, explicit_csv, force_str = sys.argv[1:7]
+tasks_yaml, active_yaml, n_str, filt, explicit_csv, force_str, script_dir = sys.argv[1:8]
 n = int(n_str)
 filt = filt.lower()
 explicit_ids = [t for t in explicit_csv.split(",") if t] if explicit_csv else []
@@ -171,8 +202,48 @@ except Exception as e:
 tasks = doc.get("tasks") if isinstance(doc, dict) else doc
 tasks = tasks or []
 
-def task_class(t):
-    return (t.get("context") or {}).get("class") or t.get("class") or "Standard"
+CLASSIFY_SCRIPT = os.path.join(script_dir, "leadv2-fanout-classify.sh")
+
+# SUPERVISOR-RETRO-01 item 1: replace the old missing-class -> "Standard"
+# silent fallback with the pre-launch classifier. An explicit class already
+# present on the task row is passed through as --existing-class and still
+# wins (classifier preserves Heavy/Strategic, or a non-Standard class with
+# no risk signal); "Standard" absence is exactly the gap being closed.
+_classify_cache = {}
+
+
+def classify_task(t):
+    tid = str(t.get("id"))
+    if tid in _classify_cache:
+        return _classify_cache[tid]
+    intent = str(t.get("intent") or t.get("title") or "")
+    tags = t.get("tags") or t.get("labels") or []
+    tags_csv = ",".join(str(x) for x in tags) if isinstance(tags, list) else str(tags)
+    existing = str((t.get("context") or {}).get("class") or t.get("class") or "")
+    try:
+        proc = subprocess.run(
+            [CLASSIFY_SCRIPT, "--intent", intent, "--tags", tags_csv, "--existing-class", existing],
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+        out = {}
+        for line in proc.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                out[k] = v
+        result = (
+            out.get("launch_class", "Standard") or "Standard",
+            out.get("risk_tags", ""),
+            out.get("reason", ""),
+            out.get("lead_model", "sonnet") or "sonnet",
+            out.get("lead_effort", "medium") or "medium",
+        )
+    except Exception as e:
+        # Classifier crash is NOT a "no signal" case -- escalate to Heavy/opus
+        # rather than silently falling back to Standard (the exact bug this
+        # task fixes). A human reviews the fanout report before anything runs.
+        result = ("Heavy", "classifier_error", f"classifier failed: {e}", "opus", "high")
+    _classify_cache[tid] = result
+    return result
 
 # Fix for LEAD-FANOUT-01 defect 2 (2026-07-14): tasks.yaml has NO literal
 # `title` column (verified: 0/211 rows on the live generated schema). Every
@@ -192,14 +263,14 @@ def task_title(t):
 
 by_id = {str(t.get("id")): t for t in tasks}
 
-rows = []  # (decision, task_id, label, cls, priority, reason)
+rows = []  # (decision, task_id, label, cls, priority, reason, risk_tags, lead_model, lead_effort)
 
 if explicit_ids:
     ordered = []
     for tid in explicit_ids:
         t = by_id.get(tid)
         if t is None:
-            rows.append(("skip", tid, tid, "?", "", "not found in tasks.yaml"))
+            rows.append(("skip", tid, tid, "?", "", "not found in tasks.yaml", "", "", ""))
             continue
         ordered.append(t)
 else:
@@ -226,7 +297,7 @@ heavy_claimed_this_run = False
 for t in ordered:
     tid = str(t.get("id"))
     label = task_title(t)
-    cls = task_class(t)
+    cls, risk_tags, class_reason, lead_model, lead_effort = classify_task(t)
     cls_l = cls.lower()
     pri = t.get("priority", "")
 
@@ -234,11 +305,11 @@ for t in ordered:
     # safety net (two leads claiming the same task_id == two leads in the
     # same worktree, the exact failure this task exists to prevent).
     if tid in active_task_ids:
-        rows.append(("skip", tid, label, cls, pri, "already in active.yaml (session running)"))
+        rows.append(("skip", tid, label, cls, pri, "already in active.yaml (session running)", risk_tags, lead_model, lead_effort))
         continue
 
     if explicit_ids and str(t.get("status", "")) != "queued":
-        rows.append(("skip", tid, label, cls, pri, f"not queued (status={t.get('status')})"))
+        rows.append(("skip", tid, label, cls, pri, f"not queued (status={t.get('status')})", risk_tags, lead_model, lead_effort))
         continue
 
     violation = None
@@ -255,11 +326,11 @@ for t in ordered:
         violation = f"standard cap reached ({standard_count}/{standard_max})"
 
     if violation and not force:
-        rows.append(("skip", tid, label, cls, pri, violation))
+        rows.append(("skip", tid, label, cls, pri, violation, risk_tags, lead_model, lead_effort))
         continue
 
-    reason = "selected" if not violation else f"FORCE OVERRIDE — would have hit: {violation}"
-    rows.append(("launch", tid, label, cls, pri, reason))
+    reason = f"selected ({class_reason})" if not violation else f"FORCE OVERRIDE — would have hit: {violation}"
+    rows.append(("launch", tid, label, cls, pri, reason, risk_tags, lead_model, lead_effort))
     total_active += 1
     if cls_l in ("heavy", "strategic"):
         heavy_claimed_this_run = True
@@ -271,7 +342,11 @@ for t in ordered:
 
 print(f"__NO_TITLE_COLUMN__\t{NO_TITLE_COLUMN}")
 for r in rows:
-    print("\t".join(str(x).replace("\t", " ").replace("\n", " ") for x in r))
+    # bash `read` with IFS=$'\t' collapses RUNS of tab (tab is IFS-whitespace-
+    # class, not a plain delimiter) -- an empty field (e.g. no risk_tags)
+    # would silently swallow a tab and shift every later field left by one.
+    # "-" is the on-the-wire empty marker; the bash consumer below undoes it.
+    print("\t".join((str(x).replace("\t", " ").replace("\n", " ") or "-") for x in r))
 PYEOF
 )"
 PY_RC=$?
@@ -285,21 +360,36 @@ SKIP_COUNT=0
 FORCED_ANY=false
 NO_TITLE_COLUMN=false
 declare -a LAUNCH_IDS=() LAUNCH_CLASSES=() LAUNCH_LABELS=()
+declare -a LAUNCH_MODELS=() LAUNCH_EFFORTS=() LAUNCH_RISK_TAGS=() LAUNCH_REASONS=()
 declare -a REPORT_LINES=()
 
-while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6; do
+while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9; do
   [[ -z "$f1" ]] && continue
   if [[ "$f1" == "__NO_TITLE_COLUMN__" ]]; then
     [[ "$f2" == "True" ]] && NO_TITLE_COLUMN=true
     continue
   fi
   decision="$f1" tid="$f2" label="$f3" cls="$f4" pri="$f5" reason="$f6"
+  risk_tags="$f7" lead_model="$f8" lead_effort="$f9"
+  # undo the "-" empty-field marker (see PLAN_TSV emission comment above)
+  [[ "$risk_tags" == "-" ]] && risk_tags=""
+  # --lead-model CLI override wins over the classifier's per-task pick for
+  # EVERY launch this run — opt-out valve for a founder-requested Opus child.
+  # Effort is left as the classifier chose it (override is model-only).
+  if [[ -n "$LEAD_MODEL_OVERRIDE" && "$decision" == "launch" ]]; then
+    lead_model="$LEAD_MODEL_OVERRIDE"
+    reason="${reason} (--lead-model override -> ${LEAD_MODEL_OVERRIDE})"
+  fi
   if [[ "$decision" == "launch" ]]; then
     LAUNCH_COUNT=$((LAUNCH_COUNT + 1))
     LAUNCH_IDS+=("$tid")
     LAUNCH_CLASSES+=("$cls")
     LAUNCH_LABELS+=("$label")
-    REPORT_LINES+=("- LAUNCH \`${label}\` (\`${tid}\`) — class=${cls}, priority=${pri} — ${reason}")
+    LAUNCH_MODELS+=("${lead_model:-sonnet}")
+    LAUNCH_EFFORTS+=("${lead_effort:-medium}")
+    LAUNCH_RISK_TAGS+=("$risk_tags")
+    LAUNCH_REASONS+=("$reason")
+    REPORT_LINES+=("- LAUNCH \`${label}\` (\`${tid}\`) — class=${cls}, priority=${pri}, model=${lead_model:-sonnet}/${lead_effort:-medium}, risk_tags=[${risk_tags}] — ${reason}")
     [[ "$reason" == *"FORCE OVERRIDE"* ]] && FORCED_ANY=true
   else
     SKIP_COUNT=$((SKIP_COUNT + 1))
@@ -382,6 +472,12 @@ CLAUDE_BIN="${LEADV2_FANOUT_CLAUDE_BIN:-claude}"
 # window_title parameter slot.
 _fanout_register_session() {
   local tid="$1" cls="$2" pid_val="$3" window_title="$4" daemon_mode="$5"
+  local pid_pending="${6:-false}"
+  local where="${7:-terminal}"
+  local risk_tags="${8:-}"
+  local lead_model="${9:-}"
+  local lead_effort="${10:-}"
+  local class_reason="${11:-}"
   local branch ts_now yaml_file lockfile session_id
   branch="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || printf -- 'unknown')"
   ts_now="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -391,15 +487,18 @@ _fanout_register_session() {
 
   python3 - "$lockfile" "$yaml_file" "$session_id" "$tid" "$PROJECT_ROOT" \
     "$branch" "$ts_now" "$cls" "$pid_val" "$window_title" "$daemon_mode" \
-    "docs/leadv2/tasks/${tid}/pulse.md" <<'PYEOF' \
+    "docs/leadv2/tasks/${tid}/pulse.md" "$pid_pending" "$where" \
+    "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" <<'PYEOF' \
     || log "WARN: could not register ${tid} in active.yaml — session is running unregistered"
 import sys, os, fcntl, tempfile, yaml
 
 (lockfile, yaml_path, session_id, task_id, worktree, branch, started_at,
- cls, pid_str, window_title, daemon_mode_str, pulse_log) = sys.argv[1:13]
+ cls, pid_str, window_title, daemon_mode_str, pulse_log, pid_pending_str,
+ where, risk_tags, lead_model, lead_effort, class_reason) = sys.argv[1:19]
 
 pid_val = None if pid_str in ("null", "", "None") else int(pid_str)
 daemon_mode = daemon_mode_str.lower() in ("1", "true", "yes")
+pid_pending = pid_pending_str.lower() in ("1", "true", "yes")
 
 def pid_alive(p):
     try:
@@ -436,8 +535,15 @@ try:
         "class": cls, "pulse_log": pulse_log, "pid": pid_val,
         "pid_birth": None, "parent_session_id": None,
         "daemon_mode": daemon_mode, "last_pulse_at": started_at,
-        "stale": False, "window_title": window_title,
+        "stale": False, "window_title": window_title, "pid_pending": pid_pending,
+        "where": where,
         "note": f"window_title={window_title}",
+        # SUPERVISOR-RETRO-01 item 1: persisted classifier output — the
+        # pre-launch decision that picked "class" above, kept for audit.
+        "risk_tags": risk_tags,
+        "lead_model": lead_model,
+        "lead_effort": lead_effort,
+        "class_reason": class_reason,
     })
 
     d = os.path.dirname(yaml_path)
@@ -456,106 +562,90 @@ PYEOF
 }
 
 launch_headless() {
-  local tid="$1" cls="$2"
+  local tid="$1" cls="$2" lead_model="${3:-sonnet}" lead_effort="${4:-medium}"
+  local risk_tags="${5:-}" class_reason="${6:-}"
   local task_dir="${PROJECT_ROOT}/docs/handoff/${tid}"
   mkdir -p "$task_dir"
   local logf="${task_dir}/fanout.log"
-  local pid
 
-  # exec inside the subshell so $! (of the outer &) IS the detached-process
-  # pid, not an extra unexeced subshell layer — matches
-  # leadv2-session-spawner.sh's own setsid-nohup convention as closely as bash
-  # allows with an explicit cd. macOS has no setsid (FIX-FANOUT-MACOS-LAUNCH-01):
-  # fall back to a plain backgrounded nohup + disown, which still detaches
-  # from the controlling terminal and keeps stdin/stdout/stderr identical on
-  # both branches.
-  # FIX-FANOUT-MODEL-ROUTING-01 / FIX-FANOUT-LAUNCH-V2-01 bug 1: fanout
-  # children run their lead on $MODEL (default sonnet), not the repo's normal
-  # /leadv2 default (Opus) — the supervising (non-fanout) lead keeps Opus
-  # judgment; children are cheaper, parallel workers. LEADV2_MAIN_MODEL alone
-  # does NOT change the child claude session's own model — only the
-  # `--model` CLI flag does that; LEADV2_MAIN_MODEL is exported in addition
-  # because the plugin reads it for subagent routing inside the session. Both
-  # the export and the CLI flag are scoped to the launched subshell/process
-  # only — they never touch the parent fanout invoker's environment, so a
-  # normal (non-fanout) /leadv2 session started separately is unaffected and
-  # still defaults to Opus.
-  # FIX-FANOUT-LAUNCH-V2-01 bug 2: `-p` is a single headless turn that exits
-  # once it returns — without LEADV2_DAEMON=1 the child dies after one turn
-  # instead of driving the full /leadv2 pipeline to completion.
-  # LEADV2_DAEMON=1 pairs with the pipeline's own /goal self-drive loop
-  # (read inside the running session, same convention already used by the
-  # tmux windowed path below) to keep re-invoking itself until the task is
-  # actually done, not just after the first response.
+  # exec inside the subshell so $! (of the outer &) IS the setsid pid, not an
+  # extra unexeced subshell layer — matches leadv2-session-spawner.sh's own
+  # setsid-nohup convention as closely as bash allows with an explicit cd.
+  # LEAD-ANCHOR-01: LEADV2_ASYNC_QUESTIONS=1 tells the spawned session's founder
+  # is watching the SUPERVISING lead's window, not this one — route every
+  # founder-facing question through leadv2-ask.sh instead of AskUserQuestion.
+  # SUPERVISOR-RETRO-01 item 2: hand off to leadv2-session-runner.sh instead of
+  # calling `claude -p` directly — the runner owns --model/--effort pinning
+  # plus the resume-on-exit completion loop to phase8-passed.flag.
+  # FANOUT-MACOS-LAUNCHER-01: macOS has no setsid — fall back to plain nohup
+  # inside the same subshell; nohup + trailing `&` still detaches from the
+  # controlling terminal, and $! below keeps resolving to the runner pid on
+  # both branches (see comment above).
   if command -v setsid >/dev/null 2>&1; then
-    ( cd "$PROJECT_ROOT" && export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL="$MODEL" LEADV2_MAXIMIZE_CHEAP_MODELS="$MAXIMIZE_CHEAP_MODELS" && exec setsid nohup "$CLAUDE_BIN" --model "$MODEL" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
+    ( cd "$PROJECT_ROOT" && \
+      export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
+             LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
+             LEADV2_LEAD_EFFORT="${lead_effort}" && \
+      exec setsid nohup "${SCRIPT_DIR}/leadv2-session-runner.sh" </dev/null >>"$logf" 2>&1 ) &
   else
-    ( cd "$PROJECT_ROOT" && export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL="$MODEL" LEADV2_MAXIMIZE_CHEAP_MODELS="$MAXIMIZE_CHEAP_MODELS" && exec nohup "$CLAUDE_BIN" --model "$MODEL" -p "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
-    disown
+    ( cd "$PROJECT_ROOT" && \
+      export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
+             LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
+             LEADV2_LEAD_EFFORT="${lead_effort}" && \
+      exec nohup "${SCRIPT_DIR}/leadv2-session-runner.sh" </dev/null >>"$logf" 2>&1 ) &
   fi
-  pid=$!
-  log "headless launch: task=${tid} pid=${pid} model=${MODEL} log=${logf}"
+  local pid=$!
+  log "headless launch: task=${tid} pid=${pid} model=${lead_model}/${lead_effort} log=${logf}"
 
-  _fanout_register_session "$tid" "$cls" "$pid" "leadv2: ${tid}" "true"
+  _fanout_register_session "$tid" "$cls" "$pid" "leadv2: ${tid}" "true" "false" "headless" \
+    "$risk_tags" "$lead_model" "$lead_effort" "$class_reason"
 }
 
-# _applescript_escape — escape a string for interpolation inside an
-# AppleScript double-quoted string literal. Order matters: backslashes first,
-# then quotes, else the quote-escaping backslashes get double-escaped.
-_applescript_escape() {
+# Escape a string for safe interpolation into an AppleScript double-quoted
+# string literal: backslash first (so we don't double-escape the quotes we
+# add next), then double-quote.
+_osa_escape() {
   local s="$1"
   s="${s//\\/\\\\}"
   s="${s//\"/\\\"}"
   printf '%s' "$s"
 }
 
+# _fanout_resolve_spawned_pid <tid> — one poll attempt. Prints the newest
+# live pid whose cmdline matches "/leadv2 <tid>" and is not already claimed by
+# another row in active.yaml. Returns 1 (empty stdout) if no match yet. Shared
+# by both launch_windowed (osascript hands back no pid) and launch_tmux
+# (tmux new-window hands back no `claude` pid either, only the shell's) — do
+# not duplicate this poll loop per backend.
+_fanout_resolve_spawned_pid() {
+  local tid="$1" yaml_file candidates registered p newest=""
+  candidates="$(pgrep -f "/leadv2 ${tid}" 2>/dev/null || true)"
+  [[ -z "$candidates" ]] && return 1
+  yaml_file="$(_leadv2_yaml_file)"
+  registered="$(python3 -c "
+import sys, yaml
+try:
+    with open(sys.argv[1], encoding='utf-8') as fh:
+        data = yaml.safe_load(fh) or {}
+except Exception:
+    data = {}
+print(' '.join(str(s.get('pid')) for s in (data.get('sessions') or []) if s.get('pid') is not None))
+" "$yaml_file" 2>/dev/null || true)"
+  for p in $candidates; do
+    case " ${registered} " in
+      *" ${p} "*) continue ;;
+    esac
+    newest="$p"
+  done
+  [[ -n "$newest" ]] || return 1
+  printf -- '%s' "$newest"
+}
+
 launch_windowed() {
-  local tid="$1" cls="$2"
-  local title="leadv2: ${tid}"
-
-  # Preferred path (FIX-FANOUT-MACOS-LAUNCH-01): tmux is tty-preserving and
-  # has no AppleScript-string-escaping hazard. Use the current tmux session
-  # if we're already inside one, else the dedicated "leadv2" session if it
-  # exists. Only fall back to osascript when neither is available.
-  local tmux_target=""
-  if command -v tmux >/dev/null 2>&1; then
-    if [[ -n "${TMUX:-}" ]]; then
-      tmux_target="$(tmux display-message -p '#S' 2>/dev/null || true)"
-    elif tmux has-session -t leadv2 2>/dev/null; then
-      tmux_target="leadv2"
-    fi
-  fi
-
-  if [[ -n "$tmux_target" ]]; then
-    local window_name="leadv2-${tid}"
-    local tmux_cmd
-    # FIX-FANOUT-MODEL-ROUTING-01 / FIX-FANOUT-LAUNCH-V2-01 bug 1: fanout
-    # children lead on $MODEL (see launch_headless comment above), passed via
-    # --model — scoped to this tmux window's shell only.
-    printf -v tmux_cmd \
-      'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=%q LEADV2_MAXIMIZE_CHEAP_MODELS=%q LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q; cd %q && exec %q --model %q %q' \
-      "$MODEL" "$MAXIMIZE_CHEAP_MODELS" "$PROJECT_ROOT" "$PROJECT_ROOT" "$tid" "$PROJECT_ROOT" "$CLAUDE_BIN" "$MODEL" "/leadv2 ${tid}"
-    # Do NOT pipe claude stdout (`| tee`) — breaks the interactive TTY and
-    # hangs claude. Logging, if ever needed, goes through `tmux pipe-pane`.
-    # FIX-FANOUT-LAUNCH-V2-01 bug 4: never target/hardcode a window index.
-    # `-t "${tmux_target}:"` (trailing colon, session only, no index) lets
-    # tmux assign the next free index itself, and `-P -F '#{window_id}'`
-    # captures the actual unique window id tmux created for THIS window so
-    # send-keys always targets a window that exists — a name-based target
-    # (`session:window_name`) can silently diverge if tmux disambiguates a
-    # duplicate window name, which is what produced "create window failed:
-    # index 1 in use" followed by "can't find window".
-    local window_id
-    window_id="$(tmux new-window -P -F '#{window_id}' -t "${tmux_target}:" -n "$window_name" -c "$PROJECT_ROOT")"
-    tmux send-keys -t "$window_id" "$tmux_cmd" C-m
-    log "tmux launch: task=${tid} session=${tmux_target} window=${window_name} window_id=${window_id} model=${MODEL}"
-
-    _fanout_register_session "$tid" "$cls" "null" "$title" "false"
-    return 0
-  fi
-
+  local tid="$1" cls="$2" lead_model="${3:-sonnet}" lead_effort="${4:-medium}"
+  local risk_tags="${5:-}" class_reason="${6:-}"
   if [[ "$(uname -s)" != "Darwin" ]]; then
-    log_error "windowed launch requires macOS (osascript) or a running tmux session. Use --headless on this platform."
+    log_error "windowed launch requires macOS (osascript). Use --headless on this platform."
     exit 1
   fi
   if ! command -v osascript >/dev/null 2>&1; then
@@ -563,60 +653,198 @@ launch_windowed() {
     exit 1
   fi
 
+  local title="leadv2: ${tid}"
   local cmd
-  # FIX-FANOUT-LAUNCH-V2-01 bug 3: this fallback used to export ONLY
-  # LEADV2_MAIN_MODEL — children stalled on interactive AskUserQuestion
-  # (LEADV2_ASYNC_QUESTIONS missing) and silently ran on Opus (--model
-  # missing, LEADV2_MAIN_MODEL alone does not change the session model).
-  # Export the SAME full set as the tmux path above and pass --model, scoped
-  # to this Terminal/iTerm2 shell only.
-  printf -v cmd \
-    'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_MAIN_MODEL=%q LEADV2_MAXIMIZE_CHEAP_MODELS=%q LEADV2_PROJECT_ROOT=%q CLAUDE_PROJECT_DIR=%q LEADV2_TASK_ID=%q && cd %q && %q --model %q %q' \
-    "$MODEL" "$MAXIMIZE_CHEAP_MODELS" "$PROJECT_ROOT" "$PROJECT_ROOT" "$tid" "$PROJECT_ROOT" "$CLAUDE_BIN" "$MODEL" "/leadv2 ${tid}"
-  # Escape for the AppleScript string-literal context (Bug 2,
-  # FIX-FANOUT-MACOS-LAUNCH-01): shell %q backslash-escaping is not valid
-  # inside an AppleScript "..." literal and previously errored with -2741.
-  local as_cmd as_title
-  as_cmd="$(_applescript_escape "$cmd")"
-  as_title="$(_applescript_escape "$title")"
+  # LEAD-ANCHOR-01: same async-question env export as launch_headless above.
+  # lean: windowed backend keeps calling `claude -p` directly (not routed
+  # through leadv2-session-runner.sh) — the daemon-mode resume loop targets
+  # unattended headless/tmux fanout (design doc §2); an interactive Terminal
+  # window already has a human watching to relaunch on exit. LEADV2_LEAD_MODEL
+  # is still exported so the classifier's model/effort decision (item 1)
+  # applies uniformly across all three backends. Upgrade when windowed fanout
+  # needs unattended resume too.
+  printf -v cmd 'cd %q && export LEADV2_ASYNC_QUESTIONS=1 LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q && %q --model %q --effort %q %q' \
+    "$PROJECT_ROOT" "$lead_model" "$lead_effort" "$CLAUDE_BIN" "$lead_model" "$lead_effort" "/leadv2 ${tid}"
+
+  # AppleScript double-quoted strings treat backslash as an escape char, but
+  # bash's %q emits backslash-escaped tokens (e.g. `/leadv2\ ${tid}`) — raw
+  # interpolation broke every osascript call with a -2741 syntax error and no
+  # window ever opened. Escape for AppleScript (backslash first, then quote)
+  # on both interpolated strings before embedding.
+  local cmd_osa title_osa
+  cmd_osa="$(_osa_escape "$cmd")"
+  title_osa="$(_osa_escape "$title")"
 
   if pgrep -x iTerm2 >/dev/null 2>&1; then
     osascript <<OSA
 tell application "iTerm2"
   set newWindow to (create window with default profile)
   tell current session of newWindow
-    set name to "${as_title}"
-    write text "${as_cmd}"
+    set name to "${title_osa}"
+    write text "${cmd_osa}"
   end tell
 end tell
 OSA
   else
     osascript <<OSA
 tell application "Terminal"
-  set newTab to do script "${as_cmd}"
-  set custom title of front window to "${as_title}"
+  set newTab to do script "${cmd_osa}"
+  set custom title of front window to "${title_osa}"
   activate
 end tell
 OSA
   fi
   log "windowed launch: task=${tid} title='${title}'"
 
-  # lean: pid unknown — osascript hands the shell command to Terminal/iTerm2
-  # asynchronously and doesn't hand back the spawned `claude` process pid
-  # without a much heavier AppleScript round-trip. Registered pid=null here;
-  # Phase 0's own gate1 registration (durable-pid walk) fills it in shortly
-  # after the session starts. upgrade when a reliable pid handback is needed.
-  _fanout_register_session "$tid" "$cls" "null" "$title" "false"
+  # osascript hands the shell command to Terminal/iTerm2 asynchronously and
+  # never hands back the spawned `claude` process pid directly. Registering
+  # with pid=null let the row be indistinguishable from a dead session to any
+  # pid-liveness sweep, and 3-of-4 windowed launches were silently dropped
+  # from active.yaml as a result (LEAD-ANCHOR-01). Resolve the REAL pid by
+  # polling pgrep for the newly-spawned "/leadv2 ${tid}" process (bounded,
+  # ~10s @ 0.25s intervals — osascript + shell + claude startup is usually
+  # <1s but give slow machines headroom). If it still can't be found, fall
+  # back to pid_pending=true; the stale-sweeper grants pid_pending rows a
+  # grace window instead of treating them as dead.
+  local _resolved_pid="" _attempt
+  for ((_attempt = 0; _attempt < 40; _attempt++)); do
+    _resolved_pid="$(_fanout_resolve_spawned_pid "$tid" || true)"
+    [[ -n "$_resolved_pid" ]] && break
+    sleep 0.25
+  done
+
+  if [[ -n "$_resolved_pid" ]]; then
+    log "windowed launch: task=${tid} resolved pid=${_resolved_pid} model=${lead_model}/${lead_effort}"
+    _fanout_register_session "$tid" "$cls" "$_resolved_pid" "$title" "false" "false" "terminal" \
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason"
+  else
+    log "WARN: could not resolve pid for task=${tid} within 10s — registering pid_pending=true"
+    _fanout_register_session "$tid" "$cls" "null" "$title" "false" "true" "terminal" \
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason"
+  fi
+}
+
+# launch_tmux <tid> <cls> — one shared tmux session "leadv2", one WINDOW per
+# task (never panes — panes get unreadable at 4+ tasks). Reuses the "leadv2"
+# session if it already exists instead of spawning a second one. Output is
+# piped to docs/handoff/<tid>/session.log so the supervisor can read it
+# without attaching. Survives Terminal.app window close/quit (the exact
+# failure LEAD-ANCHOR-01 exists to fix).
+TMUX_SESSION_NAME="${LEADV2_FANOUT_TMUX_SESSION:-leadv2}"
+declare -a TMUX_LAUNCHED_IDS=()
+
+launch_tmux() {
+  local tid="$1" cls="$2" lead_model="${3:-sonnet}" lead_effort="${4:-medium}"
+  local risk_tags="${5:-}" class_reason="${6:-}"
+  local window="$tid"
+  local target="${TMUX_SESSION_NAME}:${window}"
+  local task_dir="${PROJECT_ROOT}/docs/handoff/${tid}"
+  mkdir -p "$task_dir"
+  local logf="${task_dir}/session.log"
+  : > "$logf"  # truncate/create so "non-empty after launch" is a real signal, not stale content
+
+  # Some hosts (observed: no-tty parent shells with no pty anywhere in the
+  # chain) run an intermittently unstable tmux server that can exit between
+  # one window's creation and the next, independent of the new-window notty
+  # fix below. Retry the whole ensure-session/window/send-keys sequence up
+  # to 3 times, re-verifying with `has-session` after each attempt, before
+  # falling back to pid_pending — cheap insurance, a healthy server no-ops
+  # through this on attempt 1.
+  local _tmux_attempt
+  for ((_tmux_attempt = 1; _tmux_attempt <= 3; _tmux_attempt++)); do
+    if ! tmux has-session -t "$TMUX_SESSION_NAME" 2>/dev/null; then
+      tmux new-session -d -s "$TMUX_SESSION_NAME" -n "$window" -c "$PROJECT_ROOT"
+      log "tmux: created session '${TMUX_SESSION_NAME}' with window '${window}' (attempt ${_tmux_attempt})"
+    else
+      # Never reuse a window whose task is already registered live in
+      # active.yaml — but that task never reaches LAUNCH in the selection
+      # pass above (active_task_ids exclusion), so any window with this name
+      # here is necessarily orphaned/stale. Recreate rather than reusing it.
+      if tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep -qx "$window"; then
+        log "tmux: window '${window}' already exists in '${TMUX_SESSION_NAME}' (stale) — recreating"
+        tmux kill-window -t "${TMUX_SESSION_NAME}:${window}" 2>/dev/null || true
+      fi
+      # `tmux new-window` on an already-detached session crashes the tmux
+      # server ("server exited unexpectedly") when the CALLING process has
+      # no controlling tty (isatty()==false) — reproduced deterministically
+      # when this script itself runs from a tty-less parent (e.g. a /leadv2
+      # lead's own headless tool-call shell fanning out more sessions).
+      # `script -q /dev/null` gives the tmux client a synthetic pty, which
+      # the tmux server needs to safely allocate the new window's pane;
+      # verified fix across repeated runs. `new-session -d` above has never
+      # reproduced this (only the SECOND+ window trips it), unwrapped.
+      if [[ "$(uname -s)" == "Darwin" ]] && command -v script >/dev/null 2>&1 && ! tty -s 2>/dev/null; then
+        script -q /dev/null tmux new-window -t "$TMUX_SESSION_NAME" -n "$window" -c "$PROJECT_ROOT" >/dev/null 2>&1 || true
+      else
+        tmux new-window -t "$TMUX_SESSION_NAME" -n "$window" -c "$PROJECT_ROOT" 2>/dev/null || true
+      fi
+      log "tmux: added window '${window}' to existing session '${TMUX_SESSION_NAME}' (attempt ${_tmux_attempt})"
+    fi
+
+    if tmux has-session -t "$TMUX_SESSION_NAME" 2>/dev/null \
+       && tmux list-windows -t "$TMUX_SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep -qx "$window"; then
+      break
+    fi
+    log "WARN: tmux server unstable creating window '${window}' (attempt ${_tmux_attempt}/3) — retrying"
+    sleep 0.3
+  done
+
+  local logf_q
+  logf_q="$(printf -- '%q' "$logf")"
+  tmux pipe-pane -o -t "$target" "cat >> ${logf_q}" 2>/dev/null || true
+
+  # SUPERVISOR-RETRO-01 item 2: hand off to leadv2-session-runner.sh (same as
+  # launch_headless) instead of `claude -p` directly, so tmux windows also
+  # get --model/--effort pinning + resume-on-exit toward phase8-passed.flag.
+  # daemon=false was previously registered here even though nothing acted as
+  # a daemon; the runner makes that field honest.
+  local cmd
+  printf -v cmd 'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q; exec %q' \
+    "$tid" "$lead_model" "$lead_effort" "${SCRIPT_DIR}/leadv2-session-runner.sh"
+  tmux send-keys -t "$target" "$cmd" C-m 2>/dev/null || true
+
+  # tmux new-window hands back the pane's shell pid, not the exec'd `claude`
+  # pid (and CLAUDE_BIN may itself be a wrapper script in tests) — resolve
+  # the real pid the same way launch_windowed does, via pgrep polling.
+  local _resolved_pid="" _attempt
+  for ((_attempt = 0; _attempt < 40; _attempt++)); do
+    _resolved_pid="$(_fanout_resolve_spawned_pid "$tid" || true)"
+    [[ -n "$_resolved_pid" ]] && break
+    sleep 0.25
+  done
+
+  if [[ -n "$_resolved_pid" ]]; then
+    log "tmux launch: task=${tid} window=${window} resolved pid=${_resolved_pid} model=${lead_model}/${lead_effort}"
+    _fanout_register_session "$tid" "$cls" "$_resolved_pid" "$window" "true" "false" "tmux" \
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason"
+  else
+    log "WARN: could not resolve pid for task=${tid} within 10s — registering pid_pending=true"
+    _fanout_register_session "$tid" "$cls" "null" "$window" "true" "true" "tmux" \
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason"
+  fi
+
+  TMUX_LAUNCHED_IDS+=("$tid")
 }
 
 for i in "${!LAUNCH_IDS[@]}"; do
   tid="${LAUNCH_IDS[$i]}"
   cls="${LAUNCH_CLASSES[$i]}"
-  if [[ "$HEADLESS" == "true" ]]; then
-    launch_headless "$tid" "$cls"
-  else
-    launch_windowed "$tid" "$cls"
-  fi
+  lead_model="${LAUNCH_MODELS[$i]:-sonnet}"
+  lead_effort="${LAUNCH_EFFORTS[$i]:-medium}"
+  risk_tags="${LAUNCH_RISK_TAGS[$i]:-}"
+  class_reason="${LAUNCH_REASONS[$i]:-}"
+  case "$BACKEND" in
+    headless) launch_headless "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" ;;
+    tmux)     launch_tmux "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" ;;
+    windows)  launch_windowed "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" ;;
+  esac
 done
+
+if [[ "${#TMUX_LAUNCHED_IDS[@]}" -gt 0 ]]; then
+  log "tmux: attach to all sessions: tmux attach -t ${TMUX_SESSION_NAME}"
+  for tid in "${TMUX_LAUNCHED_IDS[@]}"; do
+    log "tmux: attach directly to ${tid}: tmux attach -t ${TMUX_SESSION_NAME} \\; select-window -t ${tid}"
+  done
+fi
 
 exit 0
