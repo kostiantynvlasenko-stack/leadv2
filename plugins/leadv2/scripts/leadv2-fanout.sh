@@ -220,6 +220,27 @@ def classify_task(t):
     tags = t.get("tags") or t.get("labels") or []
     tags_csv = ",".join(str(x) for x in tags) if isinstance(tags, list) else str(tags)
     existing = str((t.get("context") or {}).get("class") or t.get("class") or "")
+
+    # C2 fix (SUPERVISE-V2-01 fix-1): existence guard, loud WARN, and a SAFE
+    # fallback -- never a silent Heavy/opus escalation. A missing/non-
+    # executable classifier used to fall into the except branch below on
+    # EVERY task (its only trigger was FileNotFoundError from a script that
+    # didn't exist in this repo), force-upgrading every launch to Heavy/opus
+    # and burning the scarce Claude-Max bucket, with the cause buried in an
+    # unread report-line `reason` string. Preserve the existing tasks.yaml
+    # class (or Standard) instead, and print the WARN to stderr where a human
+    # actually sees it.
+    if not (os.path.isfile(CLASSIFY_SCRIPT) and os.access(CLASSIFY_SCRIPT, os.X_OK)):
+        print(f"[fanout] WARN: leadv2-fanout-classify.sh missing/not executable at {CLASSIFY_SCRIPT} -- "
+              f"task={tid} falls back to existing class ({existing or 'Standard'}), NOT auto-escalated to Heavy. "
+              "Run leadv2-plugin-sync.sh to fix.", file=sys.stderr)
+        fallback_class = existing if existing else "Standard"
+        fallback_model = "opus" if fallback_class.lower() in ("heavy", "strategic") else "sonnet"
+        fallback_effort = "high" if fallback_class.lower() in ("heavy", "strategic") else "medium"
+        result = (fallback_class, "", "classify script unavailable -- safe fallback, no risk escalation", fallback_model, fallback_effort)
+        _classify_cache[tid] = result
+        return result
+
     try:
         proc = subprocess.run(
             [CLASSIFY_SCRIPT, "--intent", intent, "--tags", tags_csv, "--existing-class", existing],
@@ -238,9 +259,13 @@ def classify_task(t):
             out.get("lead_effort", "medium") or "medium",
         )
     except Exception as e:
-        # Classifier crash is NOT a "no signal" case -- escalate to Heavy/opus
-        # rather than silently falling back to Standard (the exact bug this
-        # task fixes). A human reviews the fanout report before anything runs.
+        # Classifier crash (script exists but errored at runtime) is NOT a
+        # "no signal" case -- escalate to Heavy/opus rather than silently
+        # falling back to Standard (the exact bug this task fixes), but LOUD
+        # this time: print the WARN so it isn't buried in an unread report
+        # line. A human reviews the fanout report before anything runs.
+        print(f"[fanout] WARN: leadv2-fanout-classify.sh crashed for task={tid} ({e}) -- "
+              "escalating to Heavy/opus (conservative default on classifier crash).", file=sys.stderr)
         result = ("Heavy", "classifier_error", f"classifier failed: {e}", "opus", "high")
     _classify_cache[tid] = result
     return result
@@ -544,6 +569,21 @@ try:
         "lead_model": lead_model,
         "lead_effort": lead_effort,
         "class_reason": class_reason,
+        # SUPERVISE-V2-01 fix-1 (Codex#2): same registry-honesty field set
+        # leadv2_active_register()/op=register writes (leadv2-active-registry.sh)
+        # -- fanout is a SECOND writer of active.yaml (window_title has no slot
+        # in the shared register() op, see comment above), so these fields must
+        # be set here too rather than routed through that function.
+        "protocol_version": 2,
+        "backend": where,
+        "phase_started_at": started_at,
+        "updated_at": started_at,
+        "tmux_window": window_title if where == "tmux" else None,
+        # lean: pane index not tracked (one pane per window in this backend)
+        # -- upgrade when launch_tmux ever splits panes within a window.
+        "tmux_pane": None,
+        "log_path": pulse_log,
+        "provider_receipts": [],
     })
 
     d = os.path.dirname(yaml_path)
@@ -581,18 +621,35 @@ launch_headless() {
   # inside the same subshell; nohup + trailing `&` still detaches from the
   # controlling terminal, and $! below keeps resolving to the runner pid on
   # both branches (see comment above).
-  if command -v setsid >/dev/null 2>&1; then
+  # C2 fix (SUPERVISE-V2-01 fix-1): leadv2-session-runner.sh is a hard
+  # dependency of every real headless launch -- an existence guard so a
+  # generated-target repo whose sync lagged behind this canonical source
+  # fails LOUDLY (and falls back to the pre-runner `claude -p` invocation)
+  # instead of `exec`-ing a path that silently doesn't exist.
+  local _runner="${SCRIPT_DIR}/leadv2-session-runner.sh"
+  if [[ ! -x "$_runner" ]]; then
+    log "WARN: leadv2-session-runner.sh missing/not executable at ${_runner} -- falling back to a plain 'claude -p' launch with NO resume-on-exit loop. Run leadv2-plugin-sync.sh to fix."
+    if command -v setsid >/dev/null 2>&1; then
+      ( cd "$PROJECT_ROOT" && \
+        exec setsid nohup "${CLAUDE_BIN}" -p --model "${lead_model}" --effort "${lead_effort}" \
+          --permission-mode bypassPermissions "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
+    else
+      ( cd "$PROJECT_ROOT" && \
+        exec nohup "${CLAUDE_BIN}" -p --model "${lead_model}" --effort "${lead_effort}" \
+          --permission-mode bypassPermissions "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
+    fi
+  elif command -v setsid >/dev/null 2>&1; then
     ( cd "$PROJECT_ROOT" && \
       export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
              LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
              LEADV2_LEAD_EFFORT="${lead_effort}" && \
-      exec setsid nohup "${SCRIPT_DIR}/leadv2-session-runner.sh" </dev/null >>"$logf" 2>&1 ) &
+      exec setsid nohup "$_runner" </dev/null >>"$logf" 2>&1 ) &
   else
     ( cd "$PROJECT_ROOT" && \
       export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
              LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
              LEADV2_LEAD_EFFORT="${lead_effort}" && \
-      exec nohup "${SCRIPT_DIR}/leadv2-session-runner.sh" </dev/null >>"$logf" 2>&1 ) &
+      exec nohup "$_runner" </dev/null >>"$logf" 2>&1 ) &
   fi
   local pid=$!
   log "headless launch: task=${tid} pid=${pid} model=${lead_model}/${lead_effort} log=${logf}"
@@ -799,8 +856,18 @@ launch_tmux() {
   # daemon=false was previously registered here even though nothing acted as
   # a daemon; the runner makes that field honest.
   local cmd
-  printf -v cmd 'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q; exec %q' \
-    "$tid" "$lead_model" "$lead_effort" "${SCRIPT_DIR}/leadv2-session-runner.sh"
+  # C2 fix (SUPERVISE-V2-01 fix-1): same existence guard as launch_headless --
+  # a missing/non-executable runner must not silently `exec` a dead path
+  # inside the tmux window (the window would just show "command not found").
+  local _runner="${SCRIPT_DIR}/leadv2-session-runner.sh"
+  if [[ ! -x "$_runner" ]]; then
+    log "WARN: leadv2-session-runner.sh missing/not executable at ${_runner} -- falling back to a plain 'claude -p' launch with NO resume-on-exit loop. Run leadv2-plugin-sync.sh to fix."
+    printf -v cmd 'exec %q -p --model %q --effort %q --permission-mode bypassPermissions %q' \
+      "$CLAUDE_BIN" "$lead_model" "$lead_effort" "/leadv2 ${tid}"
+  else
+    printf -v cmd 'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q; exec %q' \
+      "$tid" "$lead_model" "$lead_effort" "$_runner"
+  fi
   tmux send-keys -t "$target" "$cmd" C-m 2>/dev/null || true
 
   # tmux new-window hands back the pane's shell pid, not the exec'd `claude`
