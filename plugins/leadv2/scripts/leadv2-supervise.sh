@@ -253,24 +253,57 @@ if [[ -z "$SINCE" ]]; then
   TRUTH_PROBE_SH="${PROJECT_ROOT}/.claude/leadv2-overrides/supervise-truth-probe.sh"
   if [[ -x "$TRUTH_PROBE_SH" ]]; then
     TRUTH_BREACHES_JSON="$(python3 - "$TRUTH_PROBE_SH" <<'PYPROBE'
-import subprocess, sys, json
+# SUPERVISE-V2-01 fix: the probe script backgrounds 3 check functions (ssh/
+# curl/python3 children) via `&`. `subprocess.run(capture_output=True,
+# timeout=N)` pipes stdout/stderr; on timeout it SIGKILLs only the DIRECT
+# child, never the process group. Any grandchild still alive at that instant
+# (a straggler ssh/curl under network load) keeps the inherited PIPE write-end
+# open, so CPython's communicate() blocks draining that pipe well past the
+# declared timeout -- reproduced hanging 20s+ past a timeout=10 in isolation.
+# Fix: start the probe in its own session (setsid) so `&`-backgrounded
+# descendants share its process group (bash job control is off by default in
+# non-interactive scripts), capture stdout to a plain temp FILE (never
+# blocks -- no pipe backpressure), and on timeout SIGKILL the whole group via
+# os.killpg before giving up. Timeout raised 10->12 to sit safely above the
+# probe's own 9s internal watchdog + cleanup instead of nearly tying it.
+import subprocess, sys, json, os, signal, tempfile
 
 probe_path = sys.argv[1]
 try:
-    r = subprocess.run([probe_path], capture_output=True, text=True, timeout=10)
-    if r.returncode != 0:
-        print(json.dumps({"status": "unavailable", "breaches": [], "reason": f"exit {r.returncode}"}))
-    else:
+    with tempfile.TemporaryFile() as outf:
+        proc = subprocess.Popen(
+            [probe_path],
+            stdout=outf,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
         try:
-            d = json.loads(r.stdout)
-            breaches = d.get("breaches") if isinstance(d, dict) else None
-            if not isinstance(breaches, list):
-                breaches = []
-            print(json.dumps({"status": "checked", "breaches": breaches}))
-        except Exception as e:
-            print(json.dumps({"status": "unavailable", "breaches": [], "reason": f"malformed_json:{e.__class__.__name__}"}))
-except subprocess.TimeoutExpired:
-    print(json.dumps({"status": "unavailable", "breaches": [], "reason": "timeout"}))
+            rc = proc.wait(timeout=12)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+            print(json.dumps({"status": "unavailable", "breaches": [], "reason": "timeout"}))
+            sys.exit(0)
+        outf.seek(0)
+        out = outf.read().decode("utf-8", errors="replace")
+        if rc != 0:
+            print(json.dumps({"status": "unavailable", "breaches": [], "reason": f"exit {rc}"}))
+        else:
+            try:
+                d = json.loads(out)
+                breaches = d.get("breaches") if isinstance(d, dict) else None
+                if not isinstance(breaches, list):
+                    breaches = []
+                print(json.dumps({"status": "checked", "breaches": breaches}))
+            except Exception as e:
+                print(json.dumps({"status": "unavailable", "breaches": [], "reason": f"malformed_json:{e.__class__.__name__}"}))
 except Exception as e:
     print(json.dumps({"status": "unavailable", "breaches": [], "reason": e.__class__.__name__}))
 PYPROBE
