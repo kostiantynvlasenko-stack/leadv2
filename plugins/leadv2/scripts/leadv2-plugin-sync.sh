@@ -111,19 +111,43 @@ _sync_project_root() {
     _rsync_or_dry "project/scripts[${root##*/}]" "${src}" "${proj_scripts}" --recursive
   fi
 
-  # (c2) Some repos ALSO vendor leadv2-* scripts at <root>/scripts/ (top-level, NOT
-  # .claude/scripts/) — e.g. persona-engine's out-of-worktree control plane
-  # (2026-07-14, 6321bf2). This second location was never covered by (c) above, so it
-  # silently drifted (SUPERVISE-V2-01 found it missing leadv2-supervise-loop.sh /
-  # leadv2-supervise-pick.sh entirely + a stale leadv2-supervise.sh). Additive-only,
-  # leadv2-* filter — mirrors (e)'s pattern — and only touches repos that already use
-  # this pattern (>=1 leadv2-* file present), so it never injects vendoring into repos
-  # that don't use it (m3-market, respiro-ios currently don't).
+  # (c2) Some repos ALSO vendor a CURATED subset of leadv2-* scripts at
+  # <root>/scripts/ (top-level, NOT .claude/scripts/) — e.g. persona-engine's
+  # out-of-worktree control plane (2026-07-14, 6321bf2). This second location was
+  # never covered by (c) above, so it silently drifted (SUPERVISE-V2-01 found it
+  # missing leadv2-supervise-loop.sh/leadv2-supervise-pick.sh entirely + a stale
+  # leadv2-supervise.sh). FIXED SET, not a leadv2-* wildcard: a wildcard rsync
+  # dumps the FULL ~150-file canonical scripts/ dir into what has always been a
+  # deliberately curated ~13-file subset (confirmed by scoping this list to the
+  # pre-existing files there + the 3 hard runtime deps leadv2-supervise.sh's
+  # source chain actually requires: active-registry.sh sourced directly by
+  # supervise.sh L136-138; tasks-lib.sh sourced directly by supervise-pick.sh
+  # L50; loop.sh/pick.sh named explicitly missing by SUPERVISE-V2-01). Extend
+  # this list only when a repo's control-plane scripts/ genuinely adopts a new
+  # companion — never switch this back to a wildcard.
   local proj_scripts_toplevel="${root}/scripts"
+  local -a toplevel_curated_files=(
+    leadv2-answer.sh leadv2-ask.sh leadv2-bus.sh leadv2-client-surface-gate.sh
+    leadv2-fanout-classify.sh leadv2-fanout.sh leadv2-finish.sh
+    leadv2-merge-queue.sh leadv2-provider-rollup.sh leadv2-session-runner.sh
+    leadv2-state-path.sh leadv2-supervise.sh leadv2-tasks-regen-gate.sh
+    leadv2-active-registry.sh leadv2-supervise-loop.sh leadv2-supervise-pick.sh
+    leadv2-tasks-lib.sh
+  )
   if [[ -d "${proj_scripts_toplevel}" ]] && compgen -G "${proj_scripts_toplevel}/leadv2-*" > /dev/null 2>&1; then
-    log "Syncing -> project top-level scripts (c2, out-of-worktree control plane): ${proj_scripts_toplevel} [leadv2-* only, additive]"
-    _rsync_or_dry "project/scripts-toplevel[${root##*/}]" "${src}" "${proj_scripts_toplevel}" \
-      --include='leadv2-*' --exclude='*' -d
+    log "Syncing -> project top-level scripts (c2, out-of-worktree control plane): ${proj_scripts_toplevel} [curated set, additive]"
+    for cf in "${toplevel_curated_files[@]}"; do
+      local cf_src="${src}${cf}"
+      if [[ -f "${cf_src}" ]]; then
+        if [[ "${DRY_RUN}" == "true" ]]; then
+          log "DRY_RUN [project/scripts-toplevel]: cp ${cf_src} ${proj_scripts_toplevel}/${cf}"
+        else
+          mkdir -p "${proj_scripts_toplevel}"
+          cp -p "${cf_src}" "${proj_scripts_toplevel}/${cf}"
+        fi
+      fi
+    done
+    log_ok "[project/scripts-toplevel[${root##*/}]] synced curated set -> ${proj_scripts_toplevel}"
   fi
 
   log "Syncing -> project contracts (d): ${proj_contracts}"
