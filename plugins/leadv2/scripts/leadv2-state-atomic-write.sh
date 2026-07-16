@@ -7,10 +7,16 @@
 #
 # - Updates docs/leadv2/tasks/<task-id>/STATE.md: sets "Field: value"
 # - Appends docs/leadv2/tasks/<task-id>/pulse.md: "<utc-iso> field=value"
-# - Uses flock on STATE.md.lock — both writes succeed or both rollback.
+# - Uses a Python fcntl.flock (LOCK_EX, 10s poll-timeout) on STATE.md.lock —
+#   both writes succeed or both rollback. NO GNU `flock` executable
+#   dependency (SUPERVISE-V2-01 item 3, macOS constraint: macOS ships no
+#   `flock(1)`) — the lock is acquired inside the python core itself.
 
 set -euo pipefail
-trap 'exit 0' ERR
+# NOTE: no `trap 'exit 0' ERR` here (removed, SUPERVISE-V2-01 item 3) — that
+# was a fail-SUCCESS path: any mid-script error (lock timeout, disk full,
+# malformed STATE.md) silently exited 0, masking a real write failure from
+# every caller that checks `$?`. Errors now propagate as non-zero exit.
 
 SCRIPT_NAME="leadv2-state-atomic-write"
 REPO="${CLAUDE_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
@@ -64,138 +70,166 @@ import sys
 import os
 import tempfile
 import time
+import fcntl
+import errno
 
 state_file = sys.argv[1]
 field = sys.argv[2]
 value = sys.argv[3]
 pulse_file = sys.argv[4]
+lock_file = sys.argv[5]
+LOCK_TIMEOUT_S = 10.0
 
-# ── Read STATE.md ──────────────────────────────────────────────────────────────
-with open(state_file, 'r', encoding='utf-8') as f:
-    lines = f.readlines()
-
-# ── Update or append field ─────────────────────────────────────────────────────
-# Matches YAML frontmatter "Field: value" or plain "Field: value" lines.
-# Case-insensitive field match.
-field_lower = field.lower()
-updated = False
-new_lines = []
-for line in lines:
-    # Match "Field: ..." at start of line (optional leading spaces)
-    stripped = line.lstrip()
-    colon_pos = stripped.find(':')
-    if colon_pos > 0:
-        candidate = stripped[:colon_pos].strip().lower()
-        if candidate == field_lower:
-            indent = line[: len(line) - len(stripped)]
-            new_lines.append(f"{indent}{field}: {value}\n")
-            updated = True
-            continue
-    new_lines.append(line)
-
-if not updated:
-    # Append field before final YAML fence "---" if present, else at end
-    fence_idx = None
-    for i in range(len(new_lines) - 1, -1, -1):
-        if new_lines[i].strip() == '---':
-            fence_idx = i
-            break
-    if fence_idx is not None:
-        new_lines.insert(fence_idx, f"{field}: {value}\n")
-    else:
-        # Ensure trailing newline
-        if new_lines and not new_lines[-1].endswith('\n'):
-            new_lines[-1] += '\n'
-        new_lines.append(f"{field}: {value}\n")
-
-# ── Write STATE.md atomically (tmp + fsync + rename) ──────────────────────────
-state_dir = os.path.dirname(state_file)
-fd, tmp_path = tempfile.mkstemp(dir=state_dir, suffix='.tmp')
-try:
-    with os.fdopen(fd, 'w', encoding='utf-8') as tf:
-        tf.writelines(new_lines)
-        tf.flush()
-        os.fsync(tf.fileno())
-    os.replace(tmp_path, state_file)
-except Exception:
+# ── Acquire exclusive lock — Python fcntl only, no GNU flock(1) dependency ──
+# (SUPERVISE-V2-01 item 3: macOS ships no flock(1) executable). Non-blocking
+# poll loop rather than a blocking flock() call so a stuck holder produces a
+# loud timeout error instead of hanging this process indefinitely.
+lock_fd = open(lock_file, 'a+')
+deadline = time.monotonic() + LOCK_TIMEOUT_S
+locked = False
+while time.monotonic() < deadline:
     try:
-        os.unlink(tmp_path)
-    except OSError:
-        pass
-    raise
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        locked = True
+        break
+    except OSError as e:
+        if e.errno not in (errno.EAGAIN, errno.EACCES):
+            raise
+        time.sleep(0.05)
+if not locked:
+    print(f"ERROR: lock timeout after {LOCK_TIMEOUT_S}s on {lock_file}", file=sys.stderr)
+    sys.exit(1)
 
-# ── Append pulse.md ────────────────────────────────────────────────────────────
-utc_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-pulse_line = f"{utc_iso} {field}={value}\n"
-
-with open(pulse_file, 'a', encoding='utf-8') as pf:
-    pf.write(pulse_line)
-    pf.flush()
-    os.fsync(pf.fileno())
-
-# ── Cap pulse.md to last N lines (LEADV2_PULSE_MAX_LINES, default 200) ────────
-# Pruned head is archived to pulse-archive.md rather than discarded.
 try:
-    pulse_max = max(1, int(os.environ.get('LEADV2_PULSE_MAX_LINES', '200') or '200'))
-except (ValueError, TypeError):
-    pulse_max = 200
-with open(pulse_file, 'r', encoding='utf-8') as pf:
-    pulse_lines = pf.readlines()
-if len(pulse_lines) > pulse_max:
-    head_lines = pulse_lines[: len(pulse_lines) - pulse_max]
-    keep_lines = pulse_lines[len(pulse_lines) - pulse_max :]
-    archive_file = os.path.join(os.path.dirname(pulse_file), 'pulse-archive.md')
-    # Read existing archive content, then write combined (existing + new head_lines) atomically.
-    # Atomic archive write prevents duplicate archive entries when the process is killed after
-    # a partial append but before pulse.md is truncated (on next run head_lines re-archived).
-    existing_archive: list[str] = []
-    if os.path.exists(archive_file):
-        with open(archive_file, 'r', encoding='utf-8') as _af:
-            existing_archive = _af.readlines()
-    archive_dir = os.path.dirname(archive_file)
-    fd_arch, tmp_arch = tempfile.mkstemp(dir=archive_dir, suffix='.archive.tmp')
+    # ── Read STATE.md ────────────────────────────────────────────────────────
+    with open(state_file, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    # ── Update or append field ───────────────────────────────────────────────
+    # Matches YAML frontmatter "Field: value" or plain "Field: value" lines.
+    # Case-insensitive field match.
+    field_lower = field.lower()
+    updated = False
+    new_lines = []
+    for line in lines:
+        # Match "Field: ..." at start of line (optional leading spaces)
+        stripped = line.lstrip()
+        colon_pos = stripped.find(':')
+        if colon_pos > 0:
+            candidate = stripped[:colon_pos].strip().lower()
+            if candidate == field_lower:
+                indent = line[: len(line) - len(stripped)]
+                new_lines.append(f"{indent}{field}: {value}\n")
+                updated = True
+                continue
+        new_lines.append(line)
+
+    if not updated:
+        # Append field before final YAML fence "---" if present, else at end
+        fence_idx = None
+        for i in range(len(new_lines) - 1, -1, -1):
+            if new_lines[i].strip() == '---':
+                fence_idx = i
+                break
+        if fence_idx is not None:
+            new_lines.insert(fence_idx, f"{field}: {value}\n")
+        else:
+            # Ensure trailing newline
+            if new_lines and not new_lines[-1].endswith('\n'):
+                new_lines[-1] += '\n'
+            new_lines.append(f"{field}: {value}\n")
+
+    # ── Write STATE.md atomically (tmp + fsync + rename) ────────────────────
+    state_dir = os.path.dirname(state_file)
+    fd, tmp_path = tempfile.mkstemp(dir=state_dir, suffix='.tmp')
     try:
-        with os.fdopen(fd_arch, 'w', encoding='utf-8') as tf_arch:
-            tf_arch.writelines(existing_archive + head_lines)
-            tf_arch.flush()
-            os.fsync(tf_arch.fileno())
-        os.replace(tmp_arch, archive_file)
+        with os.fdopen(fd, 'w', encoding='utf-8') as tf:
+            tf.writelines(new_lines)
+            tf.flush()
+            os.fsync(tf.fileno())
+        os.replace(tmp_path, state_file)
     except Exception:
         try:
-            os.unlink(tmp_arch)
-        except OSError:
-            pass
-        raise
-    # Rewrite pulse.md with kept lines only
-    pulse_dir = os.path.dirname(pulse_file)
-    fd2, tmp2 = tempfile.mkstemp(dir=pulse_dir, suffix='.pulse.tmp')
-    try:
-        with os.fdopen(fd2, 'w', encoding='utf-8') as tf2:
-            tf2.writelines(keep_lines)
-            tf2.flush()
-            os.fsync(tf2.fileno())
-        os.replace(tmp2, pulse_file)
-    except Exception:
-        try:
-            os.unlink(tmp2)
+            os.unlink(tmp_path)
         except OSError:
             pass
         raise
 
+    # ── Append pulse.md ──────────────────────────────────────────────────────
+    utc_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    pulse_line = f"{utc_iso} {field}={value}\n"
 
-print(f"OK: {field}={value}")
+    with open(pulse_file, 'a', encoding='utf-8') as pf:
+        pf.write(pulse_line)
+        pf.flush()
+        os.fsync(pf.fileno())
+
+    # ── Cap pulse.md to last N lines (LEADV2_PULSE_MAX_LINES, default 200) ──
+    # Pruned head is archived to pulse-archive.md rather than discarded.
+    try:
+        pulse_max = max(1, int(os.environ.get('LEADV2_PULSE_MAX_LINES', '200') or '200'))
+    except (ValueError, TypeError):
+        pulse_max = 200
+    with open(pulse_file, 'r', encoding='utf-8') as pf:
+        pulse_lines = pf.readlines()
+    if len(pulse_lines) > pulse_max:
+        head_lines = pulse_lines[: len(pulse_lines) - pulse_max]
+        keep_lines = pulse_lines[len(pulse_lines) - pulse_max :]
+        archive_file = os.path.join(os.path.dirname(pulse_file), 'pulse-archive.md')
+        # Read existing archive content, then write combined (existing +
+        # new head_lines) atomically. Prevents duplicate archive entries
+        # when the process is killed after a partial append but before
+        # pulse.md is truncated (on next run head_lines re-archived).
+        existing_archive: list[str] = []
+        if os.path.exists(archive_file):
+            with open(archive_file, 'r', encoding='utf-8') as _af:
+                existing_archive = _af.readlines()
+        archive_dir = os.path.dirname(archive_file)
+        fd_arch, tmp_arch = tempfile.mkstemp(dir=archive_dir, suffix='.archive.tmp')
+        try:
+            with os.fdopen(fd_arch, 'w', encoding='utf-8') as tf_arch:
+                tf_arch.writelines(existing_archive + head_lines)
+                tf_arch.flush()
+                os.fsync(tf_arch.fileno())
+            os.replace(tmp_arch, archive_file)
+        except Exception:
+            try:
+                os.unlink(tmp_arch)
+            except OSError:
+                pass
+            raise
+        # Rewrite pulse.md with kept lines only
+        pulse_dir = os.path.dirname(pulse_file)
+        fd2, tmp2 = tempfile.mkstemp(dir=pulse_dir, suffix='.pulse.tmp')
+        try:
+            with os.fdopen(fd2, 'w', encoding='utf-8') as tf2:
+                tf2.writelines(keep_lines)
+                tf2.flush()
+                os.fsync(tf2.fileno())
+            os.replace(tmp2, pulse_file)
+        except Exception:
+            try:
+                os.unlink(tmp2)
+            except OSError:
+                pass
+            raise
+
+    print(f"OK: {field}={value}")
+finally:
+    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    lock_fd.close()
 PYEOF
 )
 
-# ── acquire lock and run ───────────────────────────────────────────────────────
+# ── acquire lock and run — Python fcntl only, no GNU flock(1) executable ──────
+# (SUPERVISE-V2-01 item 3). LOCK_FILE is passed as argv[5]; the python core
+# above acquires/releases the lock itself around the read-modify-write.
 
 # Create lock file if it doesn't exist
 touch "$LOCK_FILE"
 
-# Use flock for atomic access; timeout after 10s to avoid infinite wait
 RESULT=$(
-  flock --exclusive --timeout 10 "$LOCK_FILE" \
-    python3 - "$STATE_FILE" "$FIELD" "$VALUE" "$PULSE_FILE" <<< "$PYTHON_UPDATE"
+  python3 - "$STATE_FILE" "$FIELD" "$VALUE" "$PULSE_FILE" "$LOCK_FILE" <<< "$PYTHON_UPDATE"
 ) && RC=0 || RC=$?
 
 if [[ $RC -ne 0 ]]; then

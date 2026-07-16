@@ -86,12 +86,15 @@ _leadv2_state_md() {
 #
 _leadv2_yaml_py_lock() {
   python3 - "$@" <<'PYEOF'
-import sys, os, fcntl, tempfile
+import sys, os, fcntl, tempfile, datetime
 try:
     import yaml
 except ImportError:
     print("[registry] PyYAML not found; install pyyaml", file=sys.stderr)
     sys.exit(1)
+
+def _now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 lockfile_path = sys.argv[1]
 yaml_path     = sys.argv[2]
@@ -160,6 +163,7 @@ try:
             else:
                 sessions.remove(existing)
 
+        now = _now_iso()
         sessions.append({
             "session_id": session_id,
             "task_id": task_id,
@@ -176,6 +180,18 @@ try:
             "last_pulse_at": last_pulse_at,
             "stale": False,
             "note": "",
+            # D-d registry-honesty fields (SUPERVISE-V2-01 item 3) — additive,
+            # every new row registers V2 explicitly; legacy rows written by
+            # an older registry simply lack these keys (reader-side infers
+            # protocol_version: 1 for those — see leadv2-supervise.sh).
+            "protocol_version": 2,
+            "backend": "headless" if daemon_bool else "terminal",
+            "phase_started_at": started_at,
+            "updated_at": now,
+            "tmux_window": None,
+            "tmux_pane": None,
+            "log_path": pulse_log,
+            "provider_receipts": [],
         })
         # Return session_id on stdout
         print(session_id)
@@ -185,10 +201,22 @@ try:
         data["sessions"] = [s for s in sessions if s.get("task_id") != task_id]
 
     elif op == "update_phase":
+        # Accepts legacy 1-arg (phase only — task_id resolved by the bash
+        # wrapper from $LEADV2_TASK_ID before invoking this python core) and
+        # V2 2-arg (task_id, phase) forms; by the time control reaches here
+        # both have already been normalized to 2 args by the caller.
         task_id, new_phase = args
+        now = _now_iso()
         for s in sessions:
             if s.get("task_id") == task_id:
+                # phase_started_at is atomic WITH a real phase change only —
+                # a heartbeat (update_pulse) never touches it, and calling
+                # update_phase again with the SAME phase is a no-op on the
+                # timestamp (idempotent re-entry, e.g. a retried hook call).
+                if s.get("phase") != new_phase:
+                    s["phase_started_at"] = now
                 s["phase"] = new_phase
+                s["updated_at"] = now
                 break
 
     elif op == "update_pulse":
@@ -196,6 +224,7 @@ try:
         for s in sessions:
             if s.get("task_id") == task_id:
                 s["last_pulse_at"] = ts
+                s["updated_at"] = ts
                 break
 
     elif op == "update_pid":
@@ -204,6 +233,7 @@ try:
         for s in sessions:
             if s.get("task_id") == task_id:
                 s["pid"] = pid_int
+                s["updated_at"] = _now_iso()
                 break
 
     elif op == "mark_stale":
@@ -211,6 +241,7 @@ try:
         for s in sessions:
             if s.get("task_id") == task_id:
                 s["stale"] = True
+                s["updated_at"] = _now_iso()
                 break
 
     elif op == "set_rendered_at":
@@ -357,10 +388,20 @@ leadv2_active_unregister() {
   }
 }
 
-# leadv2_active_update_phase <task_id> <phase>
+# leadv2_active_update_phase [<task_id>] <phase>
+# Legacy 1-arg form (several phase skills call this with phase only, e.g.
+# `leadv2_active_update_phase "$PHASE"`) resolves task_id from
+# $LEADV2_TASK_ID. V2 2-arg form is the explicit, preferred call. Both
+# converge on the same python op — normalize here, not in the python core.
 leadv2_active_update_phase() {
-  local task_id="${1:?task_id required}"
-  local phase="${2:?phase required}"
+  local task_id phase
+  if [[ $# -ge 2 ]]; then
+    task_id="${1:?task_id required}"
+    phase="${2:?phase required}"
+  else
+    task_id="${LEADV2_TASK_ID:?leadv2_active_update_phase: 1-arg legacy form requires LEADV2_TASK_ID to be set}"
+    phase="${1:?phase required}"
+  fi
   local yaml_file lockfile
   yaml_file="$(_leadv2_yaml_file)"
   lockfile="$(_leadv2_yaml_lockfile)"
