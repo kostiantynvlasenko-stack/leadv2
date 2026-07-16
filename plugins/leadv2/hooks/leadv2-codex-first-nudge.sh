@@ -45,25 +45,46 @@ grep -qE '^[[:space:]]*codex_enabled:[[:space:]]*true' "$POLICY" 2>/dev/null || 
 # makes the steer louder and durably visible instead of a one-shot stderr line.
 MAXIMIZE="${LEADV2_MAXIMIZE_CHEAP_MODELS:-1}"
 
-if [[ "$MAXIMIZE" == "1" ]]; then
-  REMINDER="[leadv2-codex-first-nudge] MAXIMIZE_CHEAP_MODELS=1: subagent_type=$SUBTYPE SHOULD route to Codex (codex-task.sh --tier standard, or --tier top for Heavy/adversarial per codex-policy.yaml) for plan/review/fitting-dev, or to GLM for background/bulk work -- not Claude quota, unless this spawn is integration-critical or a safety-gate task. See docs/model-routing.md and .claude/leadv2-overrides/codex-policy.yaml (dev_on_codex_fitting/phase5_review_standard)."
+# H1 (codex review): cap the ledger at ~256KB so default-on per-spawn
+# logging can't grow unbounded across the life of an installer's repo —
+# rotate by keeping only the newest half once the cap is exceeded. Cheap:
+# one wc -c + one tail -c, both bounded by LOG_CAP_BYTES, only on write.
+# H2 (codex review): the entire probe+rotate+append is wrapped in ONE
+# brace group whose stderr is redirected to /dev/null on the group itself
+# (not tacked onto the individual append) — this protects the append's own
+# `open()` failure (missing/unwritable dir or file) too, which a trailing
+# `>>file 2>/dev/null` on a single command does NOT: the shell attempts the
+# file-open redirect before the per-command stderr redirect takes effect,
+# so a bad path would otherwise still print a shell-level error on every
+# spawn despite `|| true`. The writability pre-check is belt-and-braces on
+# top of that structural fix, not a substitute for it.
+LOG_DIR="$PROJECT_ROOT/docs/leadv2"
+LOG_FILE="$LOG_DIR/codex-first-nudge.log"
+LOG_CAP_BYTES=262144
 
-  # H1 (codex review): cap the ledger at ~256KB so default-on per-spawn
-  # logging can't grow unbounded across the life of an installer's repo —
-  # rotate by keeping only the newest half once the cap is exceeded. Cheap:
-  # one wc -c + one tail -c, both bounded by LOG_CAP_BYTES, only on write.
-  # H2 (codex review): the entire probe+rotate+append is wrapped in ONE
-  # brace group whose stderr is redirected to /dev/null on the group itself
-  # (not tacked onto the individual append) — this protects the append's own
-  # `open()` failure (missing/unwritable dir or file) too, which a trailing
-  # `>>file 2>/dev/null` on a single command does NOT: the shell attempts the
-  # file-open redirect before the per-command stderr redirect takes effect,
-  # so a bad path would otherwise still print a shell-level error on every
-  # spawn despite `|| true`. The writability pre-check is belt-and-braces on
-  # top of that structural fix, not a substitute for it.
-  LOG_DIR="$PROJECT_ROOT/docs/leadv2"
-  LOG_FILE="$LOG_DIR/codex-first-nudge.log"
-  LOG_CAP_BYTES=262144
+SESSION_ID="$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
+[[ -z "$SESSION_ID" ]] && SESSION_ID="$PPID"
+
+# EFFICIENCY-TUNE-01 A4: read the ledger back before emitting — full ~380B
+# reminder fires once per subtype/session; every subsequent matching spawn
+# this session gets a 1-line pointer instead (was: full text every spawn,
+# 8x380B=3.0KB/session -> ~660B, 78% cut per efficiency-tune-plan.md A-table row 4).
+ALREADY_NUDGED=0
+if [[ -f "$LOG_FILE" ]]; then
+  grep -qF "session=${SESSION_ID} subtype=${SUBTYPE} " "$LOG_FILE" 2>/dev/null && ALREADY_NUDGED=1
+fi
+
+if [[ "$ALREADY_NUDGED" == "1" ]]; then
+  REMINDER="[leadv2-codex-first-nudge] already nudged subtype=$SUBTYPE this session — route to Codex/GLM before Claude quota (see full reminder earlier this session)."
+else
+  if [[ "$MAXIMIZE" == "1" ]]; then
+    REMINDER="[leadv2-codex-first-nudge] MAXIMIZE_CHEAP_MODELS=1: subagent_type=$SUBTYPE SHOULD route to Codex (codex-task.sh --tier standard, or --tier top for Heavy/adversarial per codex-policy.yaml) for plan/review/fitting-dev, or to GLM for background/bulk work -- not Claude quota, unless this spawn is integration-critical or a safety-gate task. See docs/model-routing.md and .claude/leadv2-overrides/codex-policy.yaml (dev_on_codex_fitting/phase5_review_standard)."
+    DECISION="claude-selected-where-codex-glm-fits"
+  else
+    REMINDER="[leadv2-codex-first-nudge] REMINDER: codex_enabled: true in $POLICY -- consider routing this task (subagent_type=$SUBTYPE) to Codex first (codex-task.sh) before Claude quota. See docs/model-routing.md."
+    DECISION="reminder-only"
+  fi
+
   {
     mkdir -p "$LOG_DIR"
     if [[ -w "$LOG_DIR" ]] && { [[ ! -e "$LOG_FILE" ]] || [[ -w "$LOG_FILE" ]]; }; then
@@ -74,12 +95,10 @@ if [[ "$MAXIMIZE" == "1" ]]; then
           tail -c "$(( LOG_CAP_BYTES / 2 ))" "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
         fi
       fi
-      printf -- '%s subtype=%s cwd=%s decision=claude-selected-where-codex-glm-fits\n' \
-        "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$SUBTYPE" "$CWD" >> "$LOG_FILE"
+      printf -- '%s session=%s subtype=%s cwd=%s decision=%s\n' \
+        "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$SESSION_ID" "$SUBTYPE" "$CWD" "$DECISION" >> "$LOG_FILE"
     fi
   } 2>/dev/null || true
-else
-  REMINDER="[leadv2-codex-first-nudge] REMINDER: codex_enabled: true in $POLICY -- consider routing this task (subagent_type=$SUBTYPE) to Codex first (codex-task.sh) before Claude quota. See docs/model-routing.md."
 fi
 echo "$REMINDER" >&2
 

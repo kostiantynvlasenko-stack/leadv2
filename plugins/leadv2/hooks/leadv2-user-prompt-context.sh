@@ -124,7 +124,14 @@ import yaml
 try:
     d = yaml.safe_load(open('$ACTIVE')) or {}
     s = (d.get('sessions') or [])
-    print(s[0].get('task_id','') if s else '')
+    sid = '$SESSION_ID'
+    match = next((x for x in s if sid and x.get('session_id') == sid), None)
+    if match:
+        print(match.get('task_id',''))
+    elif s:
+        print(s[0].get('task_id',''))
+    else:
+        print('')
 except: print('')
 " 2>/dev/null || echo "")"
   if [[ -n "$TID_ACTIVE" ]]; then
@@ -181,20 +188,27 @@ $RESUME_SNIPPET"
     CTX_PARTS+=("$RESUME_INJECT")
   fi
 
-  # Knowledge archive lookup hint — one line, always visible when a task is active
-  KNOWLEDGE_DIR="$CWD/docs/leadv2/knowledge"
-  KNOWLEDGE_COUNT=0
-  [[ -d "$KNOWLEDGE_DIR" ]] && KNOWLEDGE_COUNT=$(ls "$KNOWLEDGE_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ' || echo 0)
-  if [[ "$KNOWLEDGE_COUNT" -gt 0 ]]; then
-    CTX_PARTS+=("[KNOWLEDGE_ARCHIVE] ${KNOWLEDGE_COUNT} entries in docs/leadv2/knowledge/. Before re-deciding anything (architecture choice, schema approach, error strategy), run: grep -r '<keyword>' docs/leadv2/knowledge/ to surface prior decisions and gotchas.")
-  fi
+  # EFFICIENCY-TUNE-01 A2: full block once/session (sentinel), 1-line pointer thereafter.
+  ORCH_SENTINEL="/tmp/leadv2-orch-role-${SESSION_ID:-nosession}"
+  if [[ ! -f "$ORCH_SENTINEL" ]]; then
+    # Knowledge archive lookup hint — one line, always visible when a task is active
+    KNOWLEDGE_DIR="$CWD/docs/leadv2/knowledge"
+    KNOWLEDGE_COUNT=0
+    [[ -d "$KNOWLEDGE_DIR" ]] && KNOWLEDGE_COUNT=$(ls "$KNOWLEDGE_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+    if [[ "$KNOWLEDGE_COUNT" -gt 0 ]]; then
+      CTX_PARTS+=("[KNOWLEDGE_ARCHIVE] ${KNOWLEDGE_COUNT} entries in docs/leadv2/knowledge/. Before re-deciding anything (architecture choice, schema approach, error strategy), run: grep -r '<keyword>' docs/leadv2/knowledge/ to surface prior decisions and gotchas.")
+    fi
 
-  CTX_PARTS+=("[ORCHESTRATOR_ROLE] You are the LEADV2 ORCHESTRATOR for task $TID_ACTIVE.
+    CTX_PARTS+=("[ORCHESTRATOR_ROLE] You are the LEADV2 ORCHESTRATOR for task $TID_ACTIVE.
 Rules that persist across /compact:
 - NEVER write .py/.sh/.ts/.tsx/.sql directly — delegate ALL code to developer/devops subagents.
 - SILENCE PROTOCOL: No preamble. No 'Let me…'. No reasoning narration. Output ONLY: pulse line | gate prompt | async question | ≤3-line close. All detail → deliverable files.
 - Every text-only turn costs 150K+ tokens. No 'I am now doing X'. No multi-paragraph reasoning.
 - If you just resumed from /compact: read ${_lv2_leadv2_dir}/tasks/$TID_ACTIVE/STATE.md limit=20 and ${_lv2_handoff_dir}/$TID_ACTIVE/context.yaml limit=30 to restore plan context.")
+    touch "$ORCH_SENTINEL" 2>/dev/null || true
+  else
+    CTX_PARTS+=("[ORCHESTRATOR_ROLE] full rules already injected this session — see above.")
+  fi
 fi
 
 # === 2.5. Pending Stop-hook warnings (lead-prose-guard, etc.) ===
