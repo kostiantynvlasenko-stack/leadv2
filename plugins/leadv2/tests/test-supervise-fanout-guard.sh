@@ -194,6 +194,43 @@ fi
 rm -f "$SENTINEL"
 
 # ---------------------------------------------------------------------------
+# (j) MODE SPLIT (fix-2 R2-1): live sentinel, mode="interactive-lanes"
+# (the new skill's default) + worker (developer) spawn from the OWNING
+# session -> ALLOWED. D-f=A requires the supervising session to spawn its
+# own in-session Workflow/Agent lanes; the guard must not deny those.
+# ---------------------------------------------------------------------------
+python3 -c "
+import json
+json.dump({'pid': $SELF_PID, 'started_at': '2026-07-16T00:00:00Z', 'mode': 'interactive-lanes'}, open('$SENTINEL', 'w'))
+"
+j_exit=0
+run_guard "$WORKER_PAYLOAD" || j_exit=$?
+if [[ $j_exit -eq 0 ]]; then
+  pass "(j) mode=interactive-lanes: owning-session worker (developer) spawn is ALLOWED"
+else
+  fail "(j) mode=interactive-lanes should allow worker spawn (exit=$j_exit)"
+fi
+rm -f "$SENTINEL"
+
+# ---------------------------------------------------------------------------
+# (k) MODE SPLIT (fix-2 R2-1): live sentinel, mode="legacy-relay" (explicit)
+# + worker spawn from the OWNING session -> BLOCKED (original guard purpose:
+# a session watching only external tmux fanout with no in-session lanes).
+# ---------------------------------------------------------------------------
+python3 -c "
+import json
+json.dump({'pid': $SELF_PID, 'started_at': '2026-07-16T00:00:00Z', 'mode': 'legacy-relay'}, open('$SENTINEL', 'w'))
+"
+k_exit=0
+run_guard "$WORKER_PAYLOAD" || k_exit=$?
+if [[ $k_exit -eq 2 ]]; then
+  pass "(k) mode=legacy-relay: owning-session worker (developer) spawn is BLOCKED"
+else
+  fail "(k) mode=legacy-relay should deny worker spawn (exit=$k_exit)"
+fi
+rm -f "$SENTINEL"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

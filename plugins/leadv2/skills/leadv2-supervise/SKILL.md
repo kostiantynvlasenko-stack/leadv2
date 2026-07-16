@@ -51,6 +51,14 @@ Only things that need the founder reach chat.
    `leadv2-active-registry.sh`) with `protocol_version: 2`,
    `backend: workflow`, and an (initially empty) `provider_receipts: []`
    populated as the lane's Codex/GLM calls complete with real job/run ids.
+   This is safe against `hooks/leadv2-supervise-fanout-guard.sh`: step 1's
+   call to `leadv2-supervise.sh` stamps `.supervise-active` with
+   `mode: interactive-lanes` by default (fix-2 R2-1) — the guard never
+   denies THIS session's own Agent/Workflow spawns in that mode; it only
+   denies in `mode: legacy-relay` (a session watching purely external tmux
+   fanout with no in-session lanes of its own — set via
+   `LEADV2_SUPERVISE_MODE=legacy-relay` before invoking `leadv2-supervise.sh`,
+   not used by this flow).
 4. **Attach the loop.** `scripts/leadv2-supervise-loop.sh --ensure` via
    `Monitor` — idempotent PID+birth-sentinel attach, never a duplicate loop on
    re-entry/PostCompact. The LOOP renders output, not the lead: URGENT events

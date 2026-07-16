@@ -103,27 +103,45 @@ HANDOFF_DIR="${PROJECT_ROOT}/docs/handoff"
 SNAPSHOT="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" .supervise-last.json)"
 SUPERVISE_SENTINEL="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" .supervise-active)"
 
-# SUPERVISE-GUARD-01 (restored, SUPERVISE-V2-01 fix-1 C1): (re)write the
-# supervise-mode sentinel -- {"pid","started_at"} -- consumed by
-# hooks/leadv2-supervise-fanout-guard.sh (PreToolUse:Agent) to block
-# in-session WORKER subagent spawns while supervise mode is active; the lead
-# must dispatch new work via scripts/leadv2-fanout.sh instead. Idempotent: a
-# live sentinel keeps its original started_at; a missing/dead one is
-# (re)written with the durable claude-process pid (see
+# SUPERVISE-GUARD-01 (restored, SUPERVISE-V2-01 fix-1 C1; mode split fix-2
+# R2-1): (re)write the supervise-mode sentinel -- {"pid","started_at","mode"}
+# -- consumed by hooks/leadv2-supervise-fanout-guard.sh (PreToolUse:Agent).
+# `mode` resolves the D-f=A contradiction found in codex-review-2.md finding
+# 1: D-f=A's default flow (SKILL.md step 3) REQUIRES the supervising session
+# to spawn in-session Workflow/Agent lanes itself, so the guard must NOT deny
+# those. Two modes:
+#   - "interactive-lanes" (DEFAULT, this is the new skill's flow): the guard
+#     never denies this session's own Agent/Workflow spawns -- they ARE the
+#     lanes D-f=A requires.
+#   - "legacy-relay": the ORIGINAL guard purpose -- a session watching only
+#     external tmux fanout with no in-session lanes of its own; any Agent
+#     spawn here is presumptively accidental and the guard denies it,
+#     directing the caller to scripts/leadv2-fanout.sh instead. Set via
+#     LEADV2_SUPERVISE_MODE=legacy-relay before invoking this script (no
+#     current caller sets this yet -- reserved for a future legacy-only
+#     entry point / compat wrapper).
+# `mode` is recomputed on every (re)write (reflects the CURRENT invocation's
+# intent), while pid/started_at identity is preserved for a live sentinel.
+# Idempotent: a live sentinel keeps its original started_at; a missing/dead
+# one is (re)written with the durable claude-process pid (see
 # leadv2-active-registry.sh:_lv2_durable_pid). Cleared on Stop by
 # hooks/leadv2-supervise-sentinel-cleanup.sh, and self-heals (deleted) by the
 # guard itself the next time it sees a dead pid. Deleted by 799dc99's B1
 # root-resolution refactor and never re-added -- guard was silently inert
-# (lying-green: hook installed, reads a file nobody wrote) until this fix.
+# (lying-green: hook installed, reads a file nobody wrote) until fix-1.
+_SUP_MODE="${LEADV2_SUPERVISE_MODE:-interactive-lanes}"
+if [[ "$_SUP_MODE" != "interactive-lanes" && "$_SUP_MODE" != "legacy-relay" ]]; then
+  _SUP_MODE="interactive-lanes"
+fi
 if [[ -f "${SCRIPT_DIR}/leadv2-active-registry.sh" ]]; then
   # shellcheck source=leadv2-active-registry.sh
   source "${SCRIPT_DIR}/leadv2-active-registry.sh"
   _SUP_PID="$(_lv2_durable_pid 2>/dev/null || echo "$PPID")"
   _SUP_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  python3 - "$SUPERVISE_SENTINEL" "$_SUP_PID" "$_SUP_TS" <<'PYSENTINEL' 2>/dev/null || true
+  python3 - "$SUPERVISE_SENTINEL" "$_SUP_PID" "$_SUP_TS" "$_SUP_MODE" <<'PYSENTINEL' 2>/dev/null || true
 import sys, os, json, tempfile
 
-path, pid_str, ts = sys.argv[1], sys.argv[2], sys.argv[3]
+path, pid_str, ts, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 def pid_alive(pid_val):
     try:
@@ -142,7 +160,7 @@ if os.path.isfile(path):
     except Exception:
         pass
 
-out = {"pid": int(pid_str), "started_at": existing_started_at or ts}
+out = {"pid": int(pid_str), "started_at": existing_started_at or ts, "mode": mode}
 dir_ = os.path.dirname(path)
 os.makedirs(dir_, exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")

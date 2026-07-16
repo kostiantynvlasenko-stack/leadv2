@@ -48,6 +48,21 @@
 # silently passed through ungated. Both are now fail-CLOSED: default is
 # deny-when-self-supervising, not allow.
 #
+# MODE SPLIT (fix-2 R2-1, codex-review-2.md finding 1): the sentinel now
+# carries a "mode" field written by leadv2-supervise.sh. D-f=A's default flow
+# (SKILL.md step 3) REQUIRES the supervising session to spawn its own
+# in-session Workflow/Agent lanes — gating those unconditionally was a direct
+# contradiction of the resolved architecture. The gate below now only DENIES
+# when mode=="legacy-relay" (a session watching purely external tmux fanout
+# with no in-session lanes of its own — the guard's original purpose) OR
+# mode is absent (a sentinel from before this fix, or from any other writer
+# that never learns about `mode` — fail-CLOSED, same H2 philosophy as the
+# unknown-subagent-type default-deny above: an unlabeled sentinel is never
+# assumed to be the new interactive-lanes flow). Only an EXPLICIT
+# mode=="interactive-lanes" (the real production default -- leadv2-
+# supervise.sh always stamps it unless LEADV2_SUPERVISE_MODE=legacy-relay is
+# set) is never denied by this hook for the owning session.
+#
 # Toggle: LEADV2_SUPERVISE_GUARD=0 disables this guard entirely.
 # Fail-safe: any internal error exits 0 (never bricks the session); a stale
 # (dead-pid) sentinel is treated as inactive AND self-cleaned (removed) here
@@ -118,19 +133,25 @@ try:
     with open(path, encoding='utf-8') as fh:
         d = json.load(fh) or {}
     pid = d.get('pid')
+    mode = d.get('mode') or ''
     if pid is None:
-        print('DEAD'); print(''); sys.exit(0)
+        print('DEAD'); print(''); print(mode); sys.exit(0)
     try:
         os.kill(int(pid), 0)
-        print('LIVE'); print(int(pid))
+        print('LIVE'); print(int(pid)); print(mode)
     except (TypeError, ValueError, ProcessLookupError, PermissionError):
-        print('DEAD'); print('')
+        print('DEAD'); print(''); print(mode)
 except Exception:
-    print('DEAD'); print('')
-" "$SENTINEL" 2>/dev/null || printf -- 'DEAD\n\n')"
+    print('DEAD'); print(''); print('')
+" "$SENTINEL" 2>/dev/null || printf -- 'DEAD\n\n\n')"
 
 SENTINEL_STATUS="$(printf -- '%s' "$SENTINEL_INFO" | sed -n '1p')"
 SENTINEL_PID="$(printf -- '%s' "$SENTINEL_INFO" | sed -n '2p')"
+# MODE SPLIT (fix-2 R2-1): missing/unknown mode normalizes to "legacy-relay"
+# (fail-CLOSED default — see comment above); only an explicit
+# "interactive-lanes" stamp bypasses the deny-worker gate below.
+SENTINEL_MODE="$(printf -- '%s' "$SENTINEL_INFO" | sed -n '3p')"
+[[ "$SENTINEL_MODE" != "interactive-lanes" ]] && SENTINEL_MODE="legacy-relay"
 
 if [[ "$SENTINEL_STATUS" != "LIVE" ]]; then
   # Stale sentinel (owning session already died) — self-clean and allow.
@@ -151,9 +172,16 @@ if [[ -f "$REGISTRY" ]]; then
 fi
 [[ -z "$MY_PID" || "$MY_PID" != "$SENTINEL_PID" ]] && exit 0
 
-# This IS the supervising session, and the subagent_type is not on the
-# read-only allow-list (recognized worker OR unrecognized/future type —
-# fail-CLOSED by design, H2 fix) — BLOCK.
+# MODE SPLIT (fix-2 R2-1): this IS the supervising session, but D-f=A's
+# default interactive-lanes mode REQUIRES this exact session to spawn its own
+# Workflow/Agent lanes — never deny those. Only legacy-relay mode (or a
+# sentinel with no mode at all, normalized to legacy-relay above) reaches the
+# BLOCK below.
+[[ "$SENTINEL_MODE" == "interactive-lanes" ]] && exit 0
+
+# This IS the supervising session in legacy-relay mode, and the
+# subagent_type is not on the read-only allow-list (recognized worker OR
+# unrecognized/future type — fail-CLOSED by design, H2 fix) — BLOCK.
 python3 -c "
 import json
 print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':'supervise mode: dispatch this work via scripts/leadv2-fanout.sh --tasks <ID>, do not spawn in-session workers. Override: export LEADV2_SUPERVISE_GUARD=0'}}))
