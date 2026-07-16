@@ -96,60 +96,110 @@ _pid_birth() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' || true; }
 _pid_alive() { kill -0 "$1" 2>/dev/null; }
 
 # ── --ensure: attach-or-start via PID+birth sentinel (no duplicate loop) ──
-if [[ "$ENSURE" -eq 1 && -f "$SENTINEL" ]]; then
-  _live=0
-  _spid=""
-  if _sentinel_json="$(python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(1)
-print(d.get('pid', ''))
-print(d.get('pid_birth', ''))
-" "$SENTINEL" 2>/dev/null)"; then
-    _spid="$(printf -- '%s\n' "$_sentinel_json" | sed -n 1p)"
-    _sbirth="$(printf -- '%s\n' "$_sentinel_json" | sed -n 2p)"
-    if [[ -n "$_spid" ]] && _pid_alive "$_spid"; then
-      _cur_birth="$(_pid_birth "$_spid")"
-      if [[ "$_cur_birth" == "$_sbirth" ]]; then
-        _live=1
-      fi
-    fi
-  fi
-  if [[ "$_live" -eq 1 ]]; then
-    printf -- '[supervise-loop] already running pid=%s log=%s\n' "$_spid" "$LOG_FILE"
-    exit 0
-  fi
-  printf -- '[supervise-loop] sentinel stale/dead — starting new loop\n' >&2
-fi
-
+# R2-2 fix (codex-review-2.md finding 2): the old version did an UNLOCKED
+# check-then-create — two concurrent `--ensure` calls could both observe a
+# stale/dead sentinel, both fall through, and both write a sentinel claiming
+# ownership (duplicate loop; whichever writes last "wins" and the other's
+# process silently has no matching sentinel). The liveness check AND the
+# ownership write below now happen inside ONE critical section held by a
+# single `flock` on `${SENTINEL}.lock` (python3 fcntl, matching this
+# project's portable-locking convention elsewhere in leadv2-supervise.sh —
+# no bash `flock` binary, which is absent on macOS/BSD).
 mkdir -p "$(dirname "$SENTINEL")" "$(dirname "$LOG_FILE")"
 MY_PID=$$
 MY_BIRTH="$(_pid_birth "$MY_PID")"
-python3 - "$SENTINEL" "$MY_PID" "$MY_BIRTH" <<'PYSENTINEL'
-import json, sys, os, tempfile, datetime
-path, pid, birth = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-out = {
-    "pid": pid,
-    "pid_birth": birth,
-    "started_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-}
-dirn = os.path.dirname(path)
-os.makedirs(dirn, exist_ok=True)
-fd, tmp = tempfile.mkstemp(dir=dirn, suffix=".tmp")
-with os.fdopen(fd, "w", encoding="utf-8") as fh:
-    json.dump(out, fh)
-os.replace(tmp, path)
-PYSENTINEL
+
+_ENSURE_OUT="$(python3 - "$SENTINEL" "${SENTINEL}.lock" "$ENSURE" "$MY_PID" "$MY_BIRTH" <<'PYENSURE'
+import sys, os, json, fcntl, tempfile, datetime, subprocess
+
+sentinel_path, lock_path, ensure_flag, my_pid_s, my_birth = sys.argv[1:6]
+ensure_flag = ensure_flag == "1"
+my_pid = int(my_pid_s)
+
+def pid_alive(pid_val):
+    try:
+        os.kill(int(pid_val), 0)
+        return True
+    except (TypeError, ValueError, ProcessLookupError, PermissionError):
+        return False
+
+def pid_birth(pid_val):
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid_val)],
+                            capture_output=True, text=True, timeout=5)
+        b = r.stdout.strip()
+        return " ".join(b.split()) if b else ""
+    except Exception:
+        return ""
+
+os.makedirs(os.path.dirname(lock_path) or ".", exist_ok=True)
+lf = open(lock_path, "a+")
+fcntl.flock(lf, fcntl.LOCK_EX)
+try:
+    if ensure_flag and os.path.isfile(sentinel_path):
+        try:
+            with open(sentinel_path, encoding="utf-8") as fh:
+                d = json.load(fh) or {}
+            spid = d.get("pid")
+            sbirth = d.get("pid_birth")
+            if spid is not None and pid_alive(spid) and sbirth and pid_birth(spid) == sbirth:
+                print(f"EXISTING {int(spid)}")
+                sys.exit(0)
+        except Exception:
+            pass
+    # Not (ensure AND live-and-corroborated) -- claim ownership atomically,
+    # still holding the lock, so no other --ensure caller can race us here.
+    out = {
+        "pid": my_pid,
+        "pid_birth": my_birth,
+        "started_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    dirn = os.path.dirname(sentinel_path)
+    os.makedirs(dirn, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dirn, suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(out, fh)
+    os.replace(tmp, sentinel_path)
+    print(f"NEW {my_pid}")
+finally:
+    fcntl.flock(lf, fcntl.LOCK_UN)
+    lf.close()
+PYENSURE
+)"
+
+_ENSURE_STATUS="$(printf -- '%s\n' "$_ENSURE_OUT" | awk '{print $1}')"
+_ENSURE_PID="$(printf -- '%s\n' "$_ENSURE_OUT" | awk '{print $2}')"
+
+if [[ "$_ENSURE_STATUS" == "EXISTING" ]]; then
+  printf -- '[supervise-loop] already running pid=%s log=%s\n' "$_ENSURE_PID" "$LOG_FILE"
+  exit 0
+fi
 
 printf -- '%s [supervise-loop] started pid=%s log=%s event_poll=%ss pulse=%ss\n' \
   "$(_now_iso)" "$MY_PID" "$LOG_FILE" "$EVENT_POLL_S" "$PULSE_S" >>"$LOG_FILE"
 
-# Never leave a stale sentinel behind on normal exit (test/bounded runs);
-# a killed/crashed loop's sentinel is correctly detected stale next --ensure
-# via the PID+birth mismatch check above, no cleanup needed on the hard-kill path.
-trap 'rm -f "$SENTINEL" 2>/dev/null || true' EXIT
+# R2-2 fix: the EXIT trap used to unconditionally `rm -f` the sentinel — if
+# another `--ensure` call raced in between (e.g. a PostCompact re-entry that
+# started a second loop after this one's ownership check but before this
+# one's write), that trap could delete the SECOND loop's live ownership
+# record out from under it. Now the trap only removes the sentinel if it
+# STILL contains this process's own pid+birth — i.e. this process is still
+# the recorded owner — matching the same "never clobber a different owner"
+# discipline leadv2-supervise.sh's active.yaml mutation uses.
+_cleanup_sentinel() {
+  python3 -c "
+import json, sys, os
+path, pid, birth = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, encoding='utf-8') as fh:
+        d = json.load(fh) or {}
+    if str(d.get('pid')) == pid and d.get('pid_birth') == birth:
+        os.remove(path)
+except Exception:
+    pass
+" "$SENTINEL" "$MY_PID" "$MY_BIRTH" 2>/dev/null || true
+}
+trap _cleanup_sentinel EXIT
 
 _render_events() {
   local out_json="$1"
