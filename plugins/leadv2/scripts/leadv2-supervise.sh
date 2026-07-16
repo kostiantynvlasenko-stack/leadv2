@@ -937,6 +937,16 @@ for st in stuck_items:
     current_events.add(f"stuck:{st['task_id']}:{'|'.join(st['reasons'])}")
 for tid in closed_now:
     current_events.add(f"closed:{tid}")
+# R2-5 fix (codex-review-2.md finding 5): dead_now must participate in the
+# SAME dedup discipline as waiting/stuck/closed. Previously the JSON `dead`
+# key returned the raw dead_now list on EVERY call — including every 5s
+# delta poll while the row remained corroborated-dead-but-not-yet-pruned
+# (e.g. observe_only, or a tombstone failure per R2-4's keep-row path) —
+# so leadv2-supervise-loop.sh's _render_events appended a duplicate DEAD
+# urgent line every single poll instead of once per liveness change,
+# violating the pulse ceiling ("unchanged poll -> zero bytes appended").
+for d in dead_now:
+    current_events.add(f"dead:{d['task_id']}:{'|'.join(d['reasons'])}")
 
 new_events = current_events - prev_reported if delta_mode else current_events
 
@@ -969,9 +979,16 @@ def event_key_waiting(q):
 def event_key_stuck(st):
     return f"stuck:{st['task_id']}:{'|'.join(st['reasons'])}"
 
+def event_key_dead(d):
+    return f"dead:{d['task_id']}:{'|'.join(d['reasons'])}"
+
 out_waiting = [q for q in waiting_items if event_key_waiting(q) in new_events] if delta_mode else waiting_items
 out_stuck = [st for st in stuck_items if event_key_stuck(st) in new_events] if delta_mode else stuck_items
 out_closed = [tid for tid in closed_now if f"closed:{tid}" in new_events] if delta_mode else closed_now
+# R2-5: same filter pattern as waiting/stuck/closed — a full (non-delta)
+# call always reports the complete live dead_now state; a delta call only
+# reports a dead_now entry whose event_key is NEW since the last snapshot.
+out_dead = [d for d in dead_now if event_key_dead(d) in new_events] if delta_mode else dead_now
 
 # ── Render ────────────────────────────────────────────────────────────────
 if json_mode:
@@ -1011,7 +1028,12 @@ if json_mode:
         # global observe_only is false must still surface here, never be
         # silently dropped.
         "would_prune": [p["task_id"] for p in pending_prunes if p["gated"]],
-        "dead": dead_now,
+        # R2-5 fix (codex-review-2.md finding 5): out_dead, not the raw
+        # dead_now list — deduped through new_events exactly like
+        # waiting/stuck/closed, so a delta call reports a DEAD event once
+        # per liveness change, never once per 5s poll while the state is
+        # unchanged (pulse-ceiling violation otherwise).
+        "dead": out_dead,
         "observe_only": observe_only,
         "reconcile_cycle": reconcile_cycle,
     }
