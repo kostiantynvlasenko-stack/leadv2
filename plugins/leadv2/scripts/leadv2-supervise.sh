@@ -517,19 +517,45 @@ for tid, s in list(current.items()):
     if started_at_dt and (now - started_at_dt).total_seconds() < SPAWN_GRACE_MIN * 60:
         continue  # spawning grace — never a death candidate this young
     backend = s.get("backend") or ("tmux" if s.get("tmux_window") else ("headless" if s.get("daemon_mode") else "terminal"))
-    reasons = []
+
+    # R2-3 fix (codex-review-2.md finding 3): death evidence is gathered
+    # per-signal (window presence, PID liveness/birth) but for a tmux-backend
+    # lane BOTH must be corroborated together — D-d spec is "death =
+    # corroborated (window+PID birth, 2 polls)", not either signal alone. The
+    # prior code treated ANY single reason as sufficient, so a tmux window
+    # that transiently fails to list (tmux server hiccup, rename race) while
+    # the underlying claude PID is provably still alive got pruned after two
+    # polls — a live child killed by a false-positive, in direct violation of
+    # D-d and the live-child off_limits constraint. Non-tmux backends
+    # (headless/workflow — no window concept at all) are unaffected: PID
+    # evidence alone remains sufficient for them, exactly as before.
+    window_missing = False
     if backend == "tmux":
         win = s.get("tmux_window") or tid
-        if win not in tmux_windows:
-            reasons.append("tmux window missing")
+        window_missing = win not in tmux_windows
+
     pid = s.get("pid")
+    pid_issue = False
+    pid_issue_reason = None
     if pid is None or not pid_alive(pid):
-        reasons.append("pid dead")
+        pid_issue = True
+        pid_issue_reason = "pid dead"
     else:
         stored_birth = s.get("pid_birth")
         cur_birth = _pid_birth_of(pid)
         if stored_birth and cur_birth and stored_birth != cur_birth:
-            reasons.append("pid birth mismatch (reuse)")
+            pid_issue = True
+            pid_issue_reason = "pid birth mismatch (reuse)"
+
+    reasons = []
+    if backend == "tmux":
+        if window_missing and pid_issue:
+            reasons = ["tmux window missing", pid_issue_reason]
+        # else: window-missing alone or pid-issue alone on a tmux lane is
+        # NOT corroborated evidence of death — no reasons, falls through to
+        # `continue` below, same as fully-clean evidence.
+    elif pid_issue:
+        reasons = [pid_issue_reason]
 
     if not reasons:
         continue  # evidence clears any prior candidate marker — not carried forward
