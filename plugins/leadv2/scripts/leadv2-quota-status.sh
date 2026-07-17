@@ -32,6 +32,18 @@
 #     value: JSON {"status","rateLimitType","resetsAt","overageStatus","captured_epoch",...}
 # Until that key exists, every mode labels the cap as a heuristic estimate.
 #
+# Weekly axis (PLUGIN-TRIO-01 Fix C): the "weekly" figure derived from history.db (below, PCT_WK)
+# is a claude%-only INPUT-token heuristic against a guessed 100M cap — it is NOT the number the
+# founder sees in the z.ai console (that console reports GLM's real weekly bucket). QUOTA-GATE-01
+# already solved "read GLM's real weekly %" correctly (leadv2-quota-read.py disambiguates the 5h vs
+# weekly TOKENS_LIMIT entries by nextResetTime distance, never by array index, and fails to
+# status=unknown rather than 0 on any read error). This script now ALSO surfaces that live number
+# (best-effort, via leadv2-quota-live.sh) alongside the heuristic one instead of leaving the
+# reader to misread PCT_WK as "the GLM weekly %". Any failure -> printed as "unmeasured", never 0.
+# --check is UNCHANGED (still claude%-only heuristic breaker; GLM's own breaker is
+# leadv2-glm-quota-gate.sh, which already reads the live number). Override for tests:
+# LEADV2_QUOTA_LIVE=<path to leadv2-quota-live.sh>.
+#
 # Usage:
 #   --check     Exit 0 if Anthropic quota OK, exit 1 if exhausted (claude% only; WARN at 60%)
 #   --report    Human-readable summary
@@ -52,6 +64,7 @@ MODE="report"
 
 DB="${LEADV2_BURN_DB:-$HOME/.claude/burn/history.db}"
 CFG="${LEADV2_MAIN_MODEL_CFG:-$(dirname "$0")/../ref/leadv2-main-model.yaml}"
+QUOTA_LIVE="${LEADV2_QUOTA_LIVE:-$(dirname "$0")/leadv2-quota-live.sh}"
 
 MAX_5H_IN=8000000
 MAX_WK_IN=100000000
@@ -104,6 +117,34 @@ EOF3
 read -r GW_IN GW_CC GW_CR GW_OUT GW_N <<EOF6
 $(stats "ts > datetime('now','-7 days') AND model LIKE 'glm%'")
 EOF6
+
+# ── Live GLM weekly (real number; PLUGIN-TRIO-01 Fix C) ────────────────────
+# Best-effort read via leadv2-quota-live.sh -> leadv2-quota-read.py, which already
+# disambiguates the 5h vs weekly TOKENS_LIMIT bucket by nextResetTime distance
+# (never array index) and never reports 0 on a read error. Any failure here
+# (helper missing, network down, malformed JSON, status!=ok) degrades to
+# GLM_WK_STATUS=unmeasured — never fabricates a percentage.
+GLM_WK_STATUS="unmeasured"
+GLM_WK_PCT=""
+GLM_WK_RESET=""
+if [[ -f "$QUOTA_LIVE" ]]; then
+  _glm_live_json="$(bash "$QUOTA_LIVE" glm 2>/dev/null || true)"
+  if [[ -n "$_glm_live_json" ]]; then
+    _glm_parsed="$(printf '%s' "$_glm_live_json" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    w = d.get("weekly") or {}
+    pct = w.get("pct")
+    if d.get("status") != "ok" or pct is None:
+        raise ValueError("not ok / no pct")
+    print("ok %s %s" % (pct, (w.get("reset_iso") or "?")[:19]))
+except Exception:
+    print("unmeasured 0 -")
+' 2>/dev/null || echo "unmeasured 0 -")"
+    read -r GLM_WK_STATUS GLM_WK_PCT GLM_WK_RESET <<<"$_glm_parsed"
+  fi
+fi
 
 # 24h cache-hit is a Claude-Max subscription metric → claude% only.
 read -r C24_IN C24_CR <<EOF4
@@ -180,9 +221,17 @@ case "$MODE" in
     # Backward-compatible top-level fields (now claude%-only) + per-provider breakdown.
     rl_block="null"
     [[ -n "$RL_JSON" ]] && rl_block="$RL_JSON"
-    printf '{"window_5h":{"input":%d,"cc":%d,"cr":%d,"output":%d,"pct":%d,"cap":%d,"cap_basis":"%s"},"window_weekly":{"input":%d,"pct":%d,"cap":%d},"cache_hit_24h":%s,"status":"%s","recommendation":"%s","providers":{"anthropic":{"w5h":{"input":%d,"cc":%d,"cr":%d,"output":%d,"turns":%d},"weekly":{"input":%d,"cc":%d,"cr":%d,"output":%d,"turns":%d}},"glm":{"w5h":{"input":%d,"cc":%d,"cr":%d,"output":%d,"turns":%d},"weekly":{"input":%d,"cc":%d,"cr":%d,"output":%d,"turns":%d}},"codex":"unmeasured"},"rate_limit":%s}\n' \
+    # window_weekly.pct/input stay the claude%-only heuristic (unchanged, backward-compat);
+    # glm_live_* is the NEW real number (PLUGIN-TRIO-01 Fix C) — "unmeasured" degrades to
+    # glm_live_pct:null, never 0.
+    if [[ "$GLM_WK_STATUS" == "ok" ]]; then
+      glm_live_pct_json="$GLM_WK_PCT"
+    else
+      glm_live_pct_json="null"
+    fi
+    printf '{"window_5h":{"input":%d,"cc":%d,"cr":%d,"output":%d,"pct":%d,"cap":%d,"cap_basis":"%s"},"window_weekly":{"input":%d,"pct":%d,"cap":%d,"glm_live_status":"%s","glm_live_pct":%s,"glm_live_reset":"%s"},"cache_hit_24h":%s,"status":"%s","recommendation":"%s","providers":{"anthropic":{"w5h":{"input":%d,"cc":%d,"cr":%d,"output":%d,"turns":%d},"weekly":{"input":%d,"cc":%d,"cr":%d,"output":%d,"turns":%d}},"glm":{"w5h":{"input":%d,"cc":%d,"cr":%d,"output":%d,"turns":%d},"weekly":{"input":%d,"cc":%d,"cr":%d,"output":%d,"turns":%d}},"codex":"unmeasured"},"rate_limit":%s}\n' \
       "$C5_IN" "$C5_CC" "$C5_CR" "$C5_OUT" "$PCT_5H" "$MAX_5H_IN" "$RL_CAP_BASIS" \
-      "$CW_IN" "$PCT_WK" "$MAX_WK_IN" \
+      "$CW_IN" "$PCT_WK" "$MAX_WK_IN" "$GLM_WK_STATUS" "$glm_live_pct_json" "$GLM_WK_RESET" \
       "$CACHE_HIT_24" "$STATUS" "$REC" \
       "$C5_IN" "$C5_CC" "$C5_CR" "$C5_OUT" "$C5_N" \
       "$CW_IN" "$CW_CC" "$CW_CR" "$CW_OUT" "$CW_N" \
@@ -191,12 +240,17 @@ case "$MODE" in
       "$rl_block"
     ;;
   report)
-    printf "Quota: 5h %d%% (%d / %d in, claude%% only, cap est.) | weekly %d%% | cache-hit %s | %s\n" \
+    printf "Quota: 5h %d%% (%d / %d in, claude%% only, cap est.) | weekly(claude,heuristic) %d%% | cache-hit %s | %s\n" \
       "$PCT_5H" "$C5_IN" "$MAX_5H_IN" "$PCT_WK" "$CACHE_HIT_24" "$STATUS"
     printf "  anthropic 5h: in %s  cc %s  cr %s  out %s  (%d turns)%s\n" \
       "$(hm "$C5_IN")" "$(hm "$C5_CC")" "$(hm "$C5_CR")" "$(hm "$C5_OUT")" "$C5_N" "$CACHE_NOTE"
     printf "  glm 5h:      in %s  cc %s  cr %s  out %s  (%d turns)  [Z.AI sub — not gated]\n" \
       "$(hm "$G5_IN")" "$(hm "$G5_CC")" "$(hm "$G5_CR")" "$(hm "$G5_OUT")" "$G5_N"
+    if [[ "$GLM_WK_STATUS" == "ok" ]]; then
+      printf "  glm weekly (live, z.ai): %s%%  (resets %sZ)  — real provider number, matches z.ai console\n" "$GLM_WK_PCT" "$GLM_WK_RESET"
+    else
+      printf "  glm weekly (live, z.ai): unmeasured (read failed or ZAI_AUTH_TOKEN unavailable — never reported as 0%%)\n"
+    fi
     printf "  codex:       unmeasured (ChatGPT subscription, not in this db)\n"
     if [[ "$RL_FRESH" == "1" ]]; then
       printf "  rate_limit:  %s (status=%s overage=%s resets=%s) — provider signal, preferred over cap est.\n" "$RL_CAP_BASIS" "${RL_STATUS:-?}" "${RL_OVERAGE:-?}" "${RL_RESETS:-?}"
