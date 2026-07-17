@@ -80,11 +80,21 @@ if [[ -f "${CROSS_REPO_CONFIG}" ]]; then
     COPY_PATHS+=("${proj_root}/.claude/scripts")
   done < <(python3 - "${CROSS_REPO_CONFIG}" <<'PYEOF'
 import sys, yaml, os
+
+def vendors_scripts_disabled(entry):
+    # L-B fix (review-2.md): mirror leadv2-plugin-sync.sh's normalization —
+    # a quoted `vendors_scripts: "false"` must still be treated as disabled,
+    # not just the unquoted-bool `is False` identity check.
+    v = entry.get("vendors_scripts", True)
+    if isinstance(v, bool):
+        return v is False
+    return str(v).strip().lower() in ("false", "no", "off", "0")
+
 config = yaml.safe_load(open(sys.argv[1])) or {}
 repos = config.get("repos") or {}
 for name, entry in repos.items():
     entry = entry or {}
-    if entry.get("vendors_scripts", True) is False:
+    if vendors_scripts_disabled(entry):
         continue
     raw = entry.get("path", "")
     expanded = os.path.expanduser(raw)

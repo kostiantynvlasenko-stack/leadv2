@@ -105,10 +105,18 @@ for l in sys.stdin:
 _DIRECTION_SAFETY_CHECK="${SCRIPT_DIR}/leadv2-direction-safety-check.py"
 _direction_safety_excludes() {
   local subdir="$1" src="$2" dst="$3"
+  shift 3
+  # M-B fix (review-2.md): optional trailing rsync filter args, e.g.
+  # --include='leadv2-*' --exclude='*' for target (e), whose real sync only
+  # ever transfers a leadv2-* subset. Scopes this dry-run scan to the same
+  # subset instead of checksumming the full (possibly large, e.g.
+  # node_modules/) source tree just to compute an exclude list nothing in
+  # that tree would ever have matched anyway.
+  local -a extra_filters=("$@")
   [[ -f "${_DIRECTION_SAFETY_CHECK}" ]] || return 0
   [[ -d "${dst}" ]] || return 0  # nothing on disk yet to clobber — all safe
   local changed
-  changed="$(rsync -rc --delete --dry-run --itemize-changes "${src}" "${dst}" 2>/dev/null \
+  changed="$(rsync -rc --delete --dry-run --itemize-changes "${extra_filters[@]}" "${src}" "${dst}" 2>/dev/null \
     | awk '$1 ~ /^>f/ {print $2}')" || true
   [[ -z "${changed}" ]] && return 0
   local relpath
@@ -144,6 +152,18 @@ _resolve_project_roots() {
   # explicitly opted out — C2 fix, PLUGIN-CACHE-THIRD-COPY-REVERTS-FIXES-01).
   python3 - "${CROSS_REPO_CONFIG}" <<'PYEOF'
 import sys, yaml, os
+
+def vendors_scripts_enabled(entry):
+    # L-B fix (review-2.md): PyYAML only auto-bools UNQUOTED false/no/off/0.
+    # A future `vendors_scripts: "false"` (quoted string) would otherwise be
+    # a truthy non-empty str -> silently re-vendors the repo with zero
+    # warning, the exact incident this field exists to prevent. Accept
+    # common string spellings too, not just the bool identity.
+    v = entry.get("vendors_scripts", True)
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() not in ("false", "no", "off", "0")
+
 config = yaml.safe_load(open(sys.argv[1])) or {}
 repos = config.get("repos") or {}
 for name, entry in repos.items():
@@ -151,7 +171,7 @@ for name, entry in repos.items():
     raw = entry.get("path", "")
     expanded = os.path.expanduser(raw)
     if expanded:
-        vendors = entry.get("vendors_scripts", True)
+        vendors = vendors_scripts_enabled(entry)
         print(f"{expanded}\t{'true' if vendors else 'false'}")
 PYEOF
 }
@@ -299,7 +319,7 @@ _unsafe_excludes=()
 while IFS= read -r _u; do
   [[ -z "${_u}" ]] && continue
   _unsafe_excludes+=(--exclude="${_u}")
-done < <(_direction_safety_excludes "scripts" "${PLUGIN_ROOT}/scripts/" "${USER_SCRIPTS_TARGET}")
+done < <(_direction_safety_excludes "scripts" "${PLUGIN_ROOT}/scripts/" "${USER_SCRIPTS_TARGET}" --include='leadv2-*' --exclude='*')
 # rsync filter rules are first-match-wins: unsafe excludes MUST precede the
 # generic --include='leadv2-*' --exclude='*' wildcard, or that wildcard would
 # already have claimed (and included) the unsafe leadv2-* filename before its

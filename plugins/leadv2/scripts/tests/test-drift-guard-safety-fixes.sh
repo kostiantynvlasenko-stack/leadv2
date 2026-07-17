@@ -187,6 +187,137 @@ else
   fail "classify-check: malformed JSON should fail closed to 0 (got ${R3D})"
 fi
 
+# ─────────────────────────────────────────────────────────────────────────
+# 4. vendors_scripts skip mechanism (review-2.md CRITICAL) — the actual C2
+#    fix, previously untested: _resolve_project_roots' per-repo emission,
+#    _sync_project_root's .claude/scripts/ skip, and drift-guard's per-repo
+#    vendored-copy skip. Everything is sandboxed: HOME/LEADV2_CANONICAL_ROOT
+#    point at TMPROOT-only paths; the real ~/.claude and
+#    ~/Projects/leadv2 trees are never read or written.
+# ─────────────────────────────────────────────────────────────────────────
+PLUGIN_SYNC="${SCRIPTS_ROOT}/leadv2-plugin-sync.sh"
+
+# Sandbox canonical tree (so PLUGIN_ROOT's -d check + CANONICAL_SCRIPTS resolve)
+VS_CANON="${TMPROOT}/vs-canon"
+mkdir -p "${VS_CANON}/plugins/leadv2/scripts"
+printf -- '#!/usr/bin/env bash\necho hi\n' > "${VS_CANON}/plugins/leadv2/scripts/probe.sh"
+
+# Sandbox HOME (so CROSS_REPO_CONFIG, CACHE_TARGET, SHARED_TARGET all resolve
+# under TMPROOT when this subprocess's $HOME is overridden — plugin-sync.sh
+# has no LEADV2_HOME_ROOT hook of its own, but every $HOME-derived path in it
+# is exactly what a real $HOME override redirects, safely, in a subprocess).
+VS_HOME="${TMPROOT}/vs-home"
+mkdir -p "${VS_HOME}/.claude/leadv2-shared"
+
+VS_REPO_A="${TMPROOT}/vs-repo-a"
+VS_REPO_B="${TMPROOT}/vs-repo-b"
+mkdir -p "${VS_REPO_A}" "${VS_REPO_B}"
+cat > "${VS_HOME}/.claude/leadv2-shared/cross-repo-paths.yaml" <<YAML
+repos:
+  repo-a:
+    path: "${VS_REPO_A}"
+  repo-b:
+    path: "${VS_REPO_B}"
+    vendors_scripts: false
+YAML
+
+# Harness: source only the function-definitions portion of leadv2-plugin-sync.sh
+# (everything before its top-level execution body starts at "changed_summary=()")
+# in a throwaway bash -c subprocess, then invoke a named function directly.
+# Positional params are captured into named vars and cleared (`set --`) BEFORE
+# sourcing, so the sourced script's own arg-parsing loop never consumes them.
+_vs_call() {
+  local func_name="$1"; shift
+  # -u LEADV2_PROJECT_ROOT: the calling /leadv2 session may export this for
+  # its own orchestration — it must never leak into this sandbox's
+  # _resolve_project_roots call (would short-circuit before ever reading the
+  # synthetic cross-repo-paths.yaml).
+  # PYTHONPATH: overriding HOME below (to sandbox every $HOME-derived path in
+  # leadv2-plugin-sync.sh) also relocates python3's user-site-packages lookup
+  # (site.getusersitepackages() is HOME-relative) — which is where pyyaml is
+  # actually installed on this machine. Pin PYTHONPATH to the REAL user
+  # site-packages dir so `import yaml` keeps resolving under the sandboxed HOME.
+  env -u LEADV2_PROJECT_ROOT HOME="${VS_HOME}" LEADV2_CANONICAL_ROOT="${VS_CANON}" \
+    PYTHONPATH="$(python3 -c 'import site; print(site.getusersitepackages())')" bash -c '
+    set -uo pipefail
+    plugin_sync="$1"; func_name="$2"; shift 2
+    func_args=("$@")
+    set --
+    # Cut before the top-level execution body (starts at "changed_summary=()")
+    # rather than a hardcoded line number — a M-B/L-B-style edit that adds
+    # lines above that marker must not silently desync this sandbox harness
+    # from real function source.
+    cutoff_line="$(grep -n "^changed_summary=()" "${plugin_sync}" | head -1 | cut -d: -f1)"
+    cutoff_line="$((cutoff_line - 1))"
+    # shellcheck disable=SC1090
+    source <(sed -n "1,${cutoff_line}p" "${plugin_sync}")
+    "${func_name}" "${func_args[@]}"
+  ' _ "${PLUGIN_SYNC}" "${func_name}" "$@"
+}
+
+# 4a. _resolve_project_roots distinguishes vendors_scripts:false from default-true
+VS_ROOTS_OUT="$(_vs_call _resolve_project_roots)"
+if printf -- '%s\n' "${VS_ROOTS_OUT}" | grep -qF "$(printf -- '%s\t%s' "${VS_REPO_A}" "true")"; then
+  pass "_resolve_project_roots: repo-a (no vendors_scripts field) -> true"
+else
+  fail "_resolve_project_roots: expected repo-a -> true (got: ${VS_ROOTS_OUT})"
+fi
+if printf -- '%s\n' "${VS_ROOTS_OUT}" | grep -qF "$(printf -- '%s\t%s' "${VS_REPO_B}" "false")"; then
+  pass "_resolve_project_roots: repo-b (vendors_scripts: false) -> false"
+else
+  fail "_resolve_project_roots: expected repo-b -> false (got: ${VS_ROOTS_OUT})"
+fi
+
+# 4b. _sync_project_root with vendors_scripts=false never creates/touches
+#     <root>/.claude/scripts/
+VS_TARGET_ROOT="${TMPROOT}/vs-sync-target"
+mkdir -p "${VS_TARGET_ROOT}"
+_vs_call _sync_project_root "${VS_TARGET_ROOT}" false >/dev/null 2>&1 || true
+if [[ ! -e "${VS_TARGET_ROOT}/.claude/scripts" ]]; then
+  pass "_sync_project_root: vendors_scripts=false never creates .claude/scripts/"
+else
+  fail "_sync_project_root: vendors_scripts=false must never create .claude/scripts/ (found: ${VS_TARGET_ROOT}/.claude/scripts)"
+fi
+
+# sanity counterpart: vendors_scripts=true (default) DOES populate .claude/scripts/
+VS_TARGET_ROOT2="${TMPROOT}/vs-sync-target-true"
+mkdir -p "${VS_TARGET_ROOT2}"
+_vs_call _sync_project_root "${VS_TARGET_ROOT2}" true >/dev/null 2>&1 || true
+if [[ -f "${VS_TARGET_ROOT2}/.claude/scripts/probe.sh" ]]; then
+  pass "_sync_project_root: vendors_scripts=true (default) still vendors .claude/scripts/ (no regression)"
+else
+  fail "_sync_project_root: vendors_scripts=true should still vendor .claude/scripts/probe.sh"
+fi
+
+# 4c. drift-guard.sh: a vendors_scripts:false repo whose .claude/scripts/
+#     does not exist on disk must NOT appear as a MISSING_DIR entry.
+DG2_CANON="${TMPROOT}/dg2-canon"
+mkdir -p "${DG2_CANON}/plugins/leadv2/scripts"
+printf -- '#!/usr/bin/env bash\necho hi\n' > "${DG2_CANON}/plugins/leadv2/scripts/probe.sh"
+DG2_HOME="${TMPROOT}/dg2-home"
+mkdir -p "${DG2_HOME}/.claude/plugins/cache/leadv2-local/leadv2/0.1.0/scripts"
+mkdir -p "${DG2_HOME}/.claude/leadv2-shared/scripts"
+mkdir -p "${DG2_CANON}/.claude/scripts"
+cp "${DG2_CANON}/plugins/leadv2/scripts/probe.sh" "${DG2_HOME}/.claude/plugins/cache/leadv2-local/leadv2/0.1.0/scripts/probe.sh"
+cp "${DG2_CANON}/plugins/leadv2/scripts/probe.sh" "${DG2_HOME}/.claude/leadv2-shared/scripts/probe.sh"
+cp "${DG2_CANON}/plugins/leadv2/scripts/probe.sh" "${DG2_CANON}/.claude/scripts/probe.sh"
+DG2_NOVENDOR_REPO="${TMPROOT}/dg2-novendor-repo"
+mkdir -p "${DG2_NOVENDOR_REPO}"   # deliberately NO .claude/scripts/ under it
+mkdir -p "${DG2_HOME}/.claude/leadv2-shared"
+cat > "${DG2_HOME}/.claude/leadv2-shared/cross-repo-paths.yaml" <<YAML
+repos:
+  no-vendor-repo:
+    path: "${DG2_NOVENDOR_REPO}"
+    vendors_scripts: false
+YAML
+DG2_JSON="$(LEADV2_CANONICAL_ROOT="${DG2_CANON}" LEADV2_HOME_ROOT="${DG2_HOME}" \
+  bash "${DRIFT_GUARD}" --quiet --json)"
+if printf -- '%s' "${DG2_JSON}" | grep -q "no-vendor-repo"; then
+  fail "drift-guard: vendors_scripts:false repo with no .claude/scripts/ must never appear in report (got: ${DG2_JSON})"
+else
+  pass "drift-guard: vendors_scripts:false repo with no .claude/scripts/ produces no MISSING_DIR entry"
+fi
+
 echo "---"
 if [[ ${FAIL} -eq 0 ]]; then
   echo "ALL TESTS PASSED"
