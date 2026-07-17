@@ -274,6 +274,28 @@ _rsync_or_dry "user-scripts" "${PLUGIN_ROOT}/scripts/" "${USER_SCRIPTS_TARGET}" 
   --include='leadv2-*' --exclude='*' -d
 changed_summary+=("user-scripts")
 
+# ── (f) leadv2 repo's OWN vendored .claude/scripts (copy #2 of the 5,
+# PLUGIN-CACHE-THIRD-COPY-REVERTS-FIXES-01 context.yaml) ─────────────────────
+# ~/Projects/leadv2/.claude/scripts/ is not this repo's own canonical (that's
+# plugins/leadv2/scripts/), but it IS one of the 5 copies the drift-guard
+# checks, and — unlike the (c)/(d) targets which iterate cross-repo-paths.yaml
+# — it was never an actual sync TARGET here, so it would drift forever and
+# perpetually fail the drift-guard/fanout preflight. Sync it the same way as
+# (c), hardcoded (this repo is intentionally NOT added to the shared
+# cross-repo-paths.yaml — that file is a shared tree, out of this task's
+# edit authorization).
+LEADV2_REPO_VENDORED="${CANONICAL_ROOT}/.claude/scripts"
+if [[ -d "${CANONICAL_ROOT}/.claude" ]]; then
+  log "Syncing -> leadv2 repo's own vendored scripts (f): ${LEADV2_REPO_VENDORED}"
+  _unsafe_excludes=()
+  while IFS= read -r _u; do
+    [[ -z "${_u}" ]] && continue
+    _unsafe_excludes+=(--exclude="${_u}")
+  done < <(_direction_safety_excludes "scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}")
+  _rsync_or_dry "leadv2-repo-vendored/scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}" --recursive --delete "${_unsafe_excludes[@]}"
+  changed_summary+=("leadv2-repo-vendored")
+fi
+
 # ── (c)/(d) Per-project .claude/scripts + .claude/contracts ──────────────────
 # Iterate all roots from cross-repo-paths.yaml (or single --project-root override).
 while IFS= read -r proj_root; do
