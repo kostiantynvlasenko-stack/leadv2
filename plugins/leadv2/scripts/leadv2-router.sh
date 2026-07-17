@@ -77,8 +77,22 @@ fi
 # Python helper: reads routing.yaml, evaluates signals, applies stop rules,
 # checks cost ceiling, outputs key=value pairs for bash to consume.
 # ---------------------------------------------------------------------------
-PY_HELPER=$(mktemp /tmp/leadv2-router-XXXXXX.py)
-trap 'rm -f "$PY_HELPER"' EXIT
+# SD-31 fix: BSD/macOS mktemp requires the X-run to be TRAILING — a literal
+# suffix after it (".py") is taken as-is, so the "random" name collapses to
+# the SAME literal filename on every call and concurrent callers collide
+# (`mkstemp failed ... File exists`). Fix: mktemp with a trailing-X template
+# (portable on BSD + GNU), then rename to add the .py suffix.
+PY_HELPER_BASE=$(mktemp /tmp/leadv2-router-XXXXXX) || {
+  log_error "mktemp failed to create PY_HELPER_BASE — cannot proceed"
+  exit 1
+}
+PY_HELPER="${PY_HELPER_BASE}.py"
+mv "$PY_HELPER_BASE" "$PY_HELPER" || {
+  log_error "failed to rename temp helper $PY_HELPER_BASE -> $PY_HELPER"
+  rm -f "$PY_HELPER_BASE"
+  exit 1
+}
+trap 'rm -f "$PY_HELPER_BASE" "$PY_HELPER"' EXIT
 
 python3 -c "import sys; print(open(sys.argv[1]).read())" /dev/stdin > "$PY_HELPER" 2>/dev/null <<'PYEOF'
 import sys
@@ -687,6 +701,16 @@ fi
 if [[ "$result" == "ROUTING_YAML_ERROR"* ]] || [[ "$result" == "UNKNOWN_PHASE_STEP"* ]]; then
   log_warn "routing returned: $result — using fallback"
   exit 2
+fi
+
+# SD-31: never exit 0 with an empty/model-less routing decision. A helper
+# collision (or any other silent failure upstream) that leaves $result empty
+# or without a `model=` line used to fall through to `exit 0` — a swallowed
+# failure indistinguishable from a real routing decision. Fail loudly instead.
+if [[ -z "$result" ]] || ! printf '%s\n' "$result" | grep -q '^model='; then
+  log_error "router produced no 'model=' line (empty or malformed output) — refusing to exit 0"
+  cat "$_router_py_err" >&2 2>/dev/null || true
+  exit 1
 fi
 
 # Extract ceiling_status to decide exit code
