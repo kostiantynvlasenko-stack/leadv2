@@ -101,11 +101,32 @@ for l in sys.stdin:
 # relative path ever held exactly that content. A downstream copy carrying
 # an un-landed fix canonical hasn't seen yet is exactly what silently got
 # clobbered in the incident this task fixes. Prints unsafe relpaths (one per
-# line) on stdout for the caller to --exclude from the rsync invocation.
+# line) on stdout (exclude mode) for the caller to --exclude from the rsync.
+#
+# MODE (first arg) controls what happens to a file deemed UNSAFE (dst content
+# not reachable anywhere in canonical's git history for that relpath):
+#   exclude  Emit the relpath so the caller --exclude's it; LEAVE THE COPY
+#            UNTOUCHED (hard block). Use ONLY where in-place local development
+#            is plausible AND the target is NOT checked by leadv2-drift-guard.sh
+#            — i.e. (e) ~/.claude/scripts.
+#   warn     Same loud warning, but emit nothing, so rsync OVERWRITES the copy
+#            with canonical (canonical is the pinned source of truth; SOURCE-PIN
+#            + CACHE-REFUSAL already guarantee the source IS canonical). Use for
+#            every guard-checked copy: (a) cache, (b) shared, (f) vendored.
+# Why warn (not exclude) for guard-checked copies (DRIFT-GUARD-UNSATISFIABLE-01):
+# exclude mode left a divergent copy unreconcilable — rsync skipped it, the copy
+# stayed divergent, re-running sync never cleared it, leadv2-drift-guard exited 1
+# permanently with a remedy that provably could not work; the reflex became
+# LEADV2_SKIP_DRIFT_GUARD=1. WARN keeps the signal, removes only the silent-
+# leave-it-stale behavior. ~/Projects/leadv2/.claude/scripts/ (the vendored
+# copy) is gitignored+untracked in canonical's own repo, so once it diverges its
+# content can NEVER be in canonical's git history — exclude mode trapped it
+# forever. Verified live: exclude mode also refused to clear a 1-byte hand-edit
+# on plugin-cache, so this is a class bug, not vendored-specific.
 _DIRECTION_SAFETY_CHECK="${SCRIPT_DIR}/leadv2-direction-safety-check.py"
 _direction_safety_excludes() {
-  local subdir="$1" src="$2" dst="$3"
-  shift 3
+  local mode="$1" subdir="$2" src="$3" dst="$4"
+  shift 4
   # M-B fix (review-2.md): optional trailing rsync filter args, e.g.
   # --include='leadv2-*' --exclude='*' for target (e), whose real sync only
   # ever transfers a leadv2-* subset. Scopes this dry-run scan to the same
@@ -126,8 +147,13 @@ _direction_safety_excludes() {
     [[ -f "${dst_file}" ]] || continue  # new file, nothing to clobber — safe
     local canonical_relpath="plugins/leadv2/${subdir}/${relpath}"
     if ! python3 "${_DIRECTION_SAFETY_CHECK}" "${PLUGIN_GIT_ROOT}" "${canonical_relpath}" "${dst_file}"; then
-      log_warn "DIRECTION-SAFETY: refusing to overwrite ${dst_file} — its content is not reachable anywhere in canonical's git history for ${canonical_relpath} (possible un-landed fix on this copy). Excluding this file from the sync; land the fix in canonical first."
-      printf -- '%s\n' "${relpath}"
+      if [[ "${mode}" == "exclude" ]]; then
+        log_warn "DIRECTION-SAFETY (block): refusing to overwrite ${dst_file} — its content is not reachable anywhere in canonical's git history for ${canonical_relpath} (possible un-landed fix on this copy). Excluding this file from the sync; land the fix in canonical first."
+        printf -- '%s\n' "${relpath}"
+      else
+        # warn mode: canonical is the pinned source of truth — reconcile it.
+        log_warn "DIRECTION-SAFETY (warn): ${dst_file} content is not reachable in canonical's git history for ${canonical_relpath} (possible un-landed fix). Canonical is the pinned source of truth (SOURCE-PIN + CACHE-REFUSAL) — OVERWRITING this copy to reconcile. If this was a real fix, land it in canonical and re-sync."
+      fi
     fi
   done <<< "${changed}"
 }
@@ -281,7 +307,7 @@ for subdir in scripts contracts workflows hooks config skills commands agents do
     while IFS= read -r _u; do
       [[ -z "${_u}" ]] && continue
       _unsafe_excludes+=(--exclude="${_u}")
-    done < <(_direction_safety_excludes "${subdir}" "${src}" "${dst}")
+    done < <(_direction_safety_excludes "warn" "${subdir}" "${src}" "${dst}")
     _rsync_or_dry "cache/${subdir}" "${src}" "${dst}" --recursive --delete "${_unsafe_excludes[@]}"
     changed_summary+=("cache/${subdir}")
   fi
@@ -297,7 +323,7 @@ for subdir in scripts contracts; do
     while IFS= read -r _u; do
       [[ -z "${_u}" ]] && continue
       _unsafe_excludes+=(--exclude="${_u}")
-    done < <(_direction_safety_excludes "${subdir}" "${src}" "${dst}")
+    done < <(_direction_safety_excludes "warn" "${subdir}" "${src}" "${dst}")
     _rsync_or_dry "shared/${subdir}" "${src}" "${dst}" --recursive --delete "${_unsafe_excludes[@]}"
     changed_summary+=("shared/${subdir}")
   fi
@@ -319,7 +345,7 @@ _unsafe_excludes=()
 while IFS= read -r _u; do
   [[ -z "${_u}" ]] && continue
   _unsafe_excludes+=(--exclude="${_u}")
-done < <(_direction_safety_excludes "scripts" "${PLUGIN_ROOT}/scripts/" "${USER_SCRIPTS_TARGET}" --include='leadv2-*' --exclude='*')
+done < <(_direction_safety_excludes "exclude" "scripts" "${PLUGIN_ROOT}/scripts/" "${USER_SCRIPTS_TARGET}" --include='leadv2-*' --exclude='*')
 # rsync filter rules are first-match-wins: unsafe excludes MUST precede the
 # generic --include='leadv2-*' --exclude='*' wildcard, or that wildcard would
 # already have claimed (and included) the unsafe leadv2-* filename before its
@@ -345,7 +371,7 @@ if [[ -d "${CANONICAL_ROOT}/.claude" ]]; then
   while IFS= read -r _u; do
     [[ -z "${_u}" ]] && continue
     _unsafe_excludes+=(--exclude="${_u}")
-  done < <(_direction_safety_excludes "scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}")
+  done < <(_direction_safety_excludes "warn" "scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}")
   _rsync_or_dry "leadv2-repo-vendored/scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}" --recursive --delete "${_unsafe_excludes[@]}"
   changed_summary+=("leadv2-repo-vendored")
 fi
