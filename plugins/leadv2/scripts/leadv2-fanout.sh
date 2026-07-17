@@ -53,6 +53,20 @@ source "$_REGISTRY_SH"
 log() { printf -- '[fanout] %s\n' "$*" >&2; }
 log_error() { log "ERROR: $*"; }
 
+# DRIFT-GUARD PREFLIGHT (PLUGIN-CACHE-THIRD-COPY-REVERTS-FIXES-01): refuse to
+# fan out onto scripts that may be silently stale in this copy. Fanout is the
+# highest-blast-radius launcher of the 5 copies (it dispatches N independent
+# sessions using this repo's vendored .claude/scripts/) — exactly the surface
+# that silently ran on 4 reverted fixes for an hour undetected. Set
+# LEADV2_SKIP_DRIFT_GUARD=1 to bypass (tests / intentional single-copy work).
+_DRIFT_GUARD="${SCRIPT_DIR}/leadv2-drift-guard.sh"
+if [[ "${LEADV2_SKIP_DRIFT_GUARD:-0}" != "1" ]] && [[ -f "${_DRIFT_GUARD}" ]]; then
+  if ! bash "${_DRIFT_GUARD}" --quiet; then
+    log_error "drift detected across the 5 leadv2 script copies — refusing to fan out on possibly-stale scripts. Run 'bash ${_DRIFT_GUARD}' for details, then 'bash ~/Projects/leadv2/plugins/leadv2/scripts/leadv2-plugin-sync.sh' from canonical to reconcile. Override: LEADV2_SKIP_DRIFT_GUARD=1."
+    exit 1
+  fi
+fi
+
 TASKS_YAML="${PROJECT_ROOT}/docs/tasks.yaml"
 ACTIVE_YAML="$(_leadv2_yaml_file)"
 
