@@ -23,6 +23,18 @@ set -euo pipefail
 #   for any other subcommand. An explicit --model already on the command line
 #   always wins over --tier.
 #
+# --wait  Real flag in ANY position (P0, CODEX-WAIT-AND-TIER-01). Stripped here
+#   so it never lands in the prompt (codex-companion `task` has no --wait option
+#   and would fold it into the prompt text). Forces the FOREGROUND blocking path
+#   for `task`/`review` (strips --background) so the wrapper blocks until the job
+#   reaches a terminal state — the only way a long Codex job survives, since a
+#   job dies the instant its launching client drops the app-server connection.
+#   `adversarial-review` always blocks already (auto-injected for companion).
+#
+# --reason "<text>"  REQUIRED by --tier top (P1). `top` is the scarce Codex tier
+#   (adversarial review + Heavy/arch plans); standard is the default, volume for
+#   mechanical/bulk. Without --reason, --tier top exits non-zero.
+#
 # Output filter: by default strips codex-companion's noisy [codex] meta lines
 # (Running command / Command completed / Calling ... / Tool ... completed/failed /
 # Assistant message captured — mid-stream previews).
@@ -40,20 +52,49 @@ fi
 # since codex-companion has no concept of --tier — it only understands
 # --model/--effort). Strip --tier out of "$@" and resolve it to concrete
 # --model/--effort values, identical resolution table to leadv2-codex-planner.sh.
+# Strip --tier / --reason / --wait out of "$@" (every position) so codex-companion
+# never sees them folded into the prompt. codex-companion understands only
+# --model/--effort and (for review subcommands) --wait/--background -- `task` has
+# NO --wait option, so an unstripped --wait lands verbatim in the prompt text and
+# the call returns immediately (the CODEX-WAIT-AND-TIER-01 P0 bug).
 _TIER=""
-_pre_tier_args=()
+_REASON=""
+_WAIT=0
+_pre_args=()
 _i=1
 while [[ $_i -le $# ]]; do
   _arg="${!_i}"
-  if [[ "$_arg" == "--tier" ]]; then
-    _i=$((_i + 1))
-    _TIER="${!_i:-}"
-  else
-    _pre_tier_args+=("$_arg")
-  fi
+  case "$_arg" in
+    --tier|--tier=*)
+      if [[ "$_arg" == --tier=* ]]; then _TIER="${_arg#--tier=}"; else _i=$((_i + 1)); _TIER="${!_i:-}"; fi ;;
+    --reason|--reason=*)
+      if [[ "$_arg" == --reason=* ]]; then _REASON="${_arg#--reason=}"; else _i=$((_i + 1)); _REASON="${!_i:-}"; fi ;;
+    --wait|--wait=*)
+      _WAIT=1 ;;
+    *)
+      _pre_args+=("$_arg") ;;
+  esac
   _i=$((_i + 1))
 done
-set -- "${_pre_tier_args[@]}"
+set -- "${_pre_args[@]}"
+
+# P1 (CODEX-WAIT-AND-TIER-01) -- --tier top must earn its cost. Measured before
+# this gate: 17 runs on top (Sol), 9 on standard (Terra), 0 on volume (Luna) --
+# 65% on the priciest tier, burning Codex to 27%. `top` is the scarce tier
+# (adversarial review + Heavy/arch plans ONLY); standard is the default, volume
+# for mechanical/bulk. Sol->Terra-ultra gov-gated fallback (below) is unaffected
+# -- it fires on _TIER=="top" regardless of which model resolves. standard/volume
+# pass through unchanged.
+if [[ "${_TIER:-}" == "top" && -z "${_REASON:-}" ]]; then
+  cat >&2 <<'EOF'
+[codex-task] REFUSED: --tier top requires --reason "<why this run earns top>".
+  Founder rule (CODEX-WAIT-AND-TIER-01): `top` (Sol -> Terra-ultra) is the scarce
+  Codex tier, reserved for adversarial review + Heavy/arch plans. Default is
+  `standard` (Terra/medium); use `volume` (Luna/low) for mechanical/bulk work.
+  Re-run with --reason "<text>" to attest this run earns top, or drop --tier.
+EOF
+  exit 2
+fi
 
 SUB="${1:-}"
 
@@ -73,6 +114,30 @@ if [[ "$SUB" == "task" || "$SUB" == "review" || "$SUB" == "adversarial-review" ]
     && printf -- '%s\t%s\t%s\n' "$PWD" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "codex" \
        > "${_JOB_REG_DIR}/${_JOB_REG_ID}" 2>/dev/null || true
   trap 'rm -f "${_JOB_REG_DIR}/${_JOB_REG_ID}" 2>/dev/null || true' EXIT
+fi
+
+# P0 (CODEX-WAIT-AND-TIER-01) -- --wait forces foreground blocking. `task`/
+# `review` detach ONLY with --background; without it they already block in the
+# foreground (codex-companion runForegroundCommand holds the app-server
+# connection until the job reaches a terminal state). So when --wait is set we
+# strip --background to guarantee the blocking path -- a backgrounded --wait is
+# contradictory and the job dies the instant the launcher returns (proven: 5
+# launch methods -> 5 deaths). adversarial-review already auto-injects --wait
+# for companion below, so it is unaffected here.
+if [[ "${_WAIT:-0}" -eq 1 && ( "${SUB:-}" == "task" || "${SUB:-}" == "review" ) ]]; then
+  _bg_seen=0
+  _wa_args=()
+  for _a in "$@"; do
+    if [[ "$_a" == "--background" ]]; then
+      _bg_seen=1
+    else
+      _wa_args+=("$_a")
+    fi
+  done
+  if [[ "$_bg_seen" -eq 1 ]]; then
+    set -- "${_wa_args[@]}"
+    echo "[codex-task] --wait set: stripping --background -- running foreground and blocking until terminal state (a backgrounded --wait would die on launcher exit)" >&2
+  fi
 fi
 
 _has_flag() {

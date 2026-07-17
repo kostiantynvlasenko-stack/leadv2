@@ -56,7 +56,16 @@ Result auto-saved to `docs/handoff/<task-id>/trajectory.yaml`.
 
 ### 1. Determine reviewers
 
-Codex availability check: `bash .claude/scripts/lv2 codex-task.sh status` (exit 0 = OK, requires active ChatGPT login).
+Codex availability check: `bash ~/.claude/scripts/codex-task.sh status` (exit 0 = OK, requires active
+ChatGPT login). **Do NOT route this through `.claude/scripts/lv2`** — `codex-task.sh` is a global
+personal tool (`~/.claude/scripts/codex-task.sh`), not a leadv2-plugin script; the `lv2` dispatcher
+only resolves plugin scripts (`<plugin>/scripts/`) and repo overrides
+(`.claude/leadv2-overrides/scripts/`), so `bash .claude/scripts/lv2 codex-task.sh status` always
+fails with "cannot resolve script" (exit 127) regardless of real Codex availability — this
+previously forced every review straight to Case C (critic fallback) even when Codex was healthy
+(FIX-FANOUT-MODEL-ROUTING-01, 2026-07-15). `leadv2_codex_ready()` in `leadv2-helpers.sh` and the
+`leadv2-review.js` Workflow already call the correct absolute path — this was the one stale
+call site.
 
 **Always fire (primary, one of):** Codex adversarial-review (background) if OK; else `Agent(critic, sonnet, run_in_background=true)` as fallback primary — equally valid.
 
