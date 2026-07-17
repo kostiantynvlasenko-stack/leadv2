@@ -61,12 +61,21 @@ CROSS_REPO_CONFIG="${_HOME_ROOT}/.claude/leadv2-shared/cross-repo-paths.yaml"
 
 declare -a COPY_NAMES
 declare -a COPY_PATHS
+declare -a COPY_EXTRA
+# COPY_EXTRA (finding-2): per-copy warn-mode subdirs to ALSO parity-check.
+# Mirrors leadv2-plugin-sync.sh's per-target sync perimeter exactly, so no
+# synced subdir is outside this guard's eyes. Vendored copies mirror
+# scripts-only; plugin-cache mirrors the full plugin tree; shared mirrors
+# scripts+contracts.
 COPY_NAMES+=("leadv2-repo-vendored")
 COPY_PATHS+=("${CANONICAL_ROOT}/.claude/scripts")
+COPY_EXTRA+=("")
 COPY_NAMES+=("plugin-cache")
 COPY_PATHS+=("${_HOME_ROOT}/.claude/plugins/cache/leadv2-local/leadv2/0.1.0/scripts")
+COPY_EXTRA+=("contracts workflows hooks config skills commands agents docs")
 COPY_NAMES+=("leadv2-shared")
 COPY_PATHS+=("${_HOME_ROOT}/.claude/leadv2-shared/scripts")
+COPY_EXTRA+=("contracts")
 
 if [[ -f "${CROSS_REPO_CONFIG}" ]]; then
   # vendors_scripts: false (e.g. campaign-platform, symlink-only architecture)
@@ -78,6 +87,7 @@ if [[ -f "${CROSS_REPO_CONFIG}" ]]; then
     name="$(basename "${proj_root}")"
     COPY_NAMES+=("vendored[${name}]")
     COPY_PATHS+=("${proj_root}/.claude/scripts")
+    COPY_EXTRA+=("")
   done < <(python3 - "${CROSS_REPO_CONFIG}" <<'PYEOF'
 import sys, yaml, os
 
@@ -132,13 +142,31 @@ mapfile -t CANONICAL_RELPATHS < <(
 # ── Single in-process comparison (was: 2 shasum forks per file per copy —
 # over 1000 forks for 150 files x 7 copies, ~80s wall clock; unacceptable
 # given leadv2-fanout.sh calls this synchronously as a preflight). One
-# python3 process hashes canonical once and every copy once, in-process. ──
+# python3 process hashes canonical once and every copy once, in-process.
+#
+# Two passes share the one process + one report (finding-2, round-2):
+#   PASS 1 (scripts): every copy checked against canonical's .sh/.py+tests
+#     set — unchanged from the original guard.
+#   PASS 2 (extra warn-mode subdirs): per copy, ONLY the subdirs that copy's
+#     sync actually mirrors (plugin-cache = contracts/workflows/hooks/config/
+#     skills/commands/agents/docs; leadv2-shared = contracts; vendored =
+#     none). Closes the blind spot Codex flagged on e399c95: the sync
+#     --delete-pushed hooks/agents/skills/... that this guard never read, so
+#     a destructive overwrite there was invisible. Canonical path-set per
+#     subdir = all on-disk files MINUS declared runtime-state paths
+#     (docs/leadv2/ holds active.yaml/bus.jsonl/locks — untracked,
+#     per-location mutable — which would false-RED the guard forever if
+#     parity-checked). The sync's warn perimeter and this guard's check
+#     perimeter are now the SAME set, per copy. ──
 _names_csv="$(IFS=$'\x1f'; echo "${COPY_NAMES[*]}")"
 _paths_csv="$(IFS=$'\x1f'; echo "${COPY_PATHS[*]}")"
 _relpaths_csv="$(IFS=$'\x1f'; echo "${CANONICAL_RELPATHS[*]}")"
+_extras_csv="$(IFS=$'\x1f'; echo "${COPY_EXTRA[*]}")"
 
 COMPARE_OUT="$(NAMES="${_names_csv}" PATHS="${_paths_csv}" RELPATHS="${_relpaths_csv}" \
-  CANONICAL_SCRIPTS="${CANONICAL_SCRIPTS}" python3 <<'PYEOF'
+  EXTRAS="${_extras_csv}" CANONICAL_SCRIPTS="${CANONICAL_SCRIPTS}" \
+  CANONICAL_PLUGIN_ROOT="${CANONICAL_ROOT}/plugins/leadv2" \
+  RUNTIME_EXCLUDE="docs/leadv2" python3 <<'PYEOF'
 import hashlib, os
 
 def sha256_file(path):
@@ -149,20 +177,55 @@ def sha256_file(path):
         return None
 
 canonical_scripts = os.environ["CANONICAL_SCRIPTS"]
+canonical_plugin = os.environ["CANONICAL_PLUGIN_ROOT"]
+runtime_exclude = [e for e in os.environ.get("RUNTIME_EXCLUDE", "").split() if e]
 names = os.environ["NAMES"].split("\x1f")
 paths = os.environ["PATHS"].split("\x1f")
 relpaths = os.environ["RELPATHS"].split("\x1f")
+extras = os.environ["EXTRAS"].split("\x1f")
 
+def is_runtime_state(rel_to_plugin):
+    # rel_to_plugin is POSIX (os.path.relpath). A file under a declared
+    # runtime-state subdir (e.g. docs/leadv2/active.yaml) is per-location
+    # mutable state, never parity content.
+    for ex in runtime_exclude:
+        if rel_to_plugin == ex or rel_to_plugin.startswith(ex + "/"):
+            return True
+    return False
+
+# PASS 1 canonical set: scripts .sh/.py + tests/ (built in bash above).
 canon_hashes = {rp: sha256_file(os.path.join(canonical_scripts, rp)) for rp in relpaths}
+
+# PASS 2 canonical sets: per extra subdir, all on-disk files MINUS runtime
+# state. Built lazily once per subdir (canonical is constant across copies).
+canon_by_subdir = {}
+def canon_set(sub):
+    if sub not in canon_by_subdir:
+        d = {}
+        sub_root = os.path.join(canonical_plugin, sub)
+        if os.path.isdir(sub_root):
+            for root, _dirs, files in os.walk(sub_root):
+                for fn in files:
+                    full = os.path.join(root, fn)
+                    if is_runtime_state(os.path.relpath(full, canonical_plugin)):
+                        continue
+                    d[os.path.relpath(full, sub_root)] = sha256_file(full)
+        canon_by_subdir[sub] = d
+    return canon_by_subdir[sub]
 
 drift_found = False
 report = []
-for name, path in zip(names, paths):
+# All four arrays (names/paths/extras + the bash-built relpaths) are aligned
+# by copy index; iterate copies by index so each gets its own extra-subdir list.
+for idx in range(len(names)):
+    name, path = names[idx], paths[idx]
+    subs = extras[idx].split() if idx < len(extras) else []
     if not os.path.isdir(path):
         drift_found = True
         report.append(f"{name}:MISSING_DIR")
         print(f"MISSING copy dir: {name} ({path})")
         continue
+    # PASS 1: scripts (canonical .sh/.py+tests set).
     for rp in relpaths:
         copy_file = os.path.join(path, rp)
         if not os.path.isfile(copy_file):
@@ -174,6 +237,21 @@ for name, path in zip(names, paths):
             drift_found = True
             report.append(f"{name}:{rp}:CONTENT_DIFFERS")
             print(f"DRIFT [{name}]: content differs for {rp}")
+    # PASS 2: extra warn-mode subdirs. The copy's plugin-root is the parent
+    # of its scripts/ dir (plugin-cache -> .../0.1.0, shared -> .../leadv2-shared).
+    copy_plugin_root = os.path.dirname(path)
+    for sub in subs:
+        for rp, chash in canon_set(sub).items():
+            copy_file = os.path.join(copy_plugin_root, sub, rp)
+            if not os.path.isfile(copy_file):
+                drift_found = True
+                report.append(f"{name}:{sub}/{rp}:MISSING")
+                print(f"DRIFT [{name}]: missing file {sub}/{rp}")
+                continue
+            if sha256_file(copy_file) != chash:
+                drift_found = True
+                report.append(f"{name}:{sub}/{rp}:CONTENT_DIFFERS")
+                print(f"DRIFT [{name}]: content differs for {sub}/{rp}")
 
 print("---REPORT---")
 for r in report:
@@ -196,7 +274,6 @@ while IFS= read -r _line; do
     *) log "${_line}" ;;
   esac
 done <<< "${COMPARE_OUT}"
-
 if [[ "${JSON}" -eq 1 ]]; then
   printf -- '{"drift":%s,"entries":[' "$([[ ${drift_found} -eq 1 ]] && echo true || echo false)"
   for i in "${!drift_report[@]}"; do

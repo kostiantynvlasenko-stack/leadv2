@@ -100,33 +100,69 @@ for l in sys.stdin:
 # content, refuse (don't guess) unless canonical's OWN git history for that
 # relative path ever held exactly that content. A downstream copy carrying
 # an un-landed fix canonical hasn't seen yet is exactly what silently got
-# clobbered in the incident this task fixes. Prints unsafe relpaths (one per
-# line) on stdout (exclude mode) for the caller to --exclude from the rsync.
+# clobbered in the incident this task fixes.
 #
-# MODE (first arg) controls what happens to a file deemed UNSAFE (dst content
+# MODE (1st arg) controls what happens to a file deemed UNSAFE (dst content
 # not reachable anywhere in canonical's git history for that relpath):
 #   exclude  Emit the relpath so the caller --exclude's it; LEAVE THE COPY
 #            UNTOUCHED (hard block). Use ONLY where in-place local development
 #            is plausible AND the target is NOT checked by leadv2-drift-guard.sh
 #            — i.e. (e) ~/.claude/scripts.
-#   warn     Same loud warning, but emit nothing, so rsync OVERWRITES the copy
-#            with canonical (canonical is the pinned source of truth; SOURCE-PIN
-#            + CACHE-REFUSAL already guarantee the source IS canonical). Use for
-#            every guard-checked copy: (a) cache, (b) shared, (f) vendored.
-# Why warn (not exclude) for guard-checked copies (DRIFT-GUARD-UNSATISFIABLE-01):
+#   warn     QUARANTINE the copy's current content to a timestamped dir, THEN
+#            emit nothing so rsync OVERWRITES the copy with canonical
+#            (reconcile). Quarantine-then-reconcile (round-2): warn WITHOUT
+#            quarantine was the e399c95 regression Codex caught — it logged a
+#            loud warning and then clobbered the copy anyway, so a real
+#            un-landed fix was lost exactly as the 2026-07-16 incident lost 3
+#            committed fixes (a warning in a log nobody reads is not a guard).
+#            Quarantine keeps the content one `cp` away from recovery into
+#            canonical, while the overwrite keeps the guard satisfiable — the
+#            property BOTH prior modes failed: exclude trapped divergent copies
+#            forever (unsatisfiable guard); plain warn ate fixes (decorative
+#            protection). Use for every guard-checked copy: (a) cache, (b)
+#            shared, (f) vendored, across every warn-mode subdir.
+# COPY_NAME (2nd arg): logical copy id (e.g. cache/hooks, shared/scripts,
+#            leadv2-repo-vendored/scripts) — disambiguates the same relpath
+#            across copies inside one quarantine timestamp dir and names the
+#            recovery path in the warning.
+#
+# Why reconcile (not exclude) for guard-checked copies (DRIFT-GUARD-UNSATISFIABLE-01):
 # exclude mode left a divergent copy unreconcilable — rsync skipped it, the copy
 # stayed divergent, re-running sync never cleared it, leadv2-drift-guard exited 1
 # permanently with a remedy that provably could not work; the reflex became
-# LEADV2_SKIP_DRIFT_GUARD=1. WARN keeps the signal, removes only the silent-
-# leave-it-stale behavior. ~/Projects/leadv2/.claude/scripts/ (the vendored
+# LEADV2_SKIP_DRIFT_GUARD=1. ~/Projects/leadv2/.claude/scripts/ (the vendored
 # copy) is gitignored+untracked in canonical's own repo, so once it diverges its
 # content can NEVER be in canonical's git history — exclude mode trapped it
 # forever. Verified live: exclude mode also refused to clear a 1-byte hand-edit
-# on plugin-cache, so this is a class bug, not vendored-specific.
+# on plugin-cache, so this is a class bug, not vendored-specific. Reconcile
+# WITH quarantine is the only mode that both clears drift and loses nothing.
+_QUARANTINE_ROOT="${LEADV2_QUARANTINE_ROOT:-${HOME}/.claude/leadv2-quarantine}"
 _DIRECTION_SAFETY_CHECK="${SCRIPT_DIR}/leadv2-direction-safety-check.py"
+
+# _quarantine_copy — preserve a target file's CURRENT content to a timestamped
+# quarantine dir BEFORE rsync overwrites it (quarantine-then-reconcile).
+#   $1 dst_file   the copy about to be overwritten
+#   $2 copy_name  logical copy id (disambiguates same relpath across copies)
+#   $3 relpath    path within the subdir (e.g. leadv2-foo.sh or tests/x.sh)
+# Prints the absolute quarantine path on stdout; returns 1 (prints nothing) if
+# the copy can't be read/preserved, so the caller can warn that reconcile
+# proceeded without a safety net. One UTC timestamp per process groups a single
+# sync run's quarantines together; each (copy_name, relpath) is visited at most
+# once per run, so there is no in-run clobber of preserved content.
+_quarantine_copy() {
+  local dst_file="$1" copy_name="$2" relpath="$3"
+  [[ -f "${dst_file}" ]] || return 0
+  local ts qpath
+  ts="$(date -u '+%Y%m%dT%H%M%SZ')" || return 1
+  qpath="${_QUARANTINE_ROOT}/${ts}/${copy_name}/${relpath}"
+  mkdir -p "$(dirname "${qpath}")" || return 1
+  cp -p "${dst_file}" "${qpath}" || return 1
+  printf -- '%s\n' "${qpath}"
+}
+
 _direction_safety_excludes() {
-  local mode="$1" subdir="$2" src="$3" dst="$4"
-  shift 4
+  local mode="$1" copy_name="$2" subdir="$3" src="$4" dst="$5"
+  shift 5
   # M-B fix (review-2.md): optional trailing rsync filter args, e.g.
   # --include='leadv2-*' --exclude='*' for target (e), whose real sync only
   # ever transfers a leadv2-* subset. Scopes this dry-run scan to the same
@@ -151,13 +187,21 @@ _direction_safety_excludes() {
         log_warn "DIRECTION-SAFETY (block): refusing to overwrite ${dst_file} — its content is not reachable anywhere in canonical's git history for ${canonical_relpath} (possible un-landed fix on this copy). Excluding this file from the sync; land the fix in canonical first."
         printf -- '%s\n' "${relpath}"
       else
-        # warn mode: canonical is the pinned source of truth — reconcile it.
-        log_warn "DIRECTION-SAFETY (warn): ${dst_file} content is not reachable in canonical's git history for ${canonical_relpath} (possible un-landed fix). Canonical is the pinned source of truth (SOURCE-PIN + CACHE-REFUSAL) — OVERWRITING this copy to reconcile. If this was a real fix, land it in canonical and re-sync."
+        # warn mode: PRESERVE first (quarantine), THEN let rsync reconcile.
+        # Quarantine-then-reconcile — see MODE doc above. Emit nothing so the
+        # caller's rsync still overwrites (reconcile); the quarantine copy is
+        # the safety net plain-warn mode lacked.
+        local qpath
+        qpath="$(_quarantine_copy "${dst_file}" "${copy_name}" "${relpath}")" || qpath=""
+        if [[ -n "${qpath}" ]]; then
+          log_warn "DIRECTION-SAFETY (warn+quarantine): ${dst_file} content not reachable in canonical's git history for ${canonical_relpath} (possible un-landed fix). Canonical is the pinned source of truth (SOURCE-PIN + CACHE-REFUSAL) — OVERWRITING this copy to reconcile (guard stays satisfiable). ORIGINAL CONTENT PRESERVED at: ${qpath} — if this was a real fix: cp it into canonical (${canonical_relpath}) and re-sync."
+        else
+          log_warn "DIRECTION-SAFETY (warn): ${dst_file} content not reachable in canonical history; quarantine unavailable but reconcile proceeds (guard satisfiability takes priority — content may be lost; investigate)."
+        fi
       fi
     fi
   done <<< "${changed}"
 }
-
 # ── Resolve list of (c)/(d) project roots ────────────────────────────────────
 _resolve_project_roots() {
   if [[ -n "${PROJECT_ROOT_OVERRIDE}" ]]; then
@@ -307,7 +351,7 @@ for subdir in scripts contracts workflows hooks config skills commands agents do
     while IFS= read -r _u; do
       [[ -z "${_u}" ]] && continue
       _unsafe_excludes+=(--exclude="${_u}")
-    done < <(_direction_safety_excludes "warn" "${subdir}" "${src}" "${dst}")
+    done < <(_direction_safety_excludes "warn" "cache/${subdir}" "${subdir}" "${src}" "${dst}")
     _rsync_or_dry "cache/${subdir}" "${src}" "${dst}" --recursive --delete "${_unsafe_excludes[@]}"
     changed_summary+=("cache/${subdir}")
   fi
@@ -323,7 +367,7 @@ for subdir in scripts contracts; do
     while IFS= read -r _u; do
       [[ -z "${_u}" ]] && continue
       _unsafe_excludes+=(--exclude="${_u}")
-    done < <(_direction_safety_excludes "warn" "${subdir}" "${src}" "${dst}")
+    done < <(_direction_safety_excludes "warn" "shared/${subdir}" "${subdir}" "${src}" "${dst}")
     _rsync_or_dry "shared/${subdir}" "${src}" "${dst}" --recursive --delete "${_unsafe_excludes[@]}"
     changed_summary+=("shared/${subdir}")
   fi
@@ -345,7 +389,7 @@ _unsafe_excludes=()
 while IFS= read -r _u; do
   [[ -z "${_u}" ]] && continue
   _unsafe_excludes+=(--exclude="${_u}")
-done < <(_direction_safety_excludes "exclude" "scripts" "${PLUGIN_ROOT}/scripts/" "${USER_SCRIPTS_TARGET}" --include='leadv2-*' --exclude='*')
+done < <(_direction_safety_excludes "exclude" "user-scripts" "scripts" "${PLUGIN_ROOT}/scripts/" "${USER_SCRIPTS_TARGET}" --include='leadv2-*' --exclude='*')
 # rsync filter rules are first-match-wins: unsafe excludes MUST precede the
 # generic --include='leadv2-*' --exclude='*' wildcard, or that wildcard would
 # already have claimed (and included) the unsafe leadv2-* filename before its
@@ -371,7 +415,7 @@ if [[ -d "${CANONICAL_ROOT}/.claude" ]]; then
   while IFS= read -r _u; do
     [[ -z "${_u}" ]] && continue
     _unsafe_excludes+=(--exclude="${_u}")
-  done < <(_direction_safety_excludes "warn" "scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}")
+  done < <(_direction_safety_excludes "warn" "leadv2-repo-vendored/scripts" "scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}")
   _rsync_or_dry "leadv2-repo-vendored/scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}" --recursive --delete "${_unsafe_excludes[@]}"
   changed_summary+=("leadv2-repo-vendored")
 fi
