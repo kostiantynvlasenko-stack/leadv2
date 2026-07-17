@@ -26,7 +26,34 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_ROOT="$(dirname "${SCRIPT_DIR}")"  # plugins/leadv2/
+
+# CACHE-REFUSAL (PLUGIN-CACHE-THIRD-COPY-REVERTS-FIXES-01): this script must
+# only ever run from the git-tracked canonical tree. If $0 resolves to a path
+# under the runtime plugin cache, refuse outright — a cache-invoked sync
+# would otherwise treat the STALE cache copy as source-of-truth and push its
+# staleness back out to every other copy, exactly the incident this task
+# exists to fix. Cache-invocation is never legitimate for this script.
+case "${SCRIPT_DIR}" in
+  "${HOME}"/.claude/plugins/cache/leadv2-local/*)
+    printf -- 'REFUSING: leadv2-plugin-sync.sh invoked from the plugin cache (%s) — this script must only run from the git-tracked canonical tree (~/Projects/leadv2/plugins/leadv2/scripts/). Re-invoke from canonical.\n' "${SCRIPT_DIR}" >&2
+    exit 3
+    ;;
+esac
+
+# SOURCE-PIN: canonical is a FIXED path, not derived from dirname($0). Before
+# this fix, PLUGIN_ROOT="$(dirname "${SCRIPT_DIR}")" meant whichever COPY
+# happened to invoke this script became "the source" for that run — the
+# exact bug that let the stale plugin-cache copy silently push itself out to
+# vendored repos and the shared tree, reverting 4 already-landed fixes
+# (PLUGIN-CACHE-THIRD-COPY-REVERTS-FIXES-01). Only one tree is ever
+# canonical: the git-tracked ~/Projects/leadv2/plugins/leadv2/.
+CANONICAL_ROOT="${LEADV2_CANONICAL_ROOT:-${HOME}/Projects/leadv2}"
+PLUGIN_ROOT="${CANONICAL_ROOT}/plugins/leadv2"
+if [[ ! -d "${PLUGIN_ROOT}" ]]; then
+  printf -- 'REFUSING: pinned canonical PLUGIN_ROOT does not exist on disk: %s (set LEADV2_CANONICAL_ROOT to override for tests)\n' "${PLUGIN_ROOT}" >&2
+  exit 3
+fi
+PLUGIN_GIT_ROOT="$(git -C "${CANONICAL_ROOT}" rev-parse --show-toplevel 2>/dev/null || printf -- '%s' "${CANONICAL_ROOT}")"
 
 DRY_RUN=false
 PROJECT_ROOT_OVERRIDE=""
@@ -66,6 +93,35 @@ for l in sys.stdin:
     mkdir -p "${dst}"
     rsync --checksum "${extra_flags[@]}" "${src}" "${dst}" && log_ok "[${label}] synced ${src} -> ${dst}"
   fi
+}
+
+# ── Direction-safety (sync_direction_safety decision) ────────────────────────
+# Before a --delete rsync push overwrites a target file with different
+# content, refuse (don't guess) unless canonical's OWN git history for that
+# relative path ever held exactly that content. A downstream copy carrying
+# an un-landed fix canonical hasn't seen yet is exactly what silently got
+# clobbered in the incident this task fixes. Prints unsafe relpaths (one per
+# line) on stdout for the caller to --exclude from the rsync invocation.
+_DIRECTION_SAFETY_CHECK="${SCRIPT_DIR}/leadv2-direction-safety-check.py"
+_direction_safety_excludes() {
+  local subdir="$1" src="$2" dst="$3"
+  [[ -f "${_DIRECTION_SAFETY_CHECK}" ]] || return 0
+  [[ -d "${dst}" ]] || return 0  # nothing on disk yet to clobber — all safe
+  local changed
+  changed="$(rsync -rc --delete --dry-run --itemize-changes "${src}" "${dst}" 2>/dev/null \
+    | awk '$1 ~ /^>f/ {print $2}')" || true
+  [[ -z "${changed}" ]] && return 0
+  local relpath
+  while IFS= read -r relpath; do
+    [[ -z "${relpath}" ]] && continue
+    local dst_file="${dst}/${relpath}"
+    [[ -f "${dst_file}" ]] || continue  # new file, nothing to clobber — safe
+    local canonical_relpath="plugins/leadv2/${subdir}/${relpath}"
+    if ! python3 "${_DIRECTION_SAFETY_CHECK}" "${PLUGIN_GIT_ROOT}" "${canonical_relpath}" "${dst_file}"; then
+      log_warn "DIRECTION-SAFETY: refusing to overwrite ${dst_file} — its content is not reachable anywhere in canonical's git history for ${canonical_relpath} (possible un-landed fix on this copy). Excluding this file from the sync; land the fix in canonical first."
+      printf -- '%s\n' "${relpath}"
+    fi
+  done <<< "${changed}"
 }
 
 # ── Resolve list of (c)/(d) project roots ────────────────────────────────────
@@ -182,7 +238,12 @@ for subdir in scripts contracts workflows hooks config skills commands agents do
   src="${PLUGIN_ROOT}/${subdir}/"
   dst="${CACHE_TARGET}/${subdir}"
   if [[ -d "${src}" ]]; then
-    _rsync_or_dry "cache/${subdir}" "${src}" "${dst}" --recursive --delete
+    _unsafe_excludes=()
+    while IFS= read -r _u; do
+      [[ -z "${_u}" ]] && continue
+      _unsafe_excludes+=(--exclude="${_u}")
+    done < <(_direction_safety_excludes "${subdir}" "${src}" "${dst}")
+    _rsync_or_dry "cache/${subdir}" "${src}" "${dst}" --recursive --delete "${_unsafe_excludes[@]}"
     changed_summary+=("cache/${subdir}")
   fi
 done
@@ -193,7 +254,12 @@ for subdir in scripts contracts; do
   src="${PLUGIN_ROOT}/${subdir}/"
   dst="${SHARED_TARGET}/${subdir}"
   if [[ -d "${src}" ]]; then
-    _rsync_or_dry "shared/${subdir}" "${src}" "${dst}" --recursive --delete
+    _unsafe_excludes=()
+    while IFS= read -r _u; do
+      [[ -z "${_u}" ]] && continue
+      _unsafe_excludes+=(--exclude="${_u}")
+    done < <(_direction_safety_excludes "${subdir}" "${src}" "${dst}")
+    _rsync_or_dry "shared/${subdir}" "${src}" "${dst}" --recursive --delete "${_unsafe_excludes[@]}"
     changed_summary+=("shared/${subdir}")
   fi
 done

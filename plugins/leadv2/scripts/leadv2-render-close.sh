@@ -270,6 +270,9 @@ sys.exit(1)
       leadv2_tasks_update "${YAML_TASK_ID}" --key summary_one_line --value "${YAML_SUMMARY}" \
         2>/dev/null || log_warning "leadv2_tasks_update summary_one_line failed for ${YAML_TASK_ID} — non-blocking"
       log_info "tasks.yaml: summary_one_line updated for ${YAML_TASK_ID}"
+      leadv2_tasks_update "${YAML_TASK_ID}" --key status --value "done" 2>/dev/null \
+        || log_warning "leadv2_tasks_update status=done failed for ${YAML_TASK_ID} — non-blocking"
+      log_info "tasks.yaml: status=done updated for ${YAML_TASK_ID}"
     fi
   fi
 

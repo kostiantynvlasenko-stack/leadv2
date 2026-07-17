@@ -51,7 +51,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
-PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 readonly PROJECT_ROOT
 
 log() { printf '[leadv2-session-runner] %s\n' "$*" >&2; }
@@ -71,6 +71,10 @@ export LEADV2_FANOUT="${LEADV2_FANOUT:-1}"
 export LEADV2_TASK_ID="$TASK_ID"
 MAX_ATTEMPTS="${LEADV2_RUNNER_MAX_ATTEMPTS:-12}"
 RETRY_SLEEP_S="${LEADV2_RUNNER_RETRY_SLEEP_S:-5}"
+# NO-NEW-OUTPUT-STOP: consecutive resume attempts that append nothing new to
+# LOGF (rc!=0, no fresh stream-json bytes) mean the resumed session is not
+# making progress — stop early instead of burning the full MAX_ATTEMPTS.
+NOOP_MAX="${LEADV2_RUNNER_NOOP_MAX:-3}"
 CLAUDE_BIN="${LEADV2_FANOUT_CLAUDE_BIN:-claude}"
 
 TASK_DIR="${PROJECT_ROOT}/docs/handoff/${TASK_ID}"
@@ -107,6 +111,7 @@ if sentinel_present; then
 fi
 
 attempt=0
+noop_streak=0
 while (( attempt < MAX_ATTEMPTS )); do
   if [[ "$attempt" -eq 0 ]]; then
     prompt="/leadv2 ${TASK_ID}"
@@ -116,11 +121,27 @@ while (( attempt < MAX_ATTEMPTS )); do
     prompt="/leadv2 ${TASK_ID} -- CONTINUE: this session exited before .leadv2-final-complete.flag was written (attempt ${attempt}/${MAX_ATTEMPTS}). Resume from the current phase. Re-check every sentinel/receipt already on disk before repeating ANY side-effecting step (spawn, merge, deploy, close) — do not blindly re-run prior actions. Drive the task through plan, build, review, deploy-gate, verify, close without stopping for confirmation; only a genuinely typed founder decision may call scripts/leadv2-ask.sh."
   fi
 
-  log "attempt ${attempt}/${MAX_ATTEMPTS}: launching claude -p (session-id=${SESSION_ID})"
+  # RESUME-FLAG-FIX: `--session-id` only WORKS to CREATE a fresh session
+  # (attempt 0). On every later attempt the id already exists, and
+  # `claude -p --session-id "$SESSION_ID" ...` fails INSTANTLY with
+  # "Error: Session ID <id> is already in use." (rc=1) — verified live:
+  # a second `--session-id` call on an existing id returns rc=1 in <1s,
+  # while `claude -p --resume "$SESSION_ID" ...` on the same id returns
+  # rc=0 and continues the prior conversation. Before this fix, attempts
+  # 1..MAX_ATTEMPTS-1 always hit the rc=1 branch — the 12-attempt resume
+  # loop never resumed a single session.
+  if [[ "$attempt" -eq 0 ]]; then
+    session_flag=(--session-id "$SESSION_ID")
+  else
+    session_flag=(--resume "$SESSION_ID")
+  fi
+
+  log "attempt ${attempt}/${MAX_ATTEMPTS}: launching claude -p (session-id=${SESSION_ID}, flag=${session_flag[0]})"
+  log_size_before="$(wc -c <"$LOGF" 2>/dev/null || echo 0)"
   set +e
   ( cd "$PROJECT_ROOT" && \
     "$CLAUDE_BIN" -p \
-      --session-id "$SESSION_ID" \
+      "${session_flag[@]}" \
       --model "$LEAD_MODEL" \
       --effort "$LEAD_EFFORT" \
       --permission-mode bypassPermissions \
@@ -136,12 +157,41 @@ while (( attempt < MAX_ATTEMPTS )); do
     exit 0
   fi
 
+  # NO-NEW-OUTPUT-STOP: a resume that appended nothing new to LOGF made no
+  # progress. N consecutive no-output resumes mean further resumes are
+  # wasted cycles on a settled session — stop before MAX_ATTEMPTS.
+  log_size_after="$(wc -c <"$LOGF" 2>/dev/null || echo 0)"
+  if (( log_size_after <= log_size_before )); then
+    noop_streak=$(( noop_streak + 1 ))
+    log "attempt ${attempt} produced no new output (noop_streak=${noop_streak}/${NOOP_MAX})"
+  else
+    noop_streak=0
+  fi
+
   attempt=$(( attempt + 1 ))
+
+  if (( noop_streak >= NOOP_MAX )); then
+    log_error "${noop_streak} consecutive resume attempts produced no new output — stopping early instead of burning all ${MAX_ATTEMPTS} attempts"
+    break
+  fi
+
   if (( attempt < MAX_ATTEMPTS )); then
     log "no sentinel yet — resuming in ${RETRY_SLEEP_S}s (attempt ${attempt}/${MAX_ATTEMPTS} next)"
     sleep "$RETRY_SLEEP_S"
   fi
 done
+
+# Loop ended (attempts exhausted OR noop-streak break) without the sentinel.
+# A session that ever logged "subtype":"success" completed at least one turn
+# cleanly — reporting a blanket ERROR there is a false verdict (the observed
+# bug: lane 22ea0a392ace succeeded on attempt 1, then 11 more resumes were
+# mis-reported as "max attempts exhausted"). Distinguish honestly:
+#   - success ever seen, no sentinel  -> INCOMPLETE (not an error), rc=4
+#   - success never seen              -> genuine ERROR, rc=3 (unchanged)
+if grep -q '"subtype"[[:space:]]*:[[:space:]]*"success"' "$LOGF" 2>/dev/null; then
+  log "INCOMPLETE (no sentinel): ${TASK_ID} logged \"subtype\":\"success\" at least once but .leadv2-final-complete.flag was never written — the close pipeline stalled after a successful turn, this is NOT an error. Leaving lock+log for inspection."
+  exit 4
+fi
 
 log_error "max attempts (${MAX_ATTEMPTS}) exhausted without final-complete sentinel for ${TASK_ID} — giving up, leaving lock+log for inspection"
 exit 3
