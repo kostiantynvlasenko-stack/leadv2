@@ -106,6 +106,30 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2; }
 log_error() { log "ERROR: $*"; }
 log_info() { log "INFO: $*"; }
 
+# QUOTA-GATE-01 (2026-07-17): gate a GLM lane launch on live z.ai quota.
+# Calls leadv2-glm-quota-gate.sh (sibling). On non-zero, that gate has already
+# printed a REROUTE (>=80% on 5h or weekly) or PEAK-override message to stderr;
+# we propagate the code so the caller (router/supervise) can reroute the work to
+# another bucket instead of stopping it. Fail-open: a missing gate or
+# GLM_SKIP_QUOTA_GATE=1 lets the launch proceed (the gate itself fail-opens on
+# network/parse errors). cmd_test is NOT gated (health check, not real work).
+glm_launch_gate() {
+  [[ "${GLM_SKIP_QUOTA_GATE:-0}" == "1" ]] && return 0
+  local gate="${SELF%/*}/leadv2-glm-quota-gate.sh"
+  if [[ ! -f "$gate" ]]; then
+    log_info "quota gate absent ($gate) - proceeding (fail-open)."
+    return 0
+  fi
+  # NOTE: do NOT use `if ! "$gate"` — `!` resets $? to 0 and the real gate code
+  # (1=reroute, 2=peak) is lost, making a refused gate non-blocking (QUOTA-GATE-01).
+  "$gate"; local rc=$?
+  if (( rc != 0 )); then
+    log_error "GLM quota gate refused this launch (code $rc) - reroute per the message above (leadv2-quota-live.sh for live numbers)."
+    return "$rc"
+  fi
+  return 0
+}
+
 usage() {
   cat >&2 <<'EOF'
 Usage:
@@ -252,6 +276,7 @@ cmd_run() {
     exit 1
   fi
 
+  glm_launch_gate || exit $?
   local exit_code=0
   run_claude "${prompt}" "${out_file}" "${cwd_dir}" || exit_code=$?
   exit "${exit_code}"
@@ -991,6 +1016,7 @@ cmd_bg() {
   [[ "${max_turns}" =~ ^[0-9]+$ ]] || { log_error "--max-turns must be a positive integer"; exit 1; }
   [[ "${timeout_s}" =~ ^[0-9]+$ ]] || { log_error "--timeout must be a positive integer"; exit 1; }
 
+  glm_launch_gate || exit $?
   load_secret
 
   local repo repo_hash
