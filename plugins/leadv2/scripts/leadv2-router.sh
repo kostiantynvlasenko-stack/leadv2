@@ -164,10 +164,93 @@ if not step_cfg:
 
 # Determine selected model: check escalate_if condition
 selected_model = step_cfg.get("default", "sonnet")
+
+# ---------------------------------------------------------------------------
+# GLM-FIRST-01 policy resolver (fix-round-4, ROUTER-HAS-NO-GLM-ARM-01)
+# ---------------------------------------------------------------------------
+# The `glm_policy:` block in routing.yaml is the SOURCE OF TRUTH for when GLM
+# (the default build writer) must yield to Sonnet (a listed exception) or to
+# Opus (mission kinds where GLM is banned). Until now that block had a writer
+# and NO executor: the recording layer merely LABELLED a decision it had
+# already hardcoded, and guessed "unknown" for the rule id. This resolver
+# READS the policy and OBEYS it — editing the yaml changes routing behaviour.
+# Absent policy (other phases / other repos) => selected_model untouched.
+routing_reason = "glm_default"
+glm_exception_rule = "null"
+_glm_resolver_rule = None  # real rule id when the resolver fires a sonnet exception
+
+glm_policy = phase_cfg.get("glm_policy")
+if not isinstance(glm_policy, dict):
+    # glm_policy lives as a SIBLING of the phase blocks (under `phases:`, not
+    # nested inside `build:` — its YAML indent makes it so), so fall back to
+    # reading it there. Guarded: repos/phases with no glm_policy at all get None
+    # here and leave selected_model untouched.
+    glm_policy = phases.get("glm_policy")
+if isinstance(glm_policy, dict):
+    _gp_base = selected_model.split("+")[0].split("-")[0]
+    if _gp_base == "glm":
+        _opus_kinds = glm_policy.get("opus_only_mission_kinds", []) or []
+        _exc_ids = [e.get("id") for e in (glm_policy.get("sonnet_exceptions", []) or [])
+                    if isinstance(e, dict) and e.get("id")]
+
+        def _num_ge(val, n):
+            try:
+                return val is not None and float(val) >= n
+            except (TypeError, ValueError):
+                return False
+
+        _gp_suffix = selected_model[len(_gp_base):]  # preserve "+agent-tool" etc.
+
+        def _swap(new_base):
+            return new_base + _gp_suffix
+
+        # STRICT precedence, first match wins. A sonnet rule fires only if its id
+        # is present in the yaml — removing an id there silently disables that
+        # rule. We never invent a rule id; opus_kinds/exc_ids both come from yaml.
+        _gp_rules = [
+            (lambda: signals.get("mission_kind") in _opus_kinds,
+             None, "opus", "opus_mission_kind"),
+            (lambda: bool(signals.get("protected_path") or signals.get("safety_touched")),
+             "safety_gate_publish_payments", "sonnet", "sonnet_exception"),
+            (lambda: _num_ge(signals.get("subsystem_count"), 4)
+                    or bool(signals.get("needs_midflight_interaction")),
+             "integration_critical_4subsystems", "sonnet", "sonnet_exception"),
+            (lambda: bool(signals.get("ui_design_judgment")),
+             "ui_design_judgment", "sonnet", "sonnet_exception"),
+            (lambda: _num_ge(signals.get("glm_failure_count"), 2),
+             "glm_failed_twice", "sonnet", "sonnet_exception"),
+            # H5 fix (fix-round-2, ROUTER-HAS-NO-GLM-ARM-01): the yaml declares
+            # glm_lock_busy_no_second_channel (leadv2-routing.yaml:86-87) but no
+            # predicate ever read the glm_lock_busy signal — a declared-but-dead
+            # rule. Wired: same shape as the other sonnet_exception predicates.
+            (lambda: bool(signals.get("glm_lock_busy")),
+             "glm_lock_busy_no_second_channel", "sonnet", "sonnet_exception"),
+        ]
+        for _pred, _rid, _base, _reason in _gp_rules:
+            if not _pred():
+                continue
+            if _rid is not None and _rid not in _exc_ids:
+                continue  # rule id absent from yaml -> cannot fire
+            selected_model = _swap(_base)
+            routing_reason = _reason
+            _glm_resolver_rule = _rid
+            break
+
 tool = step_cfg.get("tool", "agent-tool")
 expected_cost = step_cfg.get("expected_cost_usd", 0.0)
 expected_tokens = step_cfg.get("expected_tokens", 0)
 is_floor = step_cfg.get("floor", False)
+# C3 fix (fix-round-2, ROUTER-HAS-NO-GLM-ARM-01): when the glm_policy resolver
+# above fired a MANDATORY exception (sonnet_exception / opus_mission_kind),
+# that arm is a floor for THIS decision — the cost-ceiling machinery below
+# (legacy warn-band downgrade, T8b windowed recovery gate) must never demote
+# it, not even to haiku, and must never erase the fired rule id. This is the
+# "is_floor equivalent" the critic asked for: build steps carry no static
+# floor_rules: entry (the floor is signal-derived, not step-derived), so we
+# derive is_floor dynamically from the resolver's own verdict instead of
+# adding a yaml row that can't express "only when the exception fired".
+if routing_reason in ("sonnet_exception", "opus_mission_kind"):
+    is_floor = True
 escalated = False
 
 escalate_if = step_cfg.get("escalate_if", "")
@@ -456,6 +539,14 @@ else:
             else:
                 downgrade_active = "false"
                 force_model = ""
+        elif is_floor:
+            # C3 fix (fix-round-2): an EARLIER downgrade_event (recorded by a
+            # different, non-floor call for this task) must not force THIS
+            # call's resolver-mandated arm down to the recorded to_model —
+            # the floor is a property of the current decision, not a task-
+            # wide sticky state that outranks a live safety/policy exception.
+            downgrade_active = "false"
+            force_model = ""
         else:
             dwell_ok = (now_epoch - downgrade_ts) >= min_dwell_sec
             forward_ok = (current_burn + float(expected_cost or 0.0)) < (hard_pct * ceiling)
@@ -497,7 +588,25 @@ else:
 # `resolve_effective_model` choke-point in bash, AFTER the bandit overlay,
 # which is now the ONLY place that decides the final model and builds
 # command_template — see below the bandit overlay block.
+# Reconcile GLM-FIRST-01 attribution with the FINAL arm: cost-ceiling / downgrade
+# may mutate selected_model after the resolver ran. Python is the SOLE author of
+# these two fields (bash no longer guesses). Never emit "unknown"; never invent a
+# rule id — a sonnet arm carries the resolver's real rule, or null if sonnet is
+# the natural default / a post-resolver mutation (never a fabricated id).
+_final_base = selected_model.split("+")[0].split("-")[0]
+if _final_base == "glm":
+    routing_reason, glm_exception_rule = "glm_default", "null"
+elif _final_base == "opus":
+    routing_reason, glm_exception_rule = "opus_mission_kind", "null"
+elif _final_base == "sonnet":
+    routing_reason = "sonnet_exception"
+    glm_exception_rule = _glm_resolver_rule if _glm_resolver_rule else "null"
+else:
+    routing_reason, glm_exception_rule = "other", "null"
+
 print(f"model={selected_model}")
+print(f"routing_reason={routing_reason}")
+print(f"glm_exception_rule={glm_exception_rule}")
 print(f"tool={tool}")
 print(f"expected_cost_usd={expected_cost:.4f}")
 print(f"expected_tokens={expected_tokens}")
@@ -590,6 +699,12 @@ BANDIT_CONTEXT_KEY=""
 # F2 fix: extract heuristic model unconditionally so route-decisions.yaml is
 # correct regardless of LEADV2_ROUTE_BANDIT state.
 _heuristic_model=$(printf '%s\n' "$result" | grep '^model=' | cut -d= -f2)
+# ROUTER-HAS-NO-GLM-ARM-01 fix: extract routing_reason the same way, so the
+# bandit overlay below can tell when the python resolver fired a mandatory
+# exception (sonnet_exception / opus_mission_kind) vs the free-choice default
+# (glm_default) — the resolved arm in the former case is policy-locked and
+# must not be escaped by the bandit.
+_heuristic_routing_reason=$(printf '%s\n' "$result" | grep '^routing_reason=' | cut -d= -f2)
 
 if [[ "${LEADV2_ROUTE_BANDIT:-0}" == "1" ]] \
    && [[ "$ceiling_status" != "hard_stop_95pct" ]]; then
@@ -603,39 +718,46 @@ print('true' if r=='critical' or 'auth' in str(ck) or 'security' in str(ck) else
 " 2>/dev/null || printf 'false')
   BANDIT_CONTEXT_KEY="${PHASE}:${TASK_CLASS}:${_signals_risk}"
 
-  # Build allowed arms: heuristic arm + any escalate_to arm from routing.yaml config
-  # Caller may override via LEADV2_BANDIT_ALLOWED_ARMS env (JSON array of strings)
-  if [[ -n "${LEADV2_BANDIT_ALLOWED_ARMS:-}" ]]; then
+  # C2 fix (fix-round-2, ROUTER-HAS-NO-GLM-ARM-01): allowed_arms USED TO come
+  # from a second, independent inline-python re-read of step_cfg
+  # default/escalate_to — blind to the glm_policy resolver above. When the
+  # resolver fired a mandatory exception (routing_reason != glm_default),
+  # that re-read could produce an allowed set (e.g. ["glm"]) that does NOT
+  # contain the resolver's own arm (e.g. sonnet) — the bandit was then
+  # invoked with --allowed '["glm"]' --heuristic sonnet, a heuristic outside
+  # its own allowed set, and the recorded row lied. Fixed: build _allowed
+  # from $_heuristic_model (the resolver's already-decided arm) +
+  # routing_reason, never a fresh independent yaml re-read.
+  # Caller may still override via LEADV2_BANDIT_ALLOWED_ARMS env (JSON array)
+  # — EXCEPT on the glm_default path (see fix-round-3 branch below), where
+  # the policy itself, not a bandit-tunable knob, decides the allowed set.
+  _heuristic_primary=$(printf '%s' "$_heuristic_model" | cut -d+ -f1)
+  if [[ "$_heuristic_routing_reason" == "glm_default" ]]; then
+    # fix-round-3 (ROUTER-HAS-NO-GLM-ARM-01): glm_default is NOT free-choice.
+    # routing_reason=="glm_default" is derived (python resolver, end of
+    # helper) from _final_base=="glm" — i.e. it can ONLY be emitted when the
+    # resolved arm is glm. GLM-FIRST-01's exception list (sonnet_exceptions /
+    # opus_only_mission_kinds) is the ONLY permitted path off glm; any of
+    # those firing changes routing_reason away from glm_default and is
+    # handled by the mandatory-heuristic branch below instead. Round-2's C2
+    # fix built _allowed from routing.yaml's own `allowed_arms:` (e.g.
+    # [glm, sonnet, opus]) on exactly this path, which let Thompson sampling
+    # explore freely into sonnet/opus while routing_reason kept reporting
+    # glm_default — silently landing default dev spawns on Claude quota
+    # (the original disease this task exists to kill) while the record lied
+    # about why. Pin allowed_arms to glm alone: a single-arm allowed set can
+    # only ever sample that arm, so BANDIT_DEVIATION can never fire true here
+    # and chosen_arm can never leave glm. This intentionally overrides
+    # LEADV2_BANDIT_ALLOWED_ARMS too — the invariant must hold unconditionally,
+    # not just when no caller override is present.
+    _allowed='["glm"]'
+  elif [[ -n "${LEADV2_BANDIT_ALLOWED_ARMS:-}" ]]; then
     _allowed="${LEADV2_BANDIT_ALLOWED_ARMS}"
   else
-    # Build from routing.yaml: extract escalate_to for this phase/step (best-effort)
-    _escalate_to=$(python3 -c "
-import sys, json
-try:
-    import yaml
-    cfg = yaml.safe_load(open(sys.argv[1]))
-    phase_cfg = cfg.get('phases', {}).get(sys.argv[2], {})
-    step_cfg = phase_cfg.get(sys.argv[3], {})
-    et = step_cfg.get('escalate_to', '')
-    # Extract primary model token (before +)
-    primary = et.split('+')[0].strip() if et else ''
-    # Also include default
-    default_m = step_cfg.get('default', '').split('+')[0].strip()
-    arms = [a for a in [default_m, primary] if a and a not in ('bash','bash+python','mcp-calls-only','skip','haiku','')]
-    # Deduplicate preserving order
-    seen = set(); uniq = []
-    for a in arms:
-        if a not in seen: seen.add(a); uniq.append(a)
-    print(json.dumps(uniq))
-except Exception:
-    print('[]')
-" "$ROUTING_YAML" "$PHASE" "$STEP" 2>/dev/null || printf '[]')
-    _heuristic_primary=$(printf '%s' "$_heuristic_model" | cut -d+ -f1)
-    if [[ "$_escalate_to" == "[]" || -z "$_escalate_to" ]]; then
-      _allowed="["${_heuristic_primary}"]"
-    else
-      _allowed="$_escalate_to"
-    fi
+    # A fired glm_policy exception makes the resolver's arm mandatory, not a
+    # bandit choice — allowed_arms is exactly the heuristic arm so chosen_arm
+    # can never land outside its own allowed set.
+    _allowed=$(python3 -c "import json,sys; print(json.dumps([sys.argv[1]]))" "$_heuristic_primary")
   fi
 
   # Only invoke bandit if route-bandit.sh exists; else fall through to heuristic
@@ -649,6 +771,16 @@ except Exception:
     if [[ -n "$_bandit_out" ]]; then
       _chosen=$(printf '%s\n' "$_bandit_out" | grep '^chosen_arm=' | cut -d= -f2)
       _heuristic_primary=$(printf '%s' "$_heuristic_model" | cut -d+ -f1)
+      # ROUTER-HAS-NO-GLM-ARM-01 fix: when the python resolver fired a
+      # mandatory exception (routing_reason != glm_default — e.g.
+      # sonnet_exception for safety/publish/payments, or opus_mission_kind),
+      # the resolved arm is NOT a suggestion the bandit may override. Fail
+      # closed: discard any bandit proposal that differs from the resolver's
+      # arm and keep the resolver's arm instead — never crash the router.
+      if [[ "$_heuristic_routing_reason" != "glm_default" && "$_chosen" != "$_heuristic_primary" ]]; then
+        log_warn "bandit proposed '${_chosen}' but routing_reason=${_heuristic_routing_reason} locks the arm to '${_heuristic_primary}' — discarding bandit proposal"
+        _chosen="$_heuristic_primary"
+      fi
       if [[ -n "$_chosen" && "$_chosen" != "$_heuristic_primary" ]]; then
         BANDIT_ARM="$_chosen"
         BANDIT_DEVIATION="true"
@@ -707,6 +839,7 @@ _tier_rank() {
   base="$(printf '%s' "$1" | cut -d+ -f1 | sed -e 's/-subsession$//' -e 's/-agent-tool$//')"
   case "$base" in
     haiku) echo 0 ;;
+    glm) echo 0 ;;
     sonnet|fable) echo 1 ;;
     opus) echo 2 ;;
     *) echo 1 ;;
@@ -786,11 +919,32 @@ def build_command_template(tool_str, model_str):
             '--mission-file {{mission}} '
             '--wait'
         )
-    return (
-        'Agent(subagent_type={{role}}, model='
-        f'{primary_model}, '
-        'prompt=<mission from {{mission_file}}>)'
-    )
+    if primary_model == 'glm':
+        # H6 fix (fix-round-2, ROUTER-HAS-NO-GLM-ARM-01): this whole python
+        # source lives inside an OUTER bash python3 -c '...' style DOUBLE
+        # quoted string (see the wrapper below) — NOTE: no backticks or bare
+        # double quotes are safe anywhere in this comment block either, bash
+        # expands both inside double quotes before python ever sees the
+        # text. An unescaped literal double-quote character here used to
+        # close that outer bash string early; bash then quote-removed it, so
+        # the quote characters never reached python, and command_template
+        # lost both quotes (live-verified via od -c: zero quote-char bytes
+        # in the emitted bg dispatch line) — breaking path-with-space safety
+        # on the new default dispatch path. Escaped with a leading backslash
+        # so bash quote-removal emits a literal quote char into the argument
+        # python actually receives, reproducing the intended python source.
+        return (
+            'bash ~/.claude/scripts/glm-coder.sh bg '
+            '\"@{{mission_file}}\" '
+            '--cwd {{cwd}}'
+        )
+    if primary_model in ('haiku', 'sonnet', 'opus', 'fable'):
+        return (
+            'Agent(subagent_type={{role}}, model='
+            f'{primary_model}, '
+            'prompt=<mission from {{mission_file}}>)'
+        )
+    raise SystemExit(f'ROUTER_UNKNOWN_MODEL: {primary_model} has no dispatch branch')
 
 new_cmpl = build_command_template(tool_val, effective_model)
 _wrote_cmpl = False
@@ -823,13 +977,6 @@ if [[ -n "${TASK_ID:-}" ]]; then
   _handoff_dir="${PROJECT_ROOT}/docs/handoff/${TASK_ID}"
   _route_decisions="${_handoff_dir}/route-decisions.yaml"
   _decided_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  _signals_risk_val=$(printf '%s\n' "$SIGNALS" | python3 -c "
-import sys,json
-s=json.loads(sys.stdin.read())
-ck=s.get('change_kind','')
-r=s.get('risk','')
-print('true' if r=='critical' or 'auth' in str(ck) or 'security' in str(ck) else 'false')
-" 2>/dev/null || printf 'false')
   # chosen_arm is the final model= from result (bandit may have patched it)
   _final_chosen=$(printf '%s\n' "$result" | grep '^model=' | cut -d= -f2)
   # heuristic_arm: _heuristic_model is always set unconditionally before bandit block (F2 fix).
@@ -837,6 +984,22 @@ print('true' if r=='critical' or 'auth' in str(ck) or 'security' in str(ck) else
   _heuristic_arm="${_heuristic_model:-${_final_chosen}}"
   _bandit_active="false"
   [[ "${LEADV2_ROUTE_BANDIT:-0}" == "1" ]] && _bandit_active="true"
+  # GLM-FIRST-01 attribution is authored SOLELY by the python resolver (which
+  # reads glm_policy from routing.yaml). Bash no longer guesses the rule id from
+  # an unrelated signal — it reads the resolver's decision out of result, the
+  # same way _final_chosen is extracted above. "unknown" can no longer appear.
+  _routing_reason="$(printf '%s\n' "$result" | grep '^routing_reason=' | cut -d= -f2-)"
+  _glm_exception_rule="$(printf '%s\n' "$result" | grep '^glm_exception_rule=' | cut -d= -f2-)"
+  _routing_reason="${_routing_reason:-other}"
+  _glm_exception_rule="${_glm_exception_rule:-null}"
+  # C1 fix (fix-round-2, ROUTER-HAS-NO-GLM-ARM-01): safety_touched USED TO be
+  # printed from a leftover bandit-bucket calc off signals.risk/change_kind —
+  # NOT the keys the resolver actually reads (safety_touched/protected_path),
+  # so a row could say `safety_touched: false` in the same breath as
+  # `glm_exception_rule: safety_gate_publish_payments`. Derive it from the
+  # resolver's own fired-rule id instead — the two fields can never disagree.
+  _safety_touched_val="false"
+  [[ "$_glm_exception_rule" == "safety_gate_publish_payments" ]] && _safety_touched_val="true"
   mkdir -p "$_handoff_dir"
   _route_lock="${_handoff_dir}/.route-decisions.lock"
   (
@@ -844,10 +1007,13 @@ print('true' if r=='critical' or 'auth' in str(ck) or 'security' in str(ck) else
     printf -- '- phase: %s\n' "${PHASE}" >> "$_route_decisions"
     printf -- '  step: %s\n' "${STEP}" >> "$_route_decisions"
     printf -- '  task_class: %s\n' "${TASK_CLASS}" >> "$_route_decisions"
-    printf -- '  safety_touched: %s\n' "${_signals_risk_val}" >> "$_route_decisions"
+    printf -- '  safety_touched: %s\n' "${_safety_touched_val}" >> "$_route_decisions"
     printf -- '  heuristic_arm: %s\n' "${_heuristic_arm}" >> "$_route_decisions"
     printf -- '  allowed_arms: %s\n' "${_allowed:-[]}" >> "$_route_decisions"
     printf -- '  chosen_arm: %s\n' "${_final_chosen}" >> "$_route_decisions"
+    printf -- '  policy_id: GLM-FIRST-01\n' >> "$_route_decisions"
+    printf -- '  routing_reason: %s\n' "${_routing_reason}" >> "$_route_decisions"
+    printf -- '  glm_exception_rule: %s\n' "${_glm_exception_rule}" >> "$_route_decisions"
     printf -- '  bandit_active: %s\n' "${_bandit_active}" >> "$_route_decisions"
     printf -- '  bandit_deviation: %s\n' "${BANDIT_DEVIATION}" >> "$_route_decisions"
     printf -- '  context_key: %s\n' "${BANDIT_CONTEXT_KEY}" >> "$_route_decisions"
