@@ -29,21 +29,110 @@ trap 'exit 0' ERR
 
 ORPHAN_MAX="${LEADV2_BG_ORPHAN_MAX:-3}"
 
-CORE="/tmp/leadv2-bwe-core-v2.py"
+CORE="/tmp/leadv2-bwe-core-v5.py"
 if [[ ! -f "$CORE" ]]; then
   _CORE_TMP="$(mktemp /tmp/leadv2-bwe-core-XXXXXX.py 2>/dev/null || true)"
   if [[ -n "$_CORE_TMP" ]]; then
     cat > "$_CORE_TMP" <<'PYCORE'
-import sys, json, re
+import sys, json, re, time, os, glob
 
 def safe_id(raw):
     return re.sub(r'[^A-Za-z0-9._-]', '', raw or '')
+
+# Evidence gate (JOB-LIVENESS-IS-UNOBSERVABLE-01): the turn counter only
+# advances on 4 tool types and resets across compacts, so turn-staleness
+# alone demands watchdogs for agents that died hours ago. Before a pending
+# spawn counts as unwatched, ask its transcript whether it is still alive.
+# Verdict in completed | dead | running | no-transcript | unknown; the last
+# two FAIL OPEN (caller must not block on a missing/unreadable transcript).
+_PROJECTS_DIR = os.path.expanduser('~/.claude/projects')
+_TERMINAL_STOP = {'end_turn', 'stop_turn', 'pause_turn'}
+
+
+def _find_transcripts(aid):
+    """Bounded lookup of one agent's transcript(s). Returns (paths, err).
+    Never raises (fail-open). Fixed-depth glob (projects/*/*/subagents/
+    agent-<id>*.jsonl) -- 4x faster than `find -maxdepth 5` at an identical
+    hit set (verified over 3313 transcripts), which matters because this
+    hook fires on every Agent/Monitor/TaskStop/SendMessage call."""
+    safe = re.sub(r'[^A-Za-z0-9._-]', '', aid or '')
+    if not safe:
+        return [], None
+    if not os.path.isdir(_PROJECTS_DIR):
+        return [], 'projects dir missing'
+    try:
+        return glob.glob(os.path.join(_PROJECTS_DIR, '*', '*', 'subagents',
+                                      'agent-' + safe + '*.jsonl')), None
+    except Exception:
+        return [], 'glob failed'
+
+
+def _last_stop_reason(path):
+    """stop_reason of the last JSON record in the transcript tail that
+    carries one, else None. Scans the tail, not just the literal last line:
+    a user/tool_result record logged after an assistant end_turn carries no
+    stop_reason, yet the agent is still done. Never raises."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, 'rb') as fh:
+            fh.seek(max(0, size - 16384))
+            tail = fh.read().decode('utf-8', errors='replace')
+    except Exception:
+        return None
+    last_sr = None
+    for cand in tail.splitlines():
+        cand = cand.strip()
+        if not cand:
+            continue
+        try:
+            rec = json.loads(cand)
+        except Exception:
+            continue
+        msg = rec.get('message')
+        if isinstance(msg, dict):
+            sr = msg.get('stop_reason')
+            if sr:
+                last_sr = sr
+    return last_sr
+
+
+def classify_agent(aid, fresh_secs):
+    """Returns (verdict, note). completed/dead -> drop (no watchdog needed);
+    running -> demand; no-transcript/unknown -> fail open (do not block)."""
+    paths, err = _find_transcripts(aid)
+    if err:
+        return 'unknown', (aid + ': ' + err)
+    if not paths:
+        return 'no-transcript', (aid + ': no transcript on disk')
+    best, best_mtime = None, 0.0
+    for p in paths:
+        try:
+            m = os.path.getmtime(p)
+            if m > best_mtime:
+                best, best_mtime = p, m
+        except Exception:
+            continue
+    if best is None:
+        return 'unknown', (aid + ': transcript unreadable')
+    sr = _last_stop_reason(best)
+    if sr in _TERMINAL_STOP:
+        return 'completed', None
+    age = time.time() - best_mtime
+    if age >= fresh_secs:
+        return 'dead', (aid + ': stale %ds (stop_reason=%s)' % (int(age), sr))
+    return 'running', None
 
 def main():
     try:
         orphan_max = int(sys.argv[1]) if len(sys.argv) > 1 else 3
     except Exception:
         orphan_max = 3
+    try:
+        fresh_secs = int(os.environ.get('LEADV2_BG_TRANSCRIPT_FRESH_SECS', '900'))
+    except Exception:
+        fresh_secs = 900
+    if fresh_secs <= 0:
+        fresh_secs = 900
 
     try:
         data = json.loads(sys.stdin.read())
@@ -140,7 +229,13 @@ def main():
             added = int(t_added)
         except Exception:
             added = turn
-        if turn - added >= 2:
+        if turn - added < 2:
+            continue
+        # Evidence gate: only demand a watchdog if the transcript says the
+        # spawn is genuinely still running. completed/dead (often died hours
+        # ago) are dropped; no-transcript/unknown fail open (never block).
+        verdict, _note = classify_agent(aid, fresh_secs)
+        if verdict == 'running':
             stale.append((aid, desc))
 
     if not stale:
