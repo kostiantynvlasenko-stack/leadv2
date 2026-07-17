@@ -59,11 +59,31 @@ log_error() { log "ERROR: $*"; }
 # sessions using this repo's vendored .claude/scripts/) — exactly the surface
 # that silently ran on 4 reverted fixes for an hour undetected. Set
 # LEADV2_SKIP_DRIFT_GUARD=1 to bypass (tests / intentional single-copy work).
+#
+# C1 fix (review-1.md, fix1): a hard `exit 1` here blocked ALL fanout dispatch
+# the moment known, off-limits-protected SUPERVISE-V2-01 WIP drift existed in
+# the LOWEST-blast-radius copy (leadv2-repo-vendored, i.e.
+# ~/Projects/leadv2/.claude/scripts/ — a copy fanout itself does not read
+# scripts from). We now inspect --json output: if EVERY drifted entry belongs
+# to that one copy, WARN and proceed; any drift in a copy fanout actually
+# reads from (cache/shared/vendored[repo]) still hard-blocks.
 _DRIFT_GUARD="${SCRIPT_DIR}/leadv2-drift-guard.sh"
 if [[ "${LEADV2_SKIP_DRIFT_GUARD:-0}" != "1" ]] && [[ -f "${_DRIFT_GUARD}" ]]; then
-  if ! bash "${_DRIFT_GUARD}" --quiet; then
-    log_error "drift detected across the 5 leadv2 script copies — refusing to fan out on possibly-stale scripts. Run 'bash ${_DRIFT_GUARD}' for details, then 'bash ~/Projects/leadv2/plugins/leadv2/scripts/leadv2-plugin-sync.sh' from canonical to reconcile. Override: LEADV2_SKIP_DRIFT_GUARD=1."
-    exit 1
+  _drift_json=""
+  _drift_rc=0
+  _drift_json="$(bash "${_DRIFT_GUARD}" --quiet --json)" || _drift_rc=$?
+  if [[ "${_drift_rc}" -ne 0 ]]; then
+    _only_vendored_drift=0
+    _CLASSIFY="${SCRIPT_DIR}/leadv2-drift-only-vendored-check.py"
+    if [[ -f "${_CLASSIFY}" ]] && command -v python3 >/dev/null 2>&1; then
+      _only_vendored_drift="$(python3 "${_CLASSIFY}" "${_drift_json}")"
+    fi
+    if [[ "${_only_vendored_drift}" == "1" ]]; then
+      log "WARN: drift detected but confined to the leadv2-repo-vendored copy (known SUPERVISE-V2-01 WIP, off-limits-protected, lowest blast radius — fanout does not read scripts from this copy) — proceeding with dispatch. Run 'bash ${_DRIFT_GUARD}' for details."
+    else
+      log_error "drift detected across the 5 leadv2 script copies — refusing to fan out on possibly-stale scripts. Run 'bash ${_DRIFT_GUARD}' for details, then 'bash ~/Projects/leadv2/plugins/leadv2/scripts/leadv2-plugin-sync.sh' from canonical to reconcile. Override: LEADV2_SKIP_DRIFT_GUARD=1."
+      exit 1
+    fi
   fi
 fi
 

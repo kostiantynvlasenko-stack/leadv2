@@ -138,22 +138,34 @@ _resolve_project_roots() {
     log_warn "(c)/(d): cross-repo-paths.yaml not found at ${CROSS_REPO_CONFIG}; skipping project sync"
     return
   fi
-  # Parse path values from YAML with python3 (no yq dependency).
+  # Parse path + vendors_scripts values from YAML with python3 (no yq
+  # dependency). Emits "<path>\t<vendors_scripts>" (default "true" when the
+  # field is absent, preserving prior behavior for every repo except any
+  # explicitly opted out — C2 fix, PLUGIN-CACHE-THIRD-COPY-REVERTS-FIXES-01).
   python3 - "${CROSS_REPO_CONFIG}" <<'PYEOF'
 import sys, yaml, os
 config = yaml.safe_load(open(sys.argv[1])) or {}
 repos = config.get("repos") or {}
 for name, entry in repos.items():
-    raw = (entry or {}).get("path", "")
+    entry = entry or {}
+    raw = entry.get("path", "")
     expanded = os.path.expanduser(raw)
     if expanded:
-        print(expanded)
+        vendors = entry.get("vendors_scripts", True)
+        print(f"{expanded}\t{'true' if vendors else 'false'}")
 PYEOF
 }
 
 # ── Helper: sync (c)/(d) for a single project root ───────────────────────────
+# $2 (vendors_scripts, default "true"): when "false", skip (c) .claude/scripts/
+# AND (c2) the curated top-level scripts/ subset entirely for this root — a
+# repo whose architecture is symlink-only (e.g. campaign-platform,
+# cross-repo-paths.yaml `vendors_scripts: false`) must never have a vendored
+# scripts tree recreated on it (C2 fix, PLUGIN-CACHE-THIRD-COPY-REVERTS-FIXES-01).
+# (d) contracts (schema files, not "scripts") are unaffected by this flag.
 _sync_project_root() {
   local root="$1"
+  local vendors_scripts="${2:-true}"
   if [[ ! -d "${root}" ]]; then
     log_warn "(c)/(d): project root not found on disk, skipping: ${root}"
     return 0
@@ -161,10 +173,14 @@ _sync_project_root() {
   local proj_scripts="${root}/.claude/scripts"
   local proj_contracts="${root}/.claude/contracts"
 
-  log "Syncing -> project scripts (c): ${proj_scripts}"
   local src="${PLUGIN_ROOT}/scripts/"
-  if [[ -d "${src}" ]]; then
-    _rsync_or_dry "project/scripts[${root##*/}]" "${src}" "${proj_scripts}" --recursive
+  if [[ "${vendors_scripts}" == "false" ]]; then
+    log_warn "(c): skipping project scripts vendoring for ${root} — vendors_scripts: false (symlink-only architecture)"
+  else
+    log "Syncing -> project scripts (c): ${proj_scripts}"
+    if [[ -d "${src}" ]]; then
+      _rsync_or_dry "project/scripts[${root##*/}]" "${src}" "${proj_scripts}" --recursive
+    fi
   fi
 
   # (c2) Some repos ALSO vendor a CURATED subset of leadv2-* scripts at
@@ -190,7 +206,7 @@ _sync_project_root() {
     leadv2-active-registry.sh leadv2-supervise-loop.sh leadv2-supervise-pick.sh
     leadv2-tasks-lib.sh
   )
-  if [[ -d "${proj_scripts_toplevel}" ]] && compgen -G "${proj_scripts_toplevel}/leadv2-*" > /dev/null 2>&1; then
+  if [[ "${vendors_scripts}" != "false" ]] && [[ -d "${proj_scripts_toplevel}" ]] && compgen -G "${proj_scripts_toplevel}/leadv2-*" > /dev/null 2>&1; then
     log "Syncing -> project top-level scripts (c2, out-of-worktree control plane): ${proj_scripts_toplevel} [curated set, additive]"
     for cf in "${toplevel_curated_files[@]}"; do
       local cf_src="${src}${cf}"
@@ -222,9 +238,12 @@ _sync_project_root() {
     fi
   done
 
-  # Ensure eval-harness is present (also covered by scripts/ rsync above, explicit for clarity)
+  # Ensure eval-harness is present (also covered by scripts/ rsync above,
+  # explicit for clarity). Guarded by vendors_scripts too — this was the bug
+  # that recreated campaign-platform's .claude/scripts/ (1 file) even after
+  # the (c) skip above, found live while verifying the C2 fix.
   local harness_src="${PLUGIN_ROOT}/scripts/leadv2-eval-harness.sh"
-  if [[ -f "${harness_src}" ]] && [[ ! "${DRY_RUN}" == "true" ]]; then
+  if [[ "${vendors_scripts}" != "false" ]] && [[ -f "${harness_src}" ]] && [[ ! "${DRY_RUN}" == "true" ]]; then
     mkdir -p "${proj_scripts}"
     cp -p "${harness_src}" "${proj_scripts}/leadv2-eval-harness.sh"
   fi
@@ -270,8 +289,23 @@ done
 # and all other non-leadv2 user-global scripts (24 files; must never change).
 USER_SCRIPTS_TARGET="${HOME}/.claude/scripts"
 log "Syncing -> user-global scripts (e): ${USER_SCRIPTS_TARGET} [leadv2-* only, additive, no --delete]"
+# H1 fix (review-1.md, fix1): (e) was the only sync target NOT wrapped in
+# _direction_safety_excludes — no --delete does not mean no overwrite; rsync
+# still clobbers a same-named file when content differs. A locally-patched
+# leadv2-*.sh sitting here that hasn't yet landed in canonical would be
+# silently overwritten on the next sync (the exact incident class this task
+# fixes, for a target context.yaml's "five copies" enumeration didn't name).
+_unsafe_excludes=()
+while IFS= read -r _u; do
+  [[ -z "${_u}" ]] && continue
+  _unsafe_excludes+=(--exclude="${_u}")
+done < <(_direction_safety_excludes "scripts" "${PLUGIN_ROOT}/scripts/" "${USER_SCRIPTS_TARGET}")
+# rsync filter rules are first-match-wins: unsafe excludes MUST precede the
+# generic --include='leadv2-*' --exclude='*' wildcard, or that wildcard would
+# already have claimed (and included) the unsafe leadv2-* filename before its
+# specific --exclude is ever reached.
 _rsync_or_dry "user-scripts" "${PLUGIN_ROOT}/scripts/" "${USER_SCRIPTS_TARGET}" \
-  --include='leadv2-*' --exclude='*' -d
+  "${_unsafe_excludes[@]}" --include='leadv2-*' --exclude='*' -d
 changed_summary+=("user-scripts")
 
 # ── (f) leadv2 repo's OWN vendored .claude/scripts (copy #2 of the 5,
@@ -297,10 +331,12 @@ if [[ -d "${CANONICAL_ROOT}/.claude" ]]; then
 fi
 
 # ── (c)/(d) Per-project .claude/scripts + .claude/contracts ──────────────────
-# Iterate all roots from cross-repo-paths.yaml (or single --project-root override).
-while IFS= read -r proj_root; do
+# Iterate all roots from cross-repo-paths.yaml (or single --project-root
+# override). Each line is "<path>\t<vendors_scripts>" (see _resolve_project_roots);
+# --project-root bypass emits a bare path with no tab -> defaults to "true".
+while IFS=$'\t' read -r proj_root proj_vendors_scripts; do
   [[ -z "${proj_root}" ]] && continue
-  _sync_project_root "${proj_root}"
+  _sync_project_root "${proj_root}" "${proj_vendors_scripts:-true}"
   changed_summary+=("project[${proj_root##*/}]")
 done < <(_resolve_project_roots)
 
