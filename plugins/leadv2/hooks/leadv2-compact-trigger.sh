@@ -3,6 +3,7 @@
 # Real metric: bytes accumulated, not Stop-event count. Lead can burn 500KB in 5 founder turns.
 # PO-064: active.yaml reads use 5s cache; LEADV2_HOOK_PROFILE=1 enables timing log.
 set -euo pipefail
+export PYTHONWARNINGS="ignore::DeprecationWarning"  # LEAD-ANCHOR-01: never let py warnings hit stderr as a hook error
 trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 
 # ── PO-064: profiling ───────────────────────────────────────────────────────
@@ -29,6 +30,10 @@ SESSION_ID="$(echo "$INPUT" | jq -r '.session_id // .session.id // empty' 2>/dev
 [[ -z "$SESSION_ID" ]] && exit 0
 CWD="$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
 [[ -z "$CWD" ]] && CWD="$PWD"
+# WAVE-RELIABILITY-01: stop_hook_active — true means THIS Stop event was itself caused by a
+# prior decision:block from this same hook. Only consulted by the daemon-mode branch below
+# (prevents an infinite block loop); interactive warn path never reads it.
+STOP_ACTIVE="$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null || echo "false")"
 
 # Find the JSONL for this session
 PROJECT_HASH="$(echo "$CWD" | sed 's|/|-|g; s|^-||')"
@@ -66,6 +71,26 @@ print(last)
 _TOKENS_RESULT=$(python3 -c "
 import json, sys
 
+# lean: 'tool_result' and 'thinking' blocks are both stripped/evicted from the
+# LIVE context window well before /compact — tool outputs get truncated by the
+# harness once aged, and prior-turn thinking blocks are dropped from the
+# request the API actually resends (only the latest turn's thinking survives).
+# Both persist in full on-disk in the session JSONL forever, so summing them
+# uncapped double-counts bytes that are no longer part of what the next API
+# call actually sends. Calibrated 2026-07-10 against 4 real transcripts using
+# each session's own last-turn usage (cache_read+cache_creation+input) as
+# ground truth: capping tool_result alone (2000 chars) only cut the estimate
+# ~3-5% because 'thinking' — not tool_result — is the dominant over-counted
+# block in real sessions (37-53% of accumulated chars in 3/4 samples). Capping
+# BOTH at 1500 chars brought worst-case ratio from 1.55x down to 1.39x anchor
+# (others landed 0.82x-1.05x) — good enough for a WARN-only, non-blocking
+# threshold. Biased slightly toward over- rather than under-estimating since
+# under-estimating risks a missed/late warning; over-estimating just nags
+# early, which is the safe failure mode here.
+# upgrade when Stop-hook payload exposes a real token/context_window field —
+# then prefer that over any text-based estimate (see 1c in the fix ladder).
+CAPPED_BLOCK_CHAR_CAP = 1500  # ~375 tokens; applies to tool_result + thinking subtrees
+
 def is_image(obj):
     if not isinstance(obj, dict):
         return False
@@ -75,6 +100,9 @@ def is_image(obj):
     if 'source' in obj and isinstance(obj.get('source'), dict) and 'data' in obj['source']:
         return True
     return False
+
+def is_capped_block(obj):
+    return isinstance(obj, dict) and obj.get('type') in ('tool_result', 'thinking')
 
 def walk(obj):
     text_chars = 0
@@ -93,6 +121,18 @@ def walk(obj):
                 else:
                     tc, ic = walk(v)
                     text_chars += tc; image_count += ic
+        elif is_capped_block(obj):
+            # Walk the subtree uncapped to get its true size, then cap the
+            # contribution — only a bounded portion of an aged tool_result or
+            # a prior-turn thinking block realistically remains resident.
+            tc, ic = 0, 0
+            for k, v in obj.items():
+                if k == 'type':
+                    continue
+                sub_tc, sub_ic = walk(v)
+                tc += sub_tc; ic += sub_ic
+            text_chars += min(tc, CAPPED_BLOCK_CHAR_CAP)
+            image_count += ic
         else:
             for k, v in obj.items():
                 tc, ic = walk(v)
@@ -196,6 +236,51 @@ elif [[ "$EST_TOKENS" -ge "$WARN_T" ]]; then LEVEL="warn"
 elif [[ "$FOUNDER_TURNS" -ge 30 ]]; then LEVEL="long_chat"
 fi
 [[ -z "$LEVEL" ]] && exit 0
+
+# ── WAVE-RELIABILITY-01: daemon-mode branch — FORCE /compact instead of dead-letter warn ──
+# WHY: in a `/goal` daemon loop (LEADV2_DAEMON=1), turn continuation is driven entirely by
+# THIS Stop hook (see leadv2-self-spawn.sh) — there is no UserPromptSubmit event mid-loop,
+# so the interactive warn path below (writes leadv2-pending-warn-<session>.txt, delivered
+# only by leadv2-user-prompt-context.sh on the next UserPromptSubmit) never fires: written,
+# never read. "Tell the founder" is also moot — nobody is watching an unattended child.
+#
+# Mechanism: decision:"block" prevents Claude Code from stopping and re-injects `reason` as
+# the next turn's content — the exact continuation channel /goal itself already relies on to
+# self-drive turn after turn with no new shell invocation. Setting reason to the literal
+# string "/compact" mirrors a real user submitting that slash command — the only lever a
+# headless (-p, no tty) hook has to force compaction programmatically.
+# lean: not live-verified against a real daemon run collapsing token count (would spend a
+# real fanout child's context to prove) — upgrade when a session JSONL shows a hook-forced
+# /compact actually firing in a live daemon child; until then this is the plan's documented
+# "or equivalent programmatic compact trigger" fallback (WAVE-RELIABILITY-PLAN-01 step 2).
+#
+# HUMAN-PRESENCE GATE (COMPACT-FORCED-ON-HUMAN-01): LEADV2_DAEMON is set repo-wide in some
+# settings.json, so an interactive founder session is indistinguishable from a daemon child
+# by env alone — env read daemon=1 even as FOUNDER_TURNS was 73. A session where a human has
+# actually typed is NOT a daemon, whatever the env says. FOUNDER_TURNS > 0 ⇒ fall through to
+# the interactive pending-warn path (tell the lead to MENTION compact) and NEVER emit a
+# decision:block / forged "/compact" — that arrives as a real user turn the lead obeys.
+# LEADV2_NO_FORCE_COMPACT=1 is a hard kill-switch that disables forcing unconditionally.
+#
+# Guards: only real token thresholds (never "long_chat", which has no compact-relevant
+# signal); only when NO human is present (FOUNDER_TURNS -eq 0); kill-switch unset; skips
+# entirely when stop_hook_active=true (this Stop event was itself caused by our own prior
+# block — blocking again would loop forever); one-shot per level via the same MARKER file the
+# interactive path uses below (so daemon and interactive never double-fire for the same level
+# if a session flips modes).
+# INTERACTIVE PATH BELOW THIS BLOCK IS UNTOUCHED.
+if [[ "${LEADV2_DAEMON:-0}" == "1" \
+   && "${LEADV2_NO_FORCE_COMPACT:-0}" != "1" \
+   && "$FOUNDER_TURNS" -eq 0 \
+   && "$LEVEL" != "long_chat" \
+   && "$STOP_ACTIVE" != "true" ]]; then
+  DAEMON_PREV_LEVEL="$(cat "$MARKER" 2>/dev/null || echo "")"
+  if [[ "$LEVEL" != "$DAEMON_PREV_LEVEL" ]]; then
+    echo "$LEVEL" > "$MARKER" 2>/dev/null || true
+    printf '%s\n' '{"decision":"block","reason":"/compact"}'
+  fi
+  exit 0
+fi
 
 # Emit at most once per level per session
 PREV_LEVEL="$(cat "$MARKER" 2>/dev/null || echo "")"
