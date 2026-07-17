@@ -20,6 +20,13 @@ _TASKS_LIB_DIR="$(cd "$(dirname "$_TASKS_LIB_PATH")" && pwd)"
 _PROJECT_ROOT="${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo "${CLAUDE_PROJECT_DIR:-$(git -C "$_TASKS_LIB_DIR" rev-parse --show-toplevel)}")}"
 _TASKS_FILE="${_PROJECT_ROOT}/docs/tasks.yaml"
 _TASKS_LOCK="/tmp/leadv2-tasks.lock"
+# RISK-7-PERSIST-MERGE-RACE-01: same default leadv2-helpers.sh::_lv2_load_paths
+# uses for LEADV2_HANDOFF_DIR — reuse an already-exported value (e.g. a caller
+# that already ran _lv2_load_paths) so a state-paths.yaml override is honored;
+# otherwise fall back to the plain default. This file is sourced by callers
+# (leadv2-queue-release.sh) that never source leadv2-helpers.sh, so we cannot
+# assume _lv2_load_paths ran — resolve robustly, never crash the release path.
+_TASKS_HANDOFF_DIR="${LEADV2_HANDOFF_DIR:-${_PROJECT_ROOT}/docs/handoff}"
 
 # Per-lane max_attempts defaults (used by add)
 _TASKS_MAX_action=3
@@ -241,14 +248,32 @@ elif op == "unclaim":
 
 elif op == "release":
     iid, outcome, error_msg = args[0], args[1], args[2]
+    handoff_dir = args[3] if len(args) > 3 else ""
     fd = acquire_lock()
     try:
         items = load_tasks()
         now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        # RISK-7-PERSIST-MERGE-RACE-01: this is the TRUE single chokepoint for
+        # status="done" (reached via leadv2-queue-release.sh <- leadv2-daemon.sh
+        # release_claimed_item / leadv2-helpers.sh leadv2_po_release, in
+        # addition to render-close.sh). Never stamp status=done while Phase 6's
+        # merge-blocker.flag is present for this task_id -- that would
+        # lying-green release/close a task whose ff-only merge/deploy never
+        # actually landed. Best-effort: a bad/missing handoff_dir must never
+        # crash the release path.
+        merge_blocked = False
+        if handoff_dir:
+            try:
+                merge_blocked = os.path.isfile(os.path.join(handoff_dir, iid, "merge-blocker.flag"))
+            except Exception:
+                merge_blocked = False
         for it in items:
             if str(it.get("id","")) != iid: continue
             lane    = str(it.get("lane","action"))
             max_att = int(it.get("max_attempts", LANE_MAX.get(lane,3)))
+            if outcome == "success" and merge_blocked:
+                print(f"[tasks-lib] release: skipping status=done for {iid} -- merge-blocker.flag present ({handoff_dir}/{iid}/merge-blocker.flag)", file=sys.stderr)
+                sys.exit(0)
             if outcome == "success":
                 it.update({"status":"done","claim":{"by":None,"lease_expires":None},
                            "closed_at":iso(now),"last_error":None})
@@ -415,7 +440,7 @@ leadv2_tasks_release() {
     esac
   done
   [[ -n "$outcome" ]] || { echo "[tasks-lib] --outcome required" >&2; return 1; }
-  _tasks_dispatch release "$item_id" "$outcome" "${error_msg:-}"
+  _tasks_dispatch release "$item_id" "$outcome" "${error_msg:-}" "$_TASKS_HANDOFF_DIR"
 }
 
 leadv2_tasks_add() {

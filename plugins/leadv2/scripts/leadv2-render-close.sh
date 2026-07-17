@@ -270,9 +270,17 @@ sys.exit(1)
       leadv2_tasks_update "${YAML_TASK_ID}" --key summary_one_line --value "${YAML_SUMMARY}" \
         2>/dev/null || log_warning "leadv2_tasks_update summary_one_line failed for ${YAML_TASK_ID} — non-blocking"
       log_info "tasks.yaml: summary_one_line updated for ${YAML_TASK_ID}"
-      leadv2_tasks_update "${YAML_TASK_ID}" --key status --value "done" 2>/dev/null \
-        || log_warning "leadv2_tasks_update status=done failed for ${YAML_TASK_ID} — non-blocking"
-      log_info "tasks.yaml: status=done updated for ${YAML_TASK_ID}"
+      # RISK-7-PERSIST-MERGE-RACE-01: never stamp status=done while Phase 6's
+      # merge-blocker.flag is still present — that would lying-green close a
+      # task whose ff-only merge/deploy never actually landed.
+      local _merge_blocker="${LEADV2_HANDOFF_DIR}/${YAML_TASK_ID}/merge-blocker.flag"
+      if [[ -f "$_merge_blocker" ]]; then
+        log_warning "tasks.yaml: skipping status=done write for ${YAML_TASK_ID} — merge-blocker.flag present (${_merge_blocker})"
+      else
+        leadv2_tasks_update "${YAML_TASK_ID}" --key status --value "done" 2>/dev/null \
+          || log_warning "leadv2_tasks_update status=done failed for ${YAML_TASK_ID} — non-blocking"
+        log_info "tasks.yaml: status=done updated for ${YAML_TASK_ID}"
+      fi
     fi
   fi
 
@@ -301,6 +309,17 @@ _cleanup_handoff_artifacts() {
 # Called after render_task so the sentinel is already on disk.
 _queue_release_task() {
   local tid="$1"
+  # RISK-7-PERSIST-MERGE-RACE-01: this is the ACTUAL unconditional
+  # tasks.yaml status=done writer (leadv2_tasks_release below) — the
+  # summary_one_line/status write inside render_task's step 5 is a separate,
+  # earlier best-effort attempt; this one runs after and would otherwise
+  # still flip status=done even when render_task's own write was skipped.
+  # Never release a task whose Phase 6 merge failed and left a blocker.
+  local _merge_blocker="${LEADV2_HANDOFF_DIR}/${tid}/merge-blocker.flag"
+  if [[ -f "$_merge_blocker" ]]; then
+    log_warning "queue-release: skipping ${tid} — merge-blocker.flag present (${_merge_blocker})"
+    return 0
+  fi
   local tasks_lib="${SCRIPT_DIR}/leadv2-tasks-lib.sh"
   [[ ! -f "$tasks_lib" ]] && return 0
   # shellcheck source=leadv2-tasks-lib.sh

@@ -11,6 +11,9 @@
 #   A2  docs/tasks.yaml (or lane yamls fallback) has terminal status for task_id
 #   A3  docs/leadv2/active.yaml  does NOT contain task_id
 #   A4  docs/LEAD_V2_STATE.md  history mentions "<task_id> ✅"
+#   A6  docs/handoff/<task_id>/merge-blocker.flag  does NOT exist (RISK-7-PERSIST-MERGE-RACE-01:
+#       Phase 6 (leadv2-deploy-merge.sh) writes this on any merge-failure exit; a lying-green
+#       close otherwise proceeds even though the ff-only merge/deploy never actually landed)
 #
 # Best-effort warnings (log_warning + continue; never exit 1):
 #   W1  docs/BOARD.md HEAD section has today's date AND task_id
@@ -249,6 +252,15 @@ else
   log_warning "A5 closed YAML not found (A1 would catch this): ${CLOSED_YAML} -- non-blocking"
 fi
 
+# ── A6: merge-blocker.flag must NOT exist (Phase 6 must have succeeded and cleared it) ────────
+MERGE_BLOCKER="${LEADV2_HANDOFF_DIR}/${TASK_ID}/merge-blocker.flag"
+if [[ -f "$MERGE_BLOCKER" ]]; then
+  log_fail "A6 merge-blocker present: ${MERGE_BLOCKER}"
+  failures+=("A6: merge-blocker present -- Phase 6 failed, never cleared -- re-run leadv2-deploy-merge.sh ${TASK_ID}, or rm -f ${MERGE_BLOCKER} if already resolved manually")
+else
+  log_pass "A6 merge-blocker: absent (Phase 6 clean)"
+fi
+
 # ── W1 (best-effort): BOARD.md HEAD has today's date AND task_id ─────────────
 if [[ -f "$BOARD_FILE" ]]; then
   has_today=0
@@ -324,7 +336,7 @@ else
 fi
 
 # ── result ────────────────────────────────────────────────────────────────────
-log_info "=== Phase 8 assertions for ${TASK_ID}: $((5 - ${#failures[@]})) / 5 HARD checks PASS ==="
+log_info "=== Phase 8 assertions for ${TASK_ID}: $((6 - ${#failures[@]})) / 6 HARD checks PASS ==="
 
 if (( ${#failures[@]} > 0 )); then
   {
@@ -343,12 +355,12 @@ fi
 
 # ── write sentinel on full PASS ───────────────────────────────────────────────
 mkdir -p "$(dirname "$SENTINEL")"
-printf -- 'phase8-passed: %s\nasserted_at: %s\ntask_id: %s\nassertions: 5/5\n' \
+printf -- 'phase8-passed: %s\nasserted_at: %s\ntask_id: %s\nassertions: 6/6\n' \
   "${TASK_ID}" \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   "${TASK_ID}" \
   > "$SENTINEL"
 
 log_info "Sentinel written: ${SENTINEL}"
-log_info "Phase 8 gate PASSED for ${TASK_ID} (5/5 hard assertions)"
+log_info "Phase 8 gate PASSED for ${TASK_ID} (6/6 hard assertions)"
 exit 0
