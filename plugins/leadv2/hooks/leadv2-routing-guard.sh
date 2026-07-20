@@ -13,6 +13,16 @@
 #      DENY all other nested spawns with actionable message (exits 2).
 #      Audit: every verdict appended to docs/leadv2/tasks/$LEADV2_TASK_ID/nested-spawns.log
 #             (or docs/leadv2/nested-spawns.log when LEADV2_TASK_ID unset).
+#      HARDENED CONTRACT (behind LEADV2_NESTED_DEPTH_GATE, default ON; "0" = unchanged):
+#        a. DEPTH: max_depth=1 -- a caller that is itself explore|general-purpose
+#           (i.e. already a nested sub-run) may not spawn further. reason: route.subrun.depth_exceeded
+#        b. TOOL-CLASS: write-capable roles (developer, frontend-developer, postgres-pro,
+#           devops-engineer, architect, product-owner) can never be a nested spawn target,
+#           even via escalation budget. reason: route.subrun.write_role_denied
+#        c. COUNT: max_subruns_per_parent (default 8), counted from the audit log per caller.
+#           reason: route.subrun.count_exceeded
+#      FAIL-SAFE: any internal parse error falls back to built-in defaults
+#      (max_depth=1, max_subruns=8) -- never a hard crash of the spawn pipeline.
 set -euo pipefail
 trap 'exit 0' ERR
 
@@ -105,6 +115,62 @@ if [[ -n "$CALLER_AGENT_TYPE" ]]; then
     _POLICY_SRC="$_POLICY_DEFAULT"
   fi
 
+  # ── HARDENED CONTRACT (gaps #1/#2/#3) ──────────────────────────────────────
+  # Kill-switch: LEADV2_NESTED_DEPTH_GATE default "1" (ON). "0" -> unchanged
+  # pre-existing base_allowlist behavior only (skip all three checks below).
+  # FAIL-SAFE: any parse error here falls back to the built-in defaults
+  # (max_depth=1, max_subruns=8) rather than crashing the spawn pipeline.
+  _DEPTH_GATE="${LEADV2_NESTED_DEPTH_GATE:-1}"
+  if [[ "$_DEPTH_GATE" != "0" ]]; then
+    _EXT_POLICY="$(python3 -c "
+import sys
+policy_src = sys.argv[1] if len(sys.argv) > 1 else ''
+max_depth, max_subruns, tool_class = 1, 8, 'read_only'
+try:
+    if policy_src:
+        import yaml
+        with open(policy_src) as f:
+            p = yaml.safe_load(f) or {}
+        if isinstance(p, dict):
+            max_depth = int(p.get('max_depth', max_depth))
+            max_subruns = int(p.get('max_subruns_per_parent', max_subruns))
+            tool_class = str(p.get('tool_class', tool_class))
+except Exception:
+    pass
+print(max_depth)
+print(max_subruns)
+print(tool_class)
+" "${_POLICY_SRC:-}" 2>/dev/null || printf -- '1\n8\nread_only\n')"
+
+    _MAX_DEPTH="$(printf -- '%s' "$_EXT_POLICY" | sed -n '1p')"
+    _MAX_SUBRUNS="$(printf -- '%s' "$_EXT_POLICY" | sed -n '2p')"
+    [[ "$_MAX_DEPTH" =~ ^[0-9]+$ ]] || _MAX_DEPTH=1
+    [[ "$_MAX_SUBRUNS" =~ ^[0-9]+$ ]] || _MAX_SUBRUNS=8
+
+    # Gap #2 — TOOL-CLASS WHITELIST: write-capable roles can never be spawned as
+    # a nested sub-run, regardless of base_allowlist or escalation budget.
+    case "$SUBAGENT_TYPE" in
+      developer|frontend-developer|postgres-pro|devops-engineer|architect|product-owner)
+        _audit_log "deny" "route.subrun.write_role_denied"
+        printf -- '[leadv2-routing-guard] DENIED nested spawn: subagent_type="%s" is a write-capable role — nested sub-runs are READ/PLAN/PROBE only (Explore, general-purpose). Return blocker to lead.\n' "$SUBAGENT_TYPE" >&2
+        exit 2
+        ;;
+    esac
+
+    # Gap #1 — DEPTH CAP: if the caller is itself already an Explore/general-
+    # purpose sub-run (i.e. it was spawned via this same nested-spawn path),
+    # it must not spawn a further nested sub-run. max_depth=1 enforced.
+    if [[ "$_MAX_DEPTH" -le 1 ]]; then
+      case "$CALLER_AGENT_TYPE" in
+        explore|general-purpose)
+          _audit_log "deny" "route.subrun.depth_exceeded"
+          printf -- '[leadv2-routing-guard] DENIED nested spawn: caller "%s" is itself a nested sub-run (max_depth=%s) — cannot spawn further. Return blocker to lead.\n' "$CALLER_AGENT_TYPE" "$_MAX_DEPTH" >&2
+          exit 2
+          ;;
+      esac
+    fi
+  fi
+
   # Parse policy: check if stype+model is allowed for this caller. Returns ALLOW or DENY.
   _POLICY_RESULT="$(python3 -c "
 import sys
@@ -158,6 +224,24 @@ print('DENY')
 " "$CALLER_AGENT_TYPE" "$SUBAGENT_TYPE" "$MODEL" "${_POLICY_SRC:-}" 2>/dev/null || echo "DENY")"
 
   if [[ "$_POLICY_RESULT" == "ALLOW" ]]; then
+    # Gap #3 — PER-PARENT COUNT: count this parent's prior successful sub-run
+    # spawns from the existing audit log (fail-safe: unreadable/missing log = 0).
+    if [[ "$_DEPTH_GATE" != "0" ]]; then
+      _COUNT_LOG="${_REPO_ROOT}/docs/leadv2/nested-spawns.log"
+      [[ -n "$SAFE_TASK_ID" ]] && _COUNT_LOG="${_REPO_ROOT}/docs/leadv2/tasks/${SAFE_TASK_ID}/nested-spawns.log"
+      _PRIOR_COUNT=0
+      if [[ -f "$_COUNT_LOG" ]]; then
+        _PRIOR_COUNT="$(grep -F "caller=${CALLER_AGENT_TYPE} " "$_COUNT_LOG" 2>/dev/null | grep -Ec 'verdict=(allow|escalation)' 2>/dev/null || echo 0)"
+      fi
+      [[ "$_PRIOR_COUNT" =~ ^[0-9]+$ ]] || _PRIOR_COUNT=0
+
+      if [[ "$_PRIOR_COUNT" -ge "$_MAX_SUBRUNS" ]]; then
+        _audit_log "deny" "route.subrun.count_exceeded"
+        printf -- '[leadv2-routing-guard] DENIED nested spawn: parent "%s" reached max_subruns_per_parent=%s (prior=%s) — return blocker to lead.\n' "$CALLER_AGENT_TYPE" "$_MAX_SUBRUNS" "$_PRIOR_COUNT" >&2
+        exit 2
+      fi
+    fi
+
     _audit_log "allow" "policy_base"
     exit 0  # allowed nested discovery probe
   fi

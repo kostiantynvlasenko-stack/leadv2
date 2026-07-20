@@ -19,6 +19,10 @@ const MISSION = a.missionPath || `docs/handoff/${TASK_ID}/review-mission.md`
 const DIFF = a.diffPath || `/tmp/leadv2-review-${TASK_ID}.diff`
 const CODEX_ON = a.codexEnabled !== false
 const TASK_CLASS = a.taskClass || 'general'
+// [FAMILY-GATE-01] Cross-provider-family review gate kill-switch — default ON; '0' disables
+// the whole feature (no families/family_coverage fields, no downgrade, byte-identical to
+// pre-FAMILY-GATE-01 behavior).
+const FAMILY_GATE_ON = ((typeof process !== 'undefined' && process.env && process.env.LEADV2_REVIEW_FAMILY_GATE) || '1') !== '0'
 // WORKFLOW-BASH-FIX-01: the real Workflow runtime provides ONLY agent()/parallel()/pipeline()/
 // log()/phase()/args/budget — there is NO bash() global. This file used to make 4 real bare
 // `await bash(...)` calls (undefined at runtime → crash): the TS derive (single consumer:
@@ -117,18 +121,24 @@ const reviewers = [
     `Run hack-detection on the diff at ${DIFF}: TODO/FIXME band-aids, magic numbers, broad except, hardcoded creds/secrets, silent fallbacks. Return each as a finding (dimension="hack").`,
     { label: 'hack-detect', phase: 'Review', model: 'haiku', effort: 'low', schema: FINDINGS_SCHEMA }),
 ]
+// [FAMILY-GATE-01] Provider family per reviewer, built in lockstep with `reviewers` (same
+// push/unshift order) so index i in reviewerFamilies always matches index i in reviewers.
+const reviewerFamilies = ['anthropic', 'anthropic']
 if (SAFETY) {
   reviewers.push(() => agent(
     `Security review of the diff at ${DIFF}. Full-file read allowed for security paths. Check injection, auth/session, RLS correctness, webhook verification, secret handling, CSRF, rate-limit gaps. Severity-tag (dimension="security").`,
     { label: 'security-auditor', phase: 'Review', agentType: 'security-auditor', model: 'sonnet', effort: 'high', schema: FINDINGS_SCHEMA }))
+  reviewerFamilies.push('anthropic')
 }
 if (CODEX_ON) {
   // Codex is primary: unshift to run before agent-critic in parallel (first slot = primary adversarial brain)
   reviewers.unshift(() => agent(
     `Run and wait: bash ~/.claude/scripts/codex-task.sh adversarial-review --wait --base ${BASE} --tier top. Then read findings with: bash ~/.claude/scripts/cx-tail.sh <output-file>. Parse [critical]/[high]/[medium]/[low] lines into findings (dimension="codex"). If codex unavailable (exit non-zero), return empty findings with summary_for_lead="codex unavailable". Do NOT invent findings.`,
     { label: 'codex-adversarial', phase: 'Review', model: 'haiku', effort: 'low', schema: FINDINGS_SCHEMA }))
+  reviewerFamilies.unshift('openai')
 }
-const reviewResults = (await parallel(reviewers)).filter(Boolean)
+const rawReviewResults = await parallel(reviewers)
+const reviewResults = rawReviewResults.filter(Boolean)
 const allFindings = reviewResults.flatMap(r => r.findings || [])
 const seen = new Map()
 for (const f of allFindings) {
@@ -168,6 +178,37 @@ const ESCALATE_VERDICT = 'ESCALATE'
 let verdict = confirmedBlocking.length === 0 ? 'ACCEPT' : (ROUND >= 2 ? ESCALATE_VERDICT : 'REVISE')
 // [STALL-DETECT-01] Force escalation when blocking signature unchanged across 2+ rounds
 if (stall) { verdict = ESCALATE_VERDICT }
+
+// [FAMILY-GATE-01] Cross-provider-family review gate. A panel that only ever ran reviewers
+// from ONE provider family (e.g. Codex login down -> only anthropic-family critic/hack-detect
+// ran) must not be allowed to self-certify ACCEPT -- downgrade to ESCALATE so the lead sees
+// verification was partial. FAIL-SOFT: any error here falls through to the original verdict.
+// A reviewer that FAILED still returns a non-null sentinel (e.g. the codex path returns
+// `summary_for_lead="codex unavailable"` with empty findings on exit non-zero) -- that sentinel
+// must NOT count toward family coverage, or a dead Codex silently satisfies the >=2-family bar.
+const isUnavailableResult = (r) => !!(r && typeof r.summary_for_lead === 'string' && /unavailable/i.test(r.summary_for_lead))
+let families = []
+let family_coverage = null
+if (FAMILY_GATE_ON) {
+  try {
+    families = [...new Set(rawReviewResults.map((r, i) => (r && !isUnavailableResult(r)) ? reviewerFamilies[i] : null).filter(Boolean))]
+    if (families.length < 2 && verdict === 'ACCEPT') {
+      family_coverage = `single:${families[0] || 'none'}`
+      verdict = ESCALATE_VERDICT
+      log(`family-gate: single-family panel (${family_coverage}) -- downgrading ACCEPT -> ESCALATE`)
+      // TODO(family-gate): add zhipu (GLM) fallback reviewer here before downgrading. No
+      // reviewer-spawn helper exists in this file beyond the reviewers[]/agent()/synthAgent()
+      // wiring already built above -- wiring an automatic GLM reviewer spawn on gate-trip would
+      // be new spawn infra, out of scope for this change.
+    } else {
+      family_coverage = families.length >= 2 ? 'multi' : (families.length === 1 ? `single:${families[0]}` : 'none')
+    }
+  } catch (e) {
+    log(`family-gate: error computing family coverage, falling through to original verdict -- ${e && e.message}`)
+    families = []
+    family_coverage = null
+  }
+}
 
 // [F6] Quality scoring — structured rubric via JSON schema; only fires on ACCEPT or informational pass
 // Score: diff_coherence(0-4) + test_coverage(0-3) + security_pass(0-3) + novelty_bonus(0-1) = max 10
@@ -264,4 +305,6 @@ return {
   signature: sig,
   stall,
   ...(stall ? { stall_reason: 'identical blocking signature 2 rounds' } : {}),
+  // [FAMILY-GATE-01] auditability -- omitted entirely when LEADV2_REVIEW_FAMILY_GATE=0
+  ...(FAMILY_GATE_ON ? { families, family_coverage } : {}),
 }

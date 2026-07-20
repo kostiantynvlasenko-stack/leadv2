@@ -60,6 +60,27 @@ while IFS=$'\t' read -r TID PHASE_NOW; do
     JOURNAL_FILE="${TASK_DIR}/journal.md"
     RESUME="${TASK_DIR}/pre-compact-resume.md"
 
+    # Compose cache: short-circuit recomposition when task sources are unchanged.
+    # Key = sha256(task_id|journal_mtime|state_mtime)[:12]. Fail-soft: any cache
+    # error falls through to normal composition below (never breaks the hook).
+    RESUME_JSON="${TASK_DIR}/pre-compact-resume.json"
+    CACHE_DIR="${CWD}/${_lv2_leadv2_dir}/cache/summaries"
+    JOURNAL_MTIME=""
+    STATE_MTIME=""
+    CHECKPOINT_MTIME=""
+    [[ -f "$JOURNAL_FILE" ]] && JOURNAL_MTIME="$(stat -c %Y "$JOURNAL_FILE" 2>/dev/null || stat -f %m "$JOURNAL_FILE" 2>/dev/null || echo "")"
+    [[ -f "$STATE_FILE" ]] && STATE_MTIME="$(stat -c %Y "$STATE_FILE" 2>/dev/null || stat -f %m "$STATE_FILE" 2>/dev/null || echo "")"
+    [[ -f "$CHECKPOINT" ]] && CHECKPOINT_MTIME="$(stat -c %Y "$CHECKPOINT" 2>/dev/null || stat -f %m "$CHECKPOINT" 2>/dev/null || echo "")"
+    CACHE_INPUT="${TID}|${JOURNAL_MTIME}|${STATE_MTIME}|${CHECKPOINT_MTIME}"
+    CACHE_KEY="$(printf '%s' "$CACHE_INPUT" | { shasum -a 256 2>/dev/null || sha256sum 2>/dev/null || true; } | cut -c1-12)"
+    if [[ -n "$CACHE_KEY" \
+           && -f "${CACHE_DIR}/${CACHE_KEY}.md" \
+           && -f "${CACHE_DIR}/${CACHE_KEY}.json" ]] \
+       && mkdir -p "$TASK_DIR" 2>/dev/null \
+       && cp "${CACHE_DIR}/${CACHE_KEY}.md" "$RESUME" 2>/dev/null \
+       && cp "${CACHE_DIR}/${CACHE_KEY}.json" "$RESUME_JSON" 2>/dev/null; then
+      exit 0  # cache hit — reuse composed pair, skip recomposition
+    fi
     if [[ -f "$CHECKPOINT" ]]; then
       # (a) legacy path — unchanged: copy checkpoint.md + standard instruction block
       mkdir -p "$TASK_DIR" 2>/dev/null || true
@@ -111,6 +132,26 @@ d = {
 print(json.dumps(d, indent=2))
 " "$TID" "$PHASE_NOW" "$(basename "$CHECKPOINT" 2>/dev/null || echo "checkpoint.md")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$LAST_JOURNAL_LINE" \
       > "${TASK_DIR}/pre-compact-resume.json" 2>/dev/null
+
+    # Cache miss: composition finished — persist pair atomically, prune to newest ~20.
+    if [[ -n "$CACHE_KEY" && -f "$RESUME" && -f "$RESUME_JSON" ]]; then
+      mkdir -p "$CACHE_DIR" 2>/dev/null || true
+      _tmp_md="$(mktemp 2>/dev/null || echo "")"
+      _tmp_json="$(mktemp 2>/dev/null || echo "")"
+      if [[ -n "$_tmp_md" && -n "$_tmp_json" ]] \
+         && cp "$RESUME" "$_tmp_md" 2>/dev/null \
+         && cp "$RESUME_JSON" "$_tmp_json" 2>/dev/null; then
+        mv -f "$_tmp_md" "${CACHE_DIR}/${CACHE_KEY}.md" 2>/dev/null || true
+        mv -f "$_tmp_json" "${CACHE_DIR}/${CACHE_KEY}.json" 2>/dev/null || true
+      fi
+      rm -f "$_tmp_md" "$_tmp_json" 2>/dev/null || true
+      (
+        cd "$CACHE_DIR" 2>/dev/null || exit 0
+        ls -t *.md 2>/dev/null | tail -n +21 | while IFS= read -r stale; do
+          [[ -n "$stale" ]] && rm -f "$stale" "${stale%.md}.json" 2>/dev/null || true
+        done
+      ) || true
+    fi
   ) || true
 done <<<"$TASK_ROWS"
 
