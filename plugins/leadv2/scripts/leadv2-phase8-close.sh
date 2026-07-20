@@ -225,6 +225,20 @@ fi
 # ── gate (G2 — leadv2-phase8-assert.sh) ──────────────────────────────────────
 # NOTE: leadv2-phase8-gate.sh (.claude/hooks/) is the PreToolUse push-blocker hook.
 #       leadv2-phase8-assert.sh (.claude/scripts/) is the G2 assertion script.
+E2E_GATE_SCRIPT="${SCRIPTS_DIR}/leadv2-phase8-e2e-gate.sh"
+if [[ -x "$E2E_GATE_SCRIPT" ]]; then
+  log_info "Running E2E gate..."
+  e2e_rc=0
+  bash "$E2E_GATE_SCRIPT" "$TASK_ID" || e2e_rc=$?
+  if [[ $e2e_rc -ne 0 ]]; then
+    log_error "E2E gate failed (exit ${e2e_rc}) — see docs/handoff/${TASK_ID}/e2e-gate.log"
+    exit 1
+  fi
+else
+  log_error "E2E gate script missing: ${E2E_GATE_SCRIPT}"
+  exit 1
+fi
+
 ASSERT_SCRIPT="${SCRIPTS_DIR}/leadv2-phase8-assert.sh"
 if [[ -x "$ASSERT_SCRIPT" ]]; then
   log_info "Running gate assertions (G2)..."

@@ -14,6 +14,8 @@
 #   A6  docs/handoff/<task_id>/merge-blocker.flag  does NOT exist (RISK-7-PERSIST-MERGE-RACE-01:
 #       Phase 6 (leadv2-deploy-merge.sh) writes this on any merge-failure exit; a lying-green
 #       close otherwise proceeds even though the ff-only merge/deploy never actually landed)
+#   A7  docs/handoff/<task_id>/e2e-gate-passed.flag exists and is <1h old
+#       (project E2E gate run by leadv2-phase8-e2e-gate.sh — E2E-INTO-DEV-LOOP-01)
 #
 # Best-effort warnings (log_warning + continue; never exit 1):
 #   W1  docs/BOARD.md HEAD section has today's date AND task_id
@@ -49,6 +51,23 @@ TASK_ID="${1:-${LEADV2_TASK_ID:-}}"
 if [[ -z "$TASK_ID" ]]; then
   log_error "task_id required (arg1 or LEADV2_TASK_ID env)"
   exit 2
+fi
+
+# ── A7: E2E gate sentinel exists and is fresh (E2E-INTO-DEV-LOOP-01) ─────────
+E2E_SENTINEL="${LEADV2_HANDOFF_DIR}/${TASK_ID}/e2e-gate-passed.flag"
+if [[ -f "$E2E_SENTINEL" ]]; then
+  now=$(date +%s)
+  mtime=$(stat -f %m "$E2E_SENTINEL" 2>/dev/null || stat -c %Y "$E2E_SENTINEL" 2>/dev/null || echo 0)
+  age=$(( now - mtime ))
+  if (( age > 3600 )); then
+    log_fail "A7 E2E gate sentinel stale (${age}s > 1h): ${E2E_SENTINEL}"
+    failures+=("A7: ${E2E_SENTINEL} is ${age}s old (>1h) -- re-run: bash ${SCRIPT_DIR}/leadv2-phase8-e2e-gate.sh ${TASK_ID}")
+  else
+    log_pass "A7 E2E gate: sentinel fresh (${age}s old)"
+  fi
+else
+  log_fail "A7 E2E gate sentinel missing: ${E2E_SENTINEL}"
+  failures+=("A7: ${E2E_SENTINEL} not found -- run: bash ${SCRIPT_DIR}/leadv2-phase8-e2e-gate.sh ${TASK_ID}")
 fi
 
 # ── file paths ────────────────────────────────────────────────────────────────
@@ -336,7 +355,7 @@ else
 fi
 
 # ── result ────────────────────────────────────────────────────────────────────
-log_info "=== Phase 8 assertions for ${TASK_ID}: $((6 - ${#failures[@]})) / 6 HARD checks PASS ==="
+log_info "=== Phase 8 assertions for ${TASK_ID}: $((7 - ${#failures[@]})) / 7 HARD checks PASS ==="
 
 if (( ${#failures[@]} > 0 )); then
   {
@@ -355,12 +374,12 @@ fi
 
 # ── write sentinel on full PASS ───────────────────────────────────────────────
 mkdir -p "$(dirname "$SENTINEL")"
-printf -- 'phase8-passed: %s\nasserted_at: %s\ntask_id: %s\nassertions: 6/6\n' \
+printf -- 'phase8-passed: %s\nasserted_at: %s\ntask_id: %s\nassertions: 7/7\n' \
   "${TASK_ID}" \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   "${TASK_ID}" \
   > "$SENTINEL"
 
 log_info "Sentinel written: ${SENTINEL}"
-log_info "Phase 8 gate PASSED for ${TASK_ID} (6/6 hard assertions)"
+log_info "Phase 8 gate PASSED for ${TASK_ID} (7/7 hard assertions)"
 exit 0

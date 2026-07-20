@@ -676,13 +676,13 @@ launch_headless() {
     ( cd "$PROJECT_ROOT" && \
       export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
              LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
-             LEADV2_LEAD_EFFORT="${lead_effort}" && \
+             LEADV2_LEAD_EFFORT="${lead_effort}" LEADV2_RUNNER_FORCE_FRESH="${FORCE}" && \
       exec setsid nohup "$_runner" </dev/null >>"$logf" 2>&1 ) &
   else
     ( cd "$PROJECT_ROOT" && \
       export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
              LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
-             LEADV2_LEAD_EFFORT="${lead_effort}" && \
+             LEADV2_LEAD_EFFORT="${lead_effort}" LEADV2_RUNNER_FORCE_FRESH="${FORCE}" && \
       exec nohup "$_runner" </dev/null >>"$logf" 2>&1 ) &
   fi
   local pid=$!
@@ -899,8 +899,8 @@ launch_tmux() {
     printf -v cmd 'exec %q -p --model %q --effort %q --permission-mode bypassPermissions %q' \
       "$CLAUDE_BIN" "$lead_model" "$lead_effort" "/leadv2 ${tid}"
   else
-    printf -v cmd 'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q; exec %q' \
-      "$tid" "$lead_model" "$lead_effort" "$_runner"
+    printf -v cmd 'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q LEADV2_RUNNER_FORCE_FRESH=%q; exec %q' \
+      "$tid" "$lead_model" "$lead_effort" "$FORCE" "$_runner"
   fi
   tmux send-keys -t "$target" "$cmd" C-m 2>/dev/null || true
 
