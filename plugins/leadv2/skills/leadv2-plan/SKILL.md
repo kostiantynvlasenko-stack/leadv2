@@ -24,7 +24,7 @@ allowed-tools:
 | 1b | always | write mission file (graph context + constraints) | /tmp/mission-<id>.md |
 | 1c (aggregates) | architect needs a number/count/delta | pre-compute in bash, embed result, not raw rows | mission's Pre-computed aggregates |
 | 2a | always, before spawns | start question-proxy Monitor | mailbox watch |
-| 2b (Stage 1) | class ≥ Standard | Codex (primary plan) + architect(sonnet) cross-check, parallel | architect.md, codex-plan-result.md |
+| 2b (Stage 1) | class ≥ Standard | Codex (primary plan) + architect(sonnet) cross-check (incl. mandatory capability-search — reuse lib/CLI/MCP/Skill before custom code), parallel | architect.md, codex-plan-result.md |
 | 3 | after Stage 1 spawns | Monitor until both deliverables exist | STAGE1_READY |
 | 4 | after 3 | read Stage-1 outputs, draft critic brief | /tmp/critic-brief-<id>.md |
 | 4b (Stage 2) | class ≥ Standard | critic(opus) adversarial review of synthesis | critic.md |
@@ -544,6 +544,10 @@ decisions:        # combine locked-in picks from all three
   - id: D2
     ...
     source: codex
+  - decision: capability-search   # mandatory per plan (see step 2b) — reuse-vs-build check,
+    considered: [libX, cliY, mcpZ]  # before committing to custom code
+    chosen: "reuse <x>" | "custom (no fit)"
+    why: "<one line>"
 
 off_limits:       # union of all off-limits from three sources
   - ...

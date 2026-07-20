@@ -269,7 +269,11 @@ if (recommendedRoles.includes('architect')) {
     `Cross-check Codex's plan for task ${TASK_ID} — Codex (GPT-5.6) is the primary plan author for this task; ` +
     `do NOT re-author a competing full plan from scratch. Brief: ${BRIEF || MISSION_PATH}. Read ${MISSION_PATH} + the repo. ` +
     `Turn the brief into decisions[], plan_steps[] (minimal-diff oriented), off_limits[], risks[], focusing on repo-specific ` +
-    `detail and gaps a fast 2nd-opinion plan is likely to miss. No code, no full-file rewrites.` +
+    `detail and gaps a fast 2nd-opinion plan is likely to miss. No code, no full-file rewrites. ` +
+    `Capability-search (mandatory, before proposing custom code): check pyproject.toml/package.json/requirements for an ` +
+    `existing lib, an installed CLI tool, a registered MCP server, or an installed Skill that already covers the task. ` +
+    `Emit exactly one decisions[] string entry recording it, always — even a "no fit" verdict: ` +
+    `'capability-search: considered=[x,y]; chosen="reuse <x>" | "custom (no fit)"; why="<one line>"'.` +
     contextEnvelope,
     { label: 'architect', phase: 'Plan', agentType: 'architect', model: ARCH_MODEL, effort: HEAVY ? 'high' : 'medium', schema: ARCH_SCHEMA }))
 }
@@ -379,6 +383,9 @@ await agent(
   `Use the standard leadv2 context.yaml shape (decisions[], off_limits[], plan.steps[], risk summary). ` +
   `Each plan.steps[i] MUST include the agent_hint field from the annotated steps above. ` +
   `Resolve any critic concern into either an off_limit or a plan step. ` +
+  `If any decisions[] string starts with "capability-search:", parse it and write it as its own ` +
+  `decisions[] entry with shape {decision:"capability-search", considered:[...], chosen:"reuse <x>"|"custom (no fit)", why:"..."} ` +
+  `instead of a plain string — never drop it, it records the reuse-vs-build check for this task. ` +
   `ALSO emit verification.criteria[] WHEN concrete checkable criteria exist (a shell command, a judge rubric, or a human signoff). ` +
   `Keep verification.live_signal as the human description. criteria[] is OPTIONAL — omit it entirely when no concrete criteria apply. ` +
   `Each criterion: {id, type:programmatic|judge|human, expect?:exit_zero|exit_nonzero|stdout_contains, check?:argv-array, contains?:string, rubric?:string, prompt?:string}.` +

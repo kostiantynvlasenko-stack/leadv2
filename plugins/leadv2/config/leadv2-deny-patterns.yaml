@@ -1,0 +1,83 @@
+# leadv2-deny-patterns.yaml — conservative deny-floor for PreToolUse:Bash
+#
+# Each rule is individually toggleable. Only high-confidence, irreversible
+# operations belong here — bias toward FEW rules that never fire on legit
+# work. This is a hard pre-execution floor, not a review-phase heuristic;
+# false positives block real work, so keep the bar high.
+#
+# Fields per rule:
+#   name:    short id, used in block messages / test assertions
+#   regex:   Python re.search pattern, matched against the raw command string
+#            (case-insensitive). Keep patterns tight — prefer exact flag
+#            combos over broad substrings.
+#   enabled: true/false — toggle without deleting the rule
+#   message: shown to the caller on block (exit 2 stderr)
+#   allow_inline_override: true/false — whether the inline "# deny-floor:
+#            allow" comment on the command can bypass THIS rule. CATASTROPHIC
+#            rules (irreversible beyond the local worktree — root/home wipe,
+#            filesystem format, raw device overwrite, force-push to a shared
+#            branch) are false: only the LEADV2_DENY_FLOOR=0 kill-switch can
+#            bypass them. SOFT rules (local-worktree-recoverable ops an
+#            operator may intentionally want on a throwaway tree) are true.
+#            Field is optional; missing = false (fail-safe).
+
+rules:
+  - name: rm_rf_root
+    regex: 'rm\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/(?:\s|$|\*|\.(?=\s|$))|rm\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s+/(?:\s|$|\*|\.(?=\s|$))'
+    enabled: true
+    message: "rm -rf / (or / with trailing args/glob, e.g. /*, /.) is blocked — irreversible root wipe."
+    allow_inline_override: false
+
+  - name: rm_rf_home
+    regex: 'rm\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*[rf][a-zA-Z]*[rf][a-zA-Z]*\s+(~|\$HOME)(\s|/|$)'
+    enabled: true
+    message: "rm -rf ~ / $HOME is blocked — irreversible home-dir wipe."
+    allow_inline_override: false
+
+  - name: git_reset_hard
+    regex: 'git\s+reset\s+.*--hard'
+    enabled: true
+    message: "git reset --hard is blocked — discards uncommitted work irreversibly. Use ask-lead.sh if this is intentional, or append '# deny-floor: allow' to override on a throwaway tree."
+    allow_inline_override: true
+
+  - name: git_clean_fdx
+    regex: 'git\s+clean\b(?!(?:(?!;|&&|\||\n).)*\s(?:-n\b|--dry-run\b))(?=(?:(?!;|&&|\||\n).)*\s(?:-[a-zA-Z]*f[a-zA-Z]*\b|--force\b))(?=(?:(?!;|&&|\||\n).)*\s-[a-zA-Z]*d[a-zA-Z]*\b)'
+    enabled: true
+    message: "git clean with both force (-f/--force) and dirs (-d) flags, in any order/grouping, is blocked — irreversibly deletes untracked (+ ignored, with -x) files and directories. 'git clean -n' (dry-run) and force-less invocations are still allowed."
+    allow_inline_override: true
+
+  - name: git_stash
+    regex: 'git\s+stash(?!\s+(list|show|pop|apply|branch)\b)(\s|$)'
+    enabled: true
+    message: "git stash (bare, push, save, clear, or drop) is blocked — see feedback_no_hard_reset_in_shared_tree; can silently hide/lose work in shared trees. Read-only forms (list/show/pop/apply/branch) are allowed."
+    allow_inline_override: true
+
+  - name: git_push_force_main
+    regex: 'git\s+push\s+.*(--force|-f)\b.*(origin\s+)?(main|master)\b|git\s+push\s+.*(main|master)\b.*(--force|-f)\b'
+    enabled: true
+    message: "git push --force to main/master is blocked — irreversible history rewrite on a shared branch. Not inline-overridable; use ask-lead.sh if this is genuinely intentional."
+    allow_inline_override: false
+
+  - name: mkfs
+    regex: '\bmkfs(\.\w+)?\b'
+    enabled: true
+    message: "mkfs is blocked — irreversibly formats a filesystem."
+    allow_inline_override: false
+
+  - name: dd_to_dev
+    regex: '\bdd\b[^|;&\n]*of=/dev/'
+    enabled: true
+    message: "dd of=/dev/... is blocked — irreversibly overwrites a block device."
+    allow_inline_override: false
+
+  - name: dev_redirect_overwrite
+    regex: '>>?\s*/dev/(sd|nvme|disk|hd|vd|xvd)'
+    enabled: true
+    message: "Shell redirect (> or >>) into a block device (/dev/sd*, nvme*, disk*, hd*, vd*, xvd*) is blocked — irreversibly overwrites the device. /dev/null, /dev/stdout, /dev/stderr, /dev/tty are unaffected."
+    allow_inline_override: false
+
+  - name: chmod_r_777_root
+    regex: 'chmod\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*R[a-zA-Z]*\s+777\s+/(\s|$)'
+    enabled: true
+    message: "chmod -R 777 / is blocked — irreversibly wrecks root filesystem permissions."
+    allow_inline_override: false

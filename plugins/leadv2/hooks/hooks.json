@@ -109,6 +109,12 @@
     "hooks": [
      {
       "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-deny-floor.sh\"",
+      "timeout": 5,
+      "statusMessage": "Deny-floor: checking for irreversible commands..."
+     },
+     {
+      "type": "command",
       "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-block-bash-heredoc.sh\"",
       "timeout": 5
      },

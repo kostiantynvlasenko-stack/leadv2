@@ -391,9 +391,36 @@ for (const p of proposal.proposals) {
     continue
   }
 
-  const cmd = `python3 "${projRoot}/.claude/scripts/lv2-shadow-emit.py" ` +
+  const escapedDiff = diffPatch.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')
+  const emitCmd = `python3 "${projRoot}/.claude/scripts/lv2-shadow-emit.py" ` +
     `"${TASK_ID}" "${p.kind}" "${p.target}" "${riskLevel}" "${projRoot}" ` +
-    `"${diffPatch.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}" 2>/dev/null || true`
+    `"${escapedDiff}" 2>/dev/null`
+  // GOVAPPLY-GUARD-01: after emit, best-effort patch target_sha256 (sha256 of the CURRENT
+  // target file, i.e. the baseline this proposal was generated against) into the just-written
+  // proposal yaml -- idempotent (skips if target_sha256 already set), never blocks or alters
+  // emission on failure. leadv2-govapply-guard.sh compares this against the live file at
+  // apply time to refuse a promote if the target drifted meanwhile. pid is recomputed
+  // deterministically the same way lv2-shadow-emit.py derives it (sha1(task_id+kind+target))
+  // rather than re-parsed from a second stdout stream, so this stays a single subshell that
+  // reports ONLY the id on stdout for the existing agent-side id-regex parsing (R1: escaping
+  // stays deterministic JS, no double quotes inside the single-quoted python -c body).
+  const shaPatchPy = [
+    'import sys, os, hashlib, yaml',
+    'pid, proj, target = sys.argv[1], sys.argv[2], sys.argv[3]',
+    'prop_path = os.path.join(proj, "docs/leadv2/shadow/proposals", pid + ".yaml")',
+    'if not pid or not os.path.exists(prop_path):',
+    '    sys.exit(0)',
+    'p = yaml.safe_load(open(prop_path)) or {}',
+    'if p.get("target_sha256"):',
+    '    sys.exit(0)',
+    'target_abs = os.path.join(proj, target)',
+    'if os.path.exists(target_abs):',
+    '    p["target_sha256"] = hashlib.sha256(open(target_abs, "rb").read()).hexdigest()',
+    '    yaml.dump(p, open(prop_path, "w"), default_flow_style=False, sort_keys=False)',
+  ].join('\n')
+  const cmd = `PID=$(${emitCmd}); ` +
+    `python3 -c '${shaPatchPy}' "$PID" "${projRoot}" "${p.target}" >/dev/null 2>&1 || true; ` +
+    `printf '%s' "$PID"`
   emitCandidates.push({ p, riskLevel, cmd })
 }
 

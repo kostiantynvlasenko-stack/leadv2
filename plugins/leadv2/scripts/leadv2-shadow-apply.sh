@@ -517,6 +517,37 @@ except Exception:
       exit 1
     fi
 
+    # GOVAPPLY-GUARD-01: refuse to apply if target_file drifted since proposal generation
+    # (compares live sha256 against the proposal's recorded target_sha256, when present --
+    # proposals emitted before this feature have no target_sha256 and fall back to backup-only,
+    # never a hard refusal); always writes a timestamped backup before we touch the target.
+    # LEADV2_GOVAPPLY_NOGUARD=1 bypasses (guard warns to stderr).
+    GOVAPPLY_GUARD="${SCRIPT_DIR}/leadv2-govapply-guard.sh"
+    if [[ -f "$GOVAPPLY_GUARD" ]]; then
+      PROP_TARGET_SHA256=$(_prop target_sha256)
+      GUARD_ARGS=(--target "$TARGET_ABS")
+      [[ -n "$PROP_TARGET_SHA256" ]] && GUARD_ARGS+=(--expected-sha256 "$PROP_TARGET_SHA256")
+      set +e
+      bash "$GOVAPPLY_GUARD" "${GUARD_ARGS[@]}"
+      GOVAPPLY_RC=$?
+      set -e
+      if [[ $GOVAPPLY_RC -ne 0 ]]; then
+        log_error "govapply-guard refused apply for proposal ${PROPOSAL_ID} (rc=${GOVAPPLY_RC}) -- target drifted or guard error"
+        python3 - "$PROPOSAL_FILE" << 'PYEOF'
+import sys, yaml
+path = sys.argv[1]
+with open(path) as f:
+    p = yaml.safe_load(f) or {}
+p['status'] = 'blocked_by_eval'
+with open(path, 'w') as f:
+    yaml.dump(p, f, default_flow_style=False, sort_keys=False)
+PYEOF
+        exit 1
+      fi
+    else
+      log_warn "govapply-guard script not found (${GOVAPPLY_GUARD}) -- skipping drift/backup check"
+    fi
+
     # Compute snapshot filename from proposal id sha1
     SNAP_SHA=$(python3 -c "import hashlib,sys; print(hashlib.sha1(sys.argv[1].encode()).hexdigest())" "$PROPOSAL_ID")
     SNAP_FILE="${SNAPSHOTS_DIR}/${SNAP_SHA}.bak"
