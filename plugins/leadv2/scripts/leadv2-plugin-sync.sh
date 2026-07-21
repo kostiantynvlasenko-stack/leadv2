@@ -8,6 +8,7 @@
 #   (c) <project>/.claude/scripts/                          (per-repo runtimes from cross-repo-paths.yaml)
 #   (d) <project>/.claude/contracts/                        (schema files per-repo)
 #   (e) ~/.claude/scripts/                                  (user-global leadv2-* scripts; ADDITIVE, no --delete)
+#   (f) ~/.codex/skills/source-command-leadv2/              (Codex leadv2 skill; enables provider=codex lead sessions)
 #
 # (c)/(d): reads project roots from ~/.claude/leadv2-shared/cross-repo-paths.yaml.
 # Missing root on disk → WARN + skip (never silent).
@@ -427,6 +428,23 @@ if [[ -d "${CANONICAL_ROOT}/.claude" ]]; then
   done < <(_direction_safety_excludes "warn" "leadv2-repo-vendored/scripts" "scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}" "${SYNC_HYGIENE_FILTERS[@]}")
   _rsync_or_dry "leadv2-repo-vendored/scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}" --recursive --delete "${SYNC_HYGIENE_FILTERS[@]}" "${_unsafe_excludes[@]}"
   changed_summary+=("leadv2-repo-vendored")
+fi
+
+# ── (g) Codex leadv2 skill — install so provider=codex lead sessions route ───
+# leadv2-session-route.sh requires a leadv2 skill file for Codex lead sessions;
+# without it provider=codex SILENTLY falls back to Claude. The plugin now SHIPS
+# the canonical skill under codex-skills/ so a fresh rollout enables Codex-lead
+# with NO hand-created artifact. Install it to the Codex user skills dir.
+# Additive per-skill dir (scoped to source-command-leadv2; never touches other
+# Codex skills). Idempotent.
+CODEX_SKILL_SRC="${PLUGIN_ROOT}/codex-skills/source-command-leadv2"
+CODEX_SKILL_DST="${HOME}/.codex/skills/source-command-leadv2"
+if [[ -d "${CODEX_SKILL_SRC}" ]]; then
+  log "Syncing -> Codex leadv2 skill (g): ${CODEX_SKILL_DST}"
+  _rsync_or_dry "codex-leadv2-skill" "${CODEX_SKILL_SRC}/" "${CODEX_SKILL_DST}" --recursive --delete
+  changed_summary+=("codex-skill")
+else
+  log "SKIP (g) Codex leadv2 skill: source ${CODEX_SKILL_SRC} absent"
 fi
 
 # ── (c)/(d) Per-project .claude/scripts + .claude/contracts ──────────────────
