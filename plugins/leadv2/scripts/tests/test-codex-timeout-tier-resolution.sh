@@ -27,6 +27,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODEX_TASK_SH="${SCRIPT_DIR}/../codex-task.sh"
@@ -36,7 +37,7 @@ log()  { printf -- '[TEST] %s\n' "$*"; }
 pass() { PASS=$((PASS + 1)); log "PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 
-FAKE_BIN_DIR="$(mktemp -d /tmp/ctt-test-XXXXXX)"
+FAKE_BIN_DIR="$(lv2_mktemp_dir "ctt-test")"
 cleanup() { rm -rf "$FAKE_BIN_DIR"; return 0; }
 trap cleanup EXIT
 

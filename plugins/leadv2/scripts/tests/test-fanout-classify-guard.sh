@@ -27,6 +27,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -41,7 +42,7 @@ fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 
 _new_sandbox() {
   local d
-  d="$(mktemp -d /tmp/fanoutcg-test-XXXXXX)"
+  d="$(lv2_mktemp_dir "fanoutcg-test")"
   mkdir -p "${d}/proj/docs/leadv2" "${d}/state"
   cat > "${d}/proj/docs/leadv2/active.yaml" <<'YAML'
 meta:

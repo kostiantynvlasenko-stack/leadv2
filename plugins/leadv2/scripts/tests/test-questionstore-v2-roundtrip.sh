@@ -17,6 +17,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASK_SH="${SCRIPT_DIR}/../leadv2-ask.sh"
@@ -27,7 +28,7 @@ log()  { printf -- '[TEST] %s\n' "$*"; }
 pass() { PASS=$((PASS + 1)); log "PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 
-TMP_DIR="$(mktemp -d /tmp/qsv2-test-XXXXXX)"
+TMP_DIR="$(lv2_mktemp_dir "qsv2-test")"
 STATE_ROOT="${TMP_DIR}/state"
 LINK_ROOT="${TMP_DIR}/link"
 mkdir -p "$STATE_ROOT" "$LINK_ROOT"

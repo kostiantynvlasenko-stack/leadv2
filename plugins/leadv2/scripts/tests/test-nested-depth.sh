@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/tests/test-nested-depth.sh -- hardened nested-spawn contract
-# (depth cap / write-role denylist / per-parent count), gated by
+# (depth cap / write-role denylist / per-task count), gated by
 # LEADV2_NESTED_DEPTH_GATE.
 #
 # Tests:
@@ -8,8 +8,8 @@
 #      sub-run) -> DENY route.subrun.depth_exceeded.
 #   2. Write-role denylist: nested spawn target is a write-capable role
 #      (e.g. developer) -> DENY route.subrun.write_role_denied.
-#   3. Per-parent count: 8 prior allow entries for the same caller already
-#      in the audit log -> 9th spawn DENY route.subrun.count_exceeded.
+#   3. Per-task count: 3 prior allow entries from mixed callers already
+#      in the task audit log -> next spawn DENY route.subrun.count_exceeded.
 #   4. Kill-switch: LEADV2_NESTED_DEPTH_GATE=0 -> depth-cap case from test 1
 #      is allowed again (pre-existing base_allowlist behavior).
 #
@@ -17,6 +17,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUARD_SH="${SCRIPT_DIR}/../../hooks/leadv2-routing-guard.sh"
@@ -29,7 +30,7 @@ log()  { printf -- '[TEST] %s\n' "$*"; }
 pass() { PASS=$((PASS + 1)); log "PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 
-_mktemp_dir() { mktemp -d /tmp/nested-depth-test-XXXXXX; }
+_mktemp_dir() { lv2_mktemp_dir "nested-depth-test"; }
 
 # Build fake hook input JSON: caller=$1, subagent_type=$2, model=$3, cwd=$4.
 _make_input() {
@@ -88,18 +89,20 @@ else
 fi
 rm -rf "$T2_DIR"
 
-# -- Test 3: per-parent count exceeded ---------------------------------------
+# -- Test 3: per-task count exceeded -----------------------------------------
 T3_DIR="$(_mktemp_dir)"
 mkdir -p "${T3_DIR}/.git"
-mkdir -p "${T3_DIR}/docs/leadv2"
-LOG3="${T3_DIR}/docs/leadv2/nested-spawns.log"
-for i in $(seq 1 8); do
-  printf -- '2026-07-21T00:00:0%dZ caller=developer target=explore model=haiku verdict=allow reason=policy_base\n' "$((i % 10))" >> "$LOG3"
-done
+TASK3="NESTED-CAP-01"
+mkdir -p "${T3_DIR}/docs/leadv2/tasks/${TASK3}"
+LOG3="${T3_DIR}/docs/leadv2/tasks/${TASK3}/nested-spawns.log"
+printf -- '%s\n' \
+  '2026-07-21T00:00:01Z caller=developer target=explore model=haiku verdict=allow reason=policy_base' \
+  '2026-07-21T00:00:02Z caller=architect target=explore model=haiku verdict=allow reason=policy_base' \
+  '2026-07-21T00:00:03Z caller=developer target=general-purpose model=sonnet verdict=allow reason=policy_base' > "$LOG3"
 INPUT3="$(_make_input "developer" "explore" "claude-haiku-4-5" "$T3_DIR")"
-RC3="$(_run_guard "$INPUT3")"
+RC3="$(_run_guard "$INPUT3" "LEADV2_TASK_ID=${TASK3}")"
 if [[ "$RC3" == "2" ]]; then
-  pass "T3: 9th sub-run denied at max_subruns_per_parent=8 (rc=2)"
+  pass "T3: 4th task-wide nested spawn denied at max_nested_per_task=3 (rc=2)"
 else
   fail "T3: expected rc=2, got rc=${RC3}"
 fi

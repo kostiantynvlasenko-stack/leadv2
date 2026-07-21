@@ -22,11 +22,12 @@
 # Quiet no-op outside a leadv2 repo (no docs/leadv2/) or when
 # LEADV2_AUTO_STATUS=0.
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/leadv2-temp.sh"
 trap 'exit 0' ERR
 
 CORE="/tmp/leadv2-astatus-core-v2.py"
 if [[ ! -f "$CORE" ]]; then
-  _CORE_TMP="$(mktemp /tmp/leadv2-astatus-core-XXXXXX.py 2>/dev/null || true)"
+  _CORE_TMP="$(lv2_mktemp_file "leadv2-astatus-core" "py" 2>/dev/null || true)"
   if [[ -n "$_CORE_TMP" ]]; then
     cat > "$_CORE_TMP" <<'PYCORE'
 import sys, json, os, re, datetime

@@ -17,6 +17,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGISTRY_SH="${SCRIPT_DIR}/../leadv2-active-registry.sh"
@@ -29,7 +30,7 @@ fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 test_1_failclosed_no_root() {
   log "Test 1: no LEADV2_PROJECT_ROOT/CLAUDE_PROJECT_DIR/PROJECT_ROOT, cwd not a git repo -> fail closed"
   local tmp_nogit out
-  tmp_nogit="$(mktemp -d /tmp/aregfc-nogit-XXXXXX)"
+  tmp_nogit="$(lv2_mktemp_dir "aregfc-nogit")"
   out="$(
     cd "$tmp_nogit" && env -u LEADV2_PROJECT_ROOT -u CLAUDE_PROJECT_DIR -u PROJECT_ROOT bash -c '
       source "'"$REGISTRY_SH"'"
@@ -49,7 +50,7 @@ test_1_failclosed_no_root() {
 test_2_root_resolves_and_registers() {
   log "Test 2: LEADV2_PROJECT_ROOT set -> sourcing succeeds, register() works"
   local sandbox out
-  sandbox="$(mktemp -d /tmp/aregfc-ok-XXXXXX)"
+  sandbox="$(lv2_mktemp_dir "aregfc-ok")"
   mkdir -p "${sandbox}/proj" "${sandbox}/state"
   out="$(
     LEADV2_PROJECT_ROOT="${sandbox}/proj" LEADV2_STATE_ROOT="${sandbox}/state" bash -c '

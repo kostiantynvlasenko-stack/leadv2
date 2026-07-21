@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 # leadv2-status.sh — Compact founder-facing status summary for /leadv2 daemon.
 #
 # Usage: leadv2-status.sh [--json]
@@ -335,7 +336,7 @@ fi
 # ── Cache mode (--cache): avg cache-hit rate last 24h ─────────────────────────
 if [[ "${CACHE_MODE:-0}" -eq 1 ]]; then
   printf '%b\n' "${CYAN}=== Cache-hit rate (last 24h) ===${NC}"
-  _CACHE_PY=$(mktemp /tmp/leadv2-cache-stat-XXXXXX.py)
+  _CACHE_PY=$(lv2_mktemp_file "leadv2-cache-stat" "py")
   # shellcheck disable=SC2064
   trap "rm -f '$_CACHE_PY'" RETURN
   python3 -c "

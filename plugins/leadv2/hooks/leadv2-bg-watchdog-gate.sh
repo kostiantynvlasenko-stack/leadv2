@@ -11,6 +11,7 @@
 # Non-blocking in all error paths: trap exits 0 on any failure.
 # Default-on: no opt-out. Monitor after every bg spawn is mandatory.
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/leadv2-temp.sh"
 trap 'exit 0' ERR  # lean: replaced below after _CHECKER_TMP assigned — upgrade when early-exit cleanup needed
 
 INPUT="$(python3 -c 'import sys; print(sys.stdin.read())' 2>/dev/null || true)"
@@ -47,7 +48,7 @@ LEDGER_FILE="/tmp/leadv2-bg-ledger/${SAFE_SID}.log"
 # M2 fix: write atomically via mktemp + mv -f to eliminate [[ ! -f ]] + write race.
 # Increment version suffix when logic inside the checker changes.
 CHECKER="/tmp/leadv2-wdgate-check-v2.py"
-_CHECKER_TMP="$(mktemp /tmp/leadv2-wdgate-XXXXXX.py)"
+_CHECKER_TMP="$(lv2_mktemp_file "leadv2-wdgate" "py")"
 # M-4: extend trap to clean temp file on both ERR and EXIT
 trap 'rm -f "${_CHECKER_TMP:-}"; exit 0' ERR EXIT
 python3 - "$_CHECKER_TMP" <<'WRITE_CHECKER'

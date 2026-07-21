@@ -27,6 +27,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PHASE8_SH="${SCRIPT_DIR}/../leadv2-phase8-close.sh"
@@ -183,7 +184,7 @@ test_4_scorecard_path() {
   local counter_file="${LEADV2_DIR}/.close-count-t4-${RUN_ID}"
   local trigger_file="${LEADV2_DIR}/.learn-trigger-t4-${RUN_ID}"
   local sc_file
-  sc_file=$(mktemp /tmp/sc-t4-XXXXXX.jsonl)
+  sc_file=$(lv2_mktemp_file "sc-t4" "jsonl")
   printf '{"task_id":"T1"}\n{"task_id":"T2"}\n{"task_id":"T3"}\n{"task_id":"T4"}\n{"task_id":"T5"}\n' > "$sc_file"
 
   _run_learn_counter_block "T4-A" 5 1 "$counter_file" "$sc_file" "$trigger_file"
@@ -223,8 +224,8 @@ test_6_durable_root_worktree() {
   fi
 
   local tmp_main tmp_wt
-  tmp_main="$(mktemp -d /tmp/mw-fix-main-XXXXXX)"
-  tmp_wt="$(mktemp -d /tmp/mw-fix-wt-XXXXXX)"
+  tmp_main="$(lv2_mktemp_dir "mw-fix-main")"
+  tmp_wt="$(lv2_mktemp_dir "mw-fix-wt")"
   rmdir "$tmp_wt"
 
   (
@@ -276,9 +277,9 @@ test_7_js_resolution_three_cwds() {
   fi
 
   local tmp_main tmp_wt tmp_unrelated
-  tmp_main="$(mktemp -d /tmp/mw-fix-jsmain-XXXXXX)"
-  tmp_wt="$(mktemp -d /tmp/mw-fix-jswt-XXXXXX)"
-  tmp_unrelated="$(mktemp -d /tmp/mw-fix-unrel-XXXXXX)"
+  tmp_main="$(lv2_mktemp_dir "mw-fix-jsmain")"
+  tmp_wt="$(lv2_mktemp_dir "mw-fix-jswt")"
+  tmp_unrelated="$(lv2_mktemp_dir "mw-fix-unrel")"
   rmdir "$tmp_wt"
 
   (

@@ -13,6 +13,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BANDIT_SH="${SCRIPT_DIR}/../leadv2-route-bandit.sh"
@@ -29,11 +30,11 @@ fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 _tmp_state() {
-  mktemp /tmp/bandit-state-XXXXXX.yaml
+  lv2_mktemp_file "bandit-state" "yaml"
 }
 
 _tmp_dir() {
-  mktemp -d /tmp/bandit-test-XXXXXX
+  lv2_mktemp_dir "bandit-test"
 }
 
 # ── Test 1: seeded priors → heuristic dominates at n=0 ───────────────────────

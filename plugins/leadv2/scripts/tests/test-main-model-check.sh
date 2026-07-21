@@ -2,9 +2,10 @@
 # Offline test for Opus selection and provider-owned quota fallback.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK="$TEST_DIR/../leadv2-main-model-check.sh"
-ROOT="$(mktemp -d /tmp/leadv2-main-model-test-XXXXXX)"
+ROOT="$(lv2_mktemp_dir "leadv2-main-model-test")"
 trap 'rm -rf "$ROOT"' EXIT
 PASS=0; FAIL=0
 pass() { PASS=$((PASS + 1)); printf -- '[TEST] PASS: %s\n' "$1"; }

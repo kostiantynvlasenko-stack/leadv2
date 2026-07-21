@@ -19,6 +19,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -48,8 +49,8 @@ trap cleanup EXIT
 _new_fixture() {
   # Creates one isolated repo+state root pair. Prints "<repo> <state>".
   local repo state
-  repo="$(mktemp -d /tmp/sv2-repo-XXXXXX)"
-  state="$(mktemp -d /tmp/sv2-state-XXXXXX)"
+  repo="$(lv2_mktemp_dir "sv2-repo")"
+  state="$(lv2_mktemp_dir "sv2-state")"
   CLEANUP_DIRS+=("$repo" "$state")
   (cd "$repo" && git init -q)
   mkdir -p "$repo/docs/leadv2" "$repo/docs/handoff"

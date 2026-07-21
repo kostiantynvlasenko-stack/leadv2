@@ -11,6 +11,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BANDIT_SH="${SCRIPT_DIR}/../leadv2-route-bandit.sh"
@@ -19,7 +20,7 @@ PASS=0; FAIL=0; ERRORS=()
 log()  { printf -- '[TEST] %s\n' "$*"; }
 pass() { PASS=$((PASS + 1)); log "PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
-_tmp_dir() { mktemp -d /tmp/bsr-test-XXXXXX; }
+_tmp_dir() { lv2_mktemp_dir "bsr-test"; }
 
 # ── Test 1: update resolves state file under LEADV2_PROJECT_ROOT ──────────────
 

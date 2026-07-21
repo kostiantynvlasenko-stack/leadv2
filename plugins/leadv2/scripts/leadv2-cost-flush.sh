@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 # leadv2-cost-flush.sh — post-hoc cost recorder for async subsessions.
 # W6-fix: when claude-subsession.sh runs in async mode (no --wait), the inline
 # cost-recorder subshell may not fire if the parent process exits first.
@@ -56,7 +57,7 @@ flush_marker() {
   log "flushing cost for $role/$model session=$session_id"
 
   local py_helper
-  py_helper=$(mktemp /tmp/cost-flush-XXXXXX.py)
+  py_helper=$(lv2_mktemp_file "cost-flush" "py")
   # shellcheck disable=SC2064
   trap "rm -f '$py_helper'" RETURN
 

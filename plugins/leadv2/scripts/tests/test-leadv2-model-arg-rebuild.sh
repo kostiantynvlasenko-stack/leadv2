@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 # tests/test-leadv2-model-arg-rebuild.sh — Integration test for the T8
 # latent-bug fix in claude-subsession.sh (formerly
 # test-leadv2-cooldown-recovery.sh — renamed after the SPLIT decision; T8b
@@ -54,7 +55,7 @@ fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 # deterministic routing.yaml decision).
 
 _it_fixture_root() {
-  local root; root="$(mktemp -d /tmp/subsession-it-XXXXXX)"
+  local root; root="$(lv2_mktemp_dir "subsession-it")"
   mkdir -p "$root/.claude/ref" "$root/.claude/agents"
   cat > "$root/.claude/ref/leadv2-routing.yaml" <<'YAML'
 phases:
@@ -95,7 +96,7 @@ _it_run_subsession() {
   mkdir -p "$root/docs/handoff/$task_id"
   printf '%s' "$costs_content" > "$root/docs/handoff/$task_id/costs.yaml"
 
-  local capture; capture="$(mktemp /tmp/subsession-it-capture-XXXXXX)"
+  local capture; capture="$(lv2_mktemp_file "subsession-it-capture" "tmp")"
 
   (
     set +e

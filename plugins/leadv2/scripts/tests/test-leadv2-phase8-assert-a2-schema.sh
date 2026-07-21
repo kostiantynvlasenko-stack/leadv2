@@ -18,6 +18,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -30,7 +31,7 @@ pass() { PASS=$((PASS + 1)); log "PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 
 RUN_ID="a2-$$-$(date +%s)"
-TMPDIR_ROOT="$(mktemp -d "/tmp/${RUN_ID}-XXXXXX")"
+TMPDIR_ROOT="$(lv2_mktemp_dir "${RUN_ID}")"
 trap 'rm -rf "$TMPDIR_ROOT"' EXIT
 
 # ── Extract the A2 python block verbatim from the live script ───────────────

@@ -3,10 +3,11 @@
 # to the common provider-neutral fanout and honor shared daily caps.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPAWNER="$TEST_DIR/../leadv2-session-spawner.sh"
-ROOT="$(mktemp -d /tmp/leadv2-spawner-test-XXXXXX)"
+ROOT="$(lv2_mktemp_dir "leadv2-spawner-test")"
 trap 'rm -rf "$ROOT"' EXIT
 PASS=0
 FAIL=0

@@ -19,6 +19,7 @@
 # Run: bash scripts/tests/test-quota-glm-filter.sh
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUOTA_SH="${SCRIPT_DIR}/../leadv2-quota-status.sh"
 
@@ -27,7 +28,7 @@ log()  { printf -- '[TEST] %s\n' "$*"; }
 pass() { PASS=$((PASS+1)); log "PASS: $1"; }
 fail() { FAIL=$((FAIL+1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 
-TMP="$(mktemp -d /tmp/quota-glm-XXXXXX)"
+TMP="$(lv2_mktemp_dir "quota-glm")"
 DB="$TMP/test.db"
 CFG="$TMP/ref.yaml"
 trap 'rm -rf "$TMP"' EXIT

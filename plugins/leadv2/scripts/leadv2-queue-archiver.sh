@@ -5,6 +5,7 @@
 #
 # Lock: docs/leadv2/.archiver-last-run — skips if already ran today.
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/../../" && pwd)}"
@@ -113,7 +114,7 @@ mkdir -p "$ARCHIVE_DIR"
 } >> "$ARCHIVE_FILE"
 
 # Remove archived lines from QUEUE.md (temp-file rewrite)
-TMPFILE=$(mktemp /tmp/queue-archiver-XXXXXX.md)
+TMPFILE=$(lv2_mktemp_file "queue-archiver" "md")
 trap 'rm -f "$TMPFILE"' EXIT
 
 while IFS= read -r line; do

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 # claude-subsession.sh — spawn isolated Claude CLI headless session with a preset role.
 # Part of /leadv2 orchestrator. Zero /lead token overlap: separate conversation, own session-id.
 #
@@ -340,7 +341,7 @@ parse_and_record_cost() {
   # Extract token totals from stream-json usage events via python3.
   # Write the helper to a temp file (avoids heredoc-inside-$() shellcheck SC1073).
   local py_helper
-  py_helper=$(mktemp /tmp/subsession-cost-XXXXXX.py)
+  py_helper=$(lv2_mktemp_file "subsession-cost" "py")
   # shellcheck disable=SC2064
   trap "rm -f '$py_helper'" RETURN
 

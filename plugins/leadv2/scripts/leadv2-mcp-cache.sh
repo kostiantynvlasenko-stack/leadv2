@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 # leadv2-mcp-cache.sh — MCP call result cache for /leadv2 subagents.
 # Prevents redundant codebase-memory-mcp calls across subagents within a task.
 #
@@ -114,11 +115,12 @@ cmd_set() {
 
   local cache_file="${cache_dir}/${tool}-${args_hash}.yaml"
   local tmp_file
-  tmp_file=$(mktemp "${cache_dir}/.tmp-XXXXXX.yaml")
+  tmp_file=$(lv2_mktemp_file "mcp-cache" "yaml")
 
   # Atomic write: write to tmp, then mv
   cp "$payload_file" "$tmp_file"
   mv "$tmp_file" "$cache_file"
+  rmdir "$(dirname "$tmp_file")" 2>/dev/null || true
 
   log "SET: ${tool}-${args_hash} → $cache_file"
   exit 0

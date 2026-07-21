@@ -25,6 +25,7 @@
 #   See .claude/skills/leadv2-premortem/SKILL.md#calibration-note
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
@@ -101,7 +102,7 @@ log "Running pre-mortem for task=$TASK_ID phase=$PHASE"
 # ---------------------------------------------------------------------------
 _cleanup_tmps=()
 trap 'rm -f "${_cleanup_tmps[@]}"' EXIT
-PY_TMP=$(mktemp /tmp/leadv2-premortem-XXXXXX.py)
+PY_TMP=$(lv2_mktemp_file "leadv2-premortem" "py")
 _cleanup_tmps+=("$PY_TMP")
 
 python3 -c "import sys; print(open(sys.argv[1]).read())" /dev/stdin > "$PY_TMP" 2>/dev/null <<'PYEOF'
@@ -373,11 +374,11 @@ sys.stdout.write(_yaml_buf.getvalue())
 PYEOF
 
 # STATUS_FILE side-channel: verdict/success_prob written here, stdout stays pure YAML
-STATUS_FILE=$(mktemp /tmp/leadv2-premortem-status-XXXXXX)
+STATUS_FILE=$(lv2_mktemp_file "leadv2-premortem-status" "tmp")
 _cleanup_tmps+=("$STATUS_FILE")
 
 # Run the python helper — stdout is pure YAML, stderr forwarded to log
-_py_stderr_tmp=$(mktemp /tmp/leadv2-premortem-err-XXXXXX)
+_py_stderr_tmp=$(lv2_mktemp_file "leadv2-premortem-err" "tmp")
 _cleanup_tmps+=("$_py_stderr_tmp")
 yaml_content=$(python3 "$PY_TMP" \
   "$TASK_ID" "$PHASE" "$HANDOFF_DIR" 2>"$_py_stderr_tmp") || {
@@ -388,7 +389,7 @@ yaml_content=$(python3 "$PY_TMP" \
 
 # Extract verdict/success_prob from captured YAML via side-channel
 # Use a temp Python script file to avoid heredoc+pipe stdin conflict
-STATUSPY_TMP=$(mktemp /tmp/leadv2-premortem-statuspy-XXXXXX.py)
+STATUSPY_TMP=$(lv2_mktemp_file "leadv2-premortem-statuspy" "py")
 _cleanup_tmps+=("$STATUSPY_TMP")
 cat > "$STATUSPY_TMP" <<'STATUSPY'
 import sys, yaml
@@ -401,7 +402,7 @@ success_prob = float(prob.get("success", 0.0))
 with open(sys.argv[2], "w") as fh:
     fh.write(f"verdict={verdict}\nsuccess_prob={success_prob:.3f}\n")
 STATUSPY
-YAML_TMP=$(mktemp /tmp/leadv2-premortem-yaml-XXXXXX.yaml)
+YAML_TMP=$(lv2_mktemp_file "leadv2-premortem-yaml" "yaml")
 _cleanup_tmps+=("$YAML_TMP")
 printf '%s\n' "$yaml_content" > "$YAML_TMP"
 python3 "$STATUSPY_TMP" "$YAML_TMP" "$STATUS_FILE"

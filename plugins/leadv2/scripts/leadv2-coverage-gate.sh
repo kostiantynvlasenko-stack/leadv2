@@ -3,6 +3,7 @@
 # Usage: leadv2-coverage-gate.sh --start-sha <sha> --task-id <id> [--threshold <n>]
 # Exit: 0 = passed, 1 = failed (coverage below threshold), 2 = error
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -96,7 +97,7 @@ if [[ -z "$OUTPUT_DIR" ]]; then
 fi
 mkdir -p "$OUTPUT_DIR"
 COVERAGE_YAML="${OUTPUT_DIR}/coverage.yaml"
-COVERAGE_JSON_TMP="$(mktemp /tmp/leadv2-coverage-XXXXXX.json)"
+COVERAGE_JSON_TMP="$(lv2_mktemp_file "leadv2-coverage" "json")"
 
 # shellcheck disable=SC2329
 cleanup() {

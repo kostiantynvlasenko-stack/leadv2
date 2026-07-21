@@ -14,6 +14,7 @@
 # Exit codes: 0 — ok, 1 — parse error, no change to output file.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -43,7 +44,7 @@ done
 mkdir -p "$(dirname "$OUT_FILE")"
 
 # Build combined input: current state + history (if present)
-COMBINED_INPUT=$(mktemp /tmp/leadv2-agent-stats-input-XXXXXX.md)
+COMBINED_INPUT=$(lv2_mktemp_file "leadv2-agent-stats-input" "md")
 trap 'rm -f "$COMBINED_INPUT"' EXIT
 
 {
@@ -67,7 +68,7 @@ fi
 #
 # We extract per-task records and accumulate per (agent, change_kind) buckets.
 # ---------------------------------------------------------------------------
-PY_HELPER=$(mktemp /tmp/leadv2-agent-stats-XXXXXX.py)
+PY_HELPER=$(lv2_mktemp_file "leadv2-agent-stats" "py")
 trap 'rm -f "$COMBINED_INPUT" "$PY_HELPER"' EXIT
 
 python3 -c "import sys; print(open(sys.argv[1]).read())" /dev/stdin > "$PY_HELPER" <<'PYEOF'

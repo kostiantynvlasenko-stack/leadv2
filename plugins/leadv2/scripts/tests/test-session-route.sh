@@ -3,13 +3,14 @@
 # stubbed; this suite never calls a real model or consumes subscription quota.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROUTER="${SCRIPT_DIR}/../leadv2-session-route.sh"
 PASS=0
 FAIL=0
 ERRORS=()
-SANDBOX="$(mktemp -d /tmp/leadv2-route-test-XXXXXX)"
+SANDBOX="$(lv2_mktemp_dir "leadv2-route-test")"
 trap 'rm -rf "$SANDBOX"' EXIT
 
 pass() { PASS=$((PASS + 1)); printf -- '[TEST] PASS: %s\n' "$1"; }

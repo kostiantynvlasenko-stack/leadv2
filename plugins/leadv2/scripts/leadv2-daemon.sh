@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 _LV2_D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # leadv2-daemon.sh — long-running daemon for Phase 4 autonomous operation.
 # Polls task queue, spawns /leadv2 next per item.
@@ -703,7 +704,7 @@ PY
     done
   fi
 
-  local tmpdir; tmpdir=$(mktemp -d /tmp/leadv2-batch-XXXXXX)
+  local tmpdir; tmpdir=$(lv2_mktemp_dir "leadv2-batch")
   local pids=()
 
   for i in "${!batch_lines[@]}"; do

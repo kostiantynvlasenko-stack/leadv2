@@ -11,12 +11,12 @@
 # (Explore|general-purpose with haiku|sonnet, max_per_task: 3).
 #
 # HARDENED CONTRACT (leadv2-routing-guard.sh, behind LEADV2_NESTED_DEPTH_GATE,
-# default ON): max_depth caps nesting to one level; max_subruns_per_parent
-# caps total sub-runs per caller (counted from the audit log); tool_class
+# default ON): max_depth caps nesting to one level; max_nested_per_task
+# caps total nested sub-runs per task (counted from the task audit log); tool_class
 # documents that nested spawns are read/plan/probe only -- write-capable
 # roles are hard-denied regardless of this file's contents.
 max_depth: 1
-max_subruns_per_parent: 8
+max_nested_per_task: 3
 tool_class: read_only
 
 base_allowlist:

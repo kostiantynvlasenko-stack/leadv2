@@ -150,7 +150,8 @@ while (( attempt < MAX_ATTEMPTS )); do
   if [[ -z "$THREAD_ID" ]]; then
     prompt="Use the available leadv2 skill (source-command-leadv2 or plugin leadv2) and run task ${TASK_ID} as a headless child. Drive the full lifecycle through plan, build, adversarial review, deploy gate, live verification, and close. Reuse the existing leadv2 scripts and guards; never bypass a safety, merge, deploy, or phase gate. All founder questions must use .claude/scripts/leadv2-ask.sh because LEADV2_ASYNC_QUESTIONS=1. Stop only after docs/handoff/${TASK_ID}/phase8-passed.flag or its validated shared completion receipt exists, or a circuit breaker requires the supervising founder."
     cmd=("$CODEX_BIN" exec --json --model "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"" -C "$PROJECT_ROOT")
-    if [[ "${LEADV2_CODEX_BYPASS_APPROVALS:-1}" == "1" ]]; then
+    if [[ "${LEADV2_UNSAFE_AUTOPILOT:-0}" == "1" ]]; then
+      log "UNSAFE_AUTOPILOT receipt: full Codex approval and sandbox bypass enabled"
       cmd+=(--dangerously-bypass-approvals-and-sandbox)
     else
       cmd+=(--sandbox workspace-write)
@@ -161,7 +162,12 @@ while (( attempt < MAX_ATTEMPTS )); do
   else
     prompt="Continue leadv2 task ${TASK_ID} from its current phase. Re-check every sentinel and provider receipt before repeating any side effect. Drive it to canonical Phase-8 completion proof; route any founder decision through leadv2-ask.sh."
     cmd=("$CODEX_BIN" exec resume --json --model "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"")
-    [[ "${LEADV2_CODEX_BYPASS_APPROVALS:-1}" == "1" ]] && cmd+=(--dangerously-bypass-approvals-and-sandbox)
+    if [[ "${LEADV2_UNSAFE_AUTOPILOT:-0}" == "1" ]]; then
+      log "UNSAFE_AUTOPILOT receipt: full Codex approval and sandbox bypass enabled"
+      cmd+=(--dangerously-bypass-approvals-and-sandbox)
+    else
+      cmd+=(--sandbox workspace-write)
+    fi
     [[ "${LEADV2_CODEX_BYPASS_HOOK_TRUST:-0}" == "1" ]] && cmd+=(--dangerously-bypass-hook-trust)
     cmd+=("$THREAD_ID" "$prompt")
     _mode="resume"

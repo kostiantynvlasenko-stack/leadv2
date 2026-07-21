@@ -25,13 +25,14 @@
 #
 # Contract: fail-open always. Any error -> exit 0, empty stdout. <200ms.
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/leadv2-temp.sh"
 trap 'exit 0' ERR
 
 ORPHAN_MAX="${LEADV2_BG_ORPHAN_MAX:-3}"
 
 CORE="/tmp/leadv2-bwe-core-v5.py"
 if [[ ! -f "$CORE" ]]; then
-  _CORE_TMP="$(mktemp /tmp/leadv2-bwe-core-XXXXXX.py 2>/dev/null || true)"
+  _CORE_TMP="$(lv2_mktemp_file "leadv2-bwe-core" "py" 2>/dev/null || true)"
   if [[ -n "$_CORE_TMP" ]]; then
     cat > "$_CORE_TMP" <<'PYCORE'
 import sys, json, re, time, os, glob

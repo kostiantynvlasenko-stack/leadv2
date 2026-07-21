@@ -16,6 +16,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUPERVISE_SH="${SCRIPT_DIR}/../leadv2-supervise.sh"
@@ -39,7 +40,7 @@ trap cleanup EXIT
 
 _tmp_dir() {
   local d
-  d="$(mktemp -d /tmp/svfc-test-XXXXXX)"
+  d="$(lv2_mktemp_dir "svfc-test")"
   CLEANUP_DIRS+=("$d")
   printf -- '%s' "$d"
 }

@@ -11,6 +11,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUARD_SH="${SCRIPT_DIR}/../../hooks/leadv2-routing-guard.sh"
@@ -25,7 +26,7 @@ log()  { printf -- '[TEST] %s\n' "$*"; }
 pass() { PASS=$((PASS + 1)); log "PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 
-_mktemp_dir() { mktemp -d /tmp/nested-count-test-XXXXXX; }
+_mktemp_dir() { lv2_mktemp_dir "nested-count-test"; }
 
 # Build minimal fake hook input JSON for a subagent (caller has agent_type).
 # Spawns a general-purpose/haiku agent (policy ALLOW).

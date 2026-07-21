@@ -34,11 +34,12 @@
 # line-parser without it), zero network, target <400ms.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/leadv2-temp.sh"
 trap 'exit 0' ERR
 
 # ── capture the hook's real stdin (JSON payload) before any heredoc can ─────
 # consume it (heredocs piped into `python3 -` would otherwise steal stdin).
-TMPFILE="$(mktemp /tmp/pe-compact-freeze-XXXXXX.json)" || exit 0
+TMPFILE="$(lv2_mktemp_file "pe-compact-freeze" "json")" || exit 0
 trap 'rm -f "${TMPFILE:-}"' EXIT
 trap 'rm -f "${TMPFILE:-}"; exit 0' ERR
 python3 -c "import sys; open('$TMPFILE','w').write(sys.stdin.read())" 2>/dev/null || exit 0

@@ -19,6 +19,7 @@
 # Exit 0 = all pass; non-zero = failures found.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGISTRY_SH="${SCRIPT_DIR}/../leadv2-active-registry.sh"
@@ -33,7 +34,7 @@ TASK_ID="ARUP-T1"
 _new_sandbox() {
   # Each test gets its own isolated project+state root so runs don't interfere.
   local d
-  d="$(mktemp -d /tmp/arup-test-XXXXXX)"
+  d="$(lv2_mktemp_dir "arup-test")"
   mkdir -p "${d}/proj" "${d}/state"
   printf -- '%s' "$d"
 }

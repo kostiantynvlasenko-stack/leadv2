@@ -12,6 +12,7 @@
 # Disable flag: LEADV2_WIKI_INJECT=0 (default) — no-op unless set to 1.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 
 readonly WIKI_DB="${HOME}/.claude/leadv2-wiki/wiki.db"
 readonly MAX_CHARS=3200   # 800 tokens * ~4 chars/token
@@ -31,7 +32,7 @@ if [[ ! -f "$WIKI_DB" ]]; then
 fi
 
 # ── read hook payload via temp file (avoids heredoc quoting issues) ───────────
-TMPFILE=$(mktemp /tmp/wiki-query-XXXXXX.json)
+TMPFILE=$(lv2_mktemp_file "wiki-query" "json")
 trap 'rm -f "$TMPFILE"' EXIT
 
 python3 -c "import sys; open('$TMPFILE','w').write(sys.stdin.read())"

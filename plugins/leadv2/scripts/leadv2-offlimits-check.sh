@@ -10,6 +10,7 @@
 #
 # Writes YAML diagnostics to stderr.
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -125,7 +126,7 @@ printf -- '%s\n' "$OFF_LIMITS_LIST" | while read -r entry; do log_info "  $entry
 # Python helper script (stdlib only: ast, json, pathlib)
 # Written to a temp file to avoid heredoc stdin conflicts
 # ---------------------------------------------------------------------------
-PY_HELPER="$(mktemp /tmp/leadv2-offlimits-XXXXXX.py)"
+PY_HELPER="$(lv2_mktemp_file "leadv2-offlimits" "py")"
 
 # shellcheck disable=SC2329
 cleanup() { rm -f "$PY_HELPER"; }

@@ -15,6 +15,7 @@
 #   2  Error — bad arguments, missing files, Python import failure
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 
 # ── Constants ───────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,7 +83,7 @@ fi
 log_info "Checking trajectory: task=${TASK_ID} class=${TASK_CLASS}"
 log_info "Handoff dir: ${HANDOFF_DIR}"
 
-RESULT_FILE="$(mktemp /tmp/trajectory-check-XXXXXX.json)"
+RESULT_FILE="$(lv2_mktemp_file "trajectory-check" "json")"
 trap 'rm -f "${RESULT_FILE}"' EXIT
 
 # Run the module from repo root so relative imports resolve correctly.

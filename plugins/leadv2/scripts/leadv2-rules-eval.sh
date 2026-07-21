@@ -32,6 +32,7 @@
 #   4 = quality_engine disabled or missing (no-op)
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 
 # shellcheck source=./leadv2-helpers.sh
 source "$(dirname "$(readlink -f "$0")")/leadv2-helpers.sh"
@@ -116,7 +117,7 @@ fi
 # ── build diff context ────────────────────────────────────────────────────────
 # If no diff file provided, attempt to generate one from git
 if [[ -z "$DIFF_FILE" ]]; then
-  DIFF_TMPFILE=$(mktemp /tmp/leadv2-rules-eval-diff-XXXXXX.txt)
+  DIFF_TMPFILE=$(lv2_mktemp_file "leadv2-rules-eval-diff" "txt")
   trap 'rm -f "$DIFF_TMPFILE"' EXIT
   cd "$LEADV2_PROJECT_ROOT"
   git diff HEAD 2>/dev/null > "$DIFF_TMPFILE" || true

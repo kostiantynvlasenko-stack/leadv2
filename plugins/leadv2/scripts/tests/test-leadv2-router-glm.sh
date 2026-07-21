@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 # tests/test-leadv2-router-glm.sh — ROUTER-HAS-NO-GLM-ARM-01 (fix-round-2).
 # Covers docs/handoff/ROUTER-HAS-NO-GLM-ARM-01/critic-review.md findings 1-6:
 #   glm default arm, all 5 glm_policy sonnet_exceptions (incl. the H5
@@ -31,7 +32,7 @@ fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 
 # ── fixture ──────────────────────────────────────────────────────────────────
 _fixture_root() {
-  local root; root="$(mktemp -d /tmp/router-glm-XXXXXX)"
+  local root; root="$(lv2_mktemp_dir "router-glm")"
   mkdir -p "$root/.claude/ref"
   cat > "$root/.claude/ref/leadv2-routing.yaml" <<'YAML'
 phases:
@@ -290,7 +291,7 @@ test_t15_h6_glm_quotes_preserved() {
 # is the one test that keeps stderr and asserts it is free of that noise.
 test_t16_stderr_clean() {
   local root; root="$(_fixture_root)"
-  local err; err="$(mktemp /tmp/router-glm-stderr-XXXXXX)"
+  local err; err="$(lv2_mktemp_file "router-glm-stderr" "tmp")"
   env -i PATH="$PATH" PROJECT_ROOT="$root" \
     bash "$ROUTER_SH" --phase build --step single_file --class Standard --signals '{}' \
     >/dev/null 2>"$err"

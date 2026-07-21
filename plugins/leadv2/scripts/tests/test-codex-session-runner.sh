@@ -3,6 +3,7 @@
 # No network/model call is made. The stub emits real Codex JSONL event shapes.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -11,7 +12,7 @@ REGISTRY="$SCRIPTS_ROOT/leadv2-active-registry.sh"
 PASS=0
 FAIL=0
 ERRORS=()
-ROOT="$(mktemp -d /tmp/leadv2-codex-runner-test-XXXXXX)"
+ROOT="$(lv2_mktemp_dir "leadv2-codex-runner-test")"
 trap 'rm -rf "$ROOT"' EXIT
 
 pass() { PASS=$((PASS + 1)); printf -- '[TEST] PASS: %s\n' "$1"; }

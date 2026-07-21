@@ -36,6 +36,7 @@
 # DECISIONS: D1 D3 D4 D5 D6 D7 D10; R4 flock; R8 snapshot; R9 risk_level
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)}}}"
@@ -589,7 +590,7 @@ PYEOF
     fi
 
     # Apply diff_patch
-    PATCH_TMP="$(mktemp /tmp/shadow-patch-XXXXXX.diff)"
+    PATCH_TMP="$(lv2_mktemp_file "shadow-patch" "diff")"
     printf -- '%s\n' "$PROP_PATCH" > "$PATCH_TMP"
 
     PATCH_OK=0

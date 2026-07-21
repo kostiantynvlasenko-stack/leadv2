@@ -3,6 +3,7 @@
 # No provider, network, or model call is made.
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "$TEST_DIR/../.." && pwd)"
@@ -14,7 +15,7 @@ TOOL_COUNTER="$PLUGIN_ROOT/hooks/leadv2-tool-counter.sh"
 HARDBANS_REINJECT="$PLUGIN_ROOT/hooks/leadv2-hardbans-reinject.sh"
 PASS=0
 FAIL=0
-ROOT="$(mktemp -d /tmp/leadv2-hook-isolation-XXXXXX)"
+ROOT="$(lv2_mktemp_dir "leadv2-hook-isolation")"
 BG_PID=""
 SESSION_ID="hook-isolation-$$"
 TASK_ID="HOOK-ISOLATION-01"

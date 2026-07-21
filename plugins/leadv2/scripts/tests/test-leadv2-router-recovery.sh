@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 # tests/test-leadv2-router-recovery.sh — T8b ROUTING-TIER-RECOVERY-REDESIGN.
 # Covers docs/handoff/ROUTING-TIER-RECOVERY-REDESIGN/design.md §6 T1-T12.
 #
@@ -32,7 +33,7 @@ fail() { FAIL=$((FAIL + 1)); ERRORS+=("FAIL: $1"); log "FAIL: $1"; }
 
 # ── fixture helpers ──────────────────────────────────────────────────────────
 _fixture_root() {
-  local root; root="$(mktemp -d /tmp/router-recovery-XXXXXX)"
+  local root; root="$(lv2_mktemp_dir "router-recovery")"
   mkdir -p "$root/.claude/ref"
   cat > "$root/.claude/ref/leadv2-routing.yaml" <<'YAML'
 phases:
@@ -245,7 +246,7 @@ model: sonnet
 recovery-test developer role body.
 ROLEEOF
   printf 'mission body\n' > "$root/mission.md"
-  local capture; capture="$(mktemp /tmp/router-recovery-capture-XXXXXX)"
+  local capture; capture="$(lv2_mktemp_file "router-recovery-capture" "tmp")"
   (
     set +e
     export PROJECT_ROOT="$root"
@@ -477,7 +478,7 @@ model: sonnet
 recovery-test developer role body.
 ROLEEOF
   printf 'mission body\n' > "$root/mission.md"
-  local capture; capture="$(mktemp /tmp/router-recovery-capture-XXXXXX)"
+  local capture; capture="$(lv2_mktemp_file "router-recovery-capture" "tmp")"
   (
     set +e
     export PROJECT_ROOT="$root"
@@ -589,7 +590,7 @@ recovery-test developer role body.
 ROLEEOF
   printf 'mission body
 ' > "$root/mission.md"
-  local capture; capture="$(mktemp /tmp/router-recovery-capture-XXXXXX)"
+  local capture; capture="$(lv2_mktemp_file "router-recovery-capture" "tmp")"
   (
     set +e
     export PROJECT_ROOT="$root"

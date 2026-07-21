@@ -24,6 +24,7 @@
 #   2 = hard cost ceiling hit — caller should treat as go-with-caveats and log
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
@@ -115,7 +116,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 1: Assemble deploy packet via Python helper
 # ---------------------------------------------------------------------------
-PY_TMP=$(mktemp /tmp/leadv2-judge-packet-XXXXXX.py)
+PY_TMP=$(lv2_mktemp_file "leadv2-judge-packet" "py")
 trap 'rm -f "$PY_TMP" "$PACKET_FILE"' EXIT
 
 python3 -c "import sys; print(open(sys.argv[1]).read())" /dev/stdin > "$PY_TMP" 2>/dev/null <<'PYEOF'

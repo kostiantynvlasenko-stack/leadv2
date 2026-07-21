@@ -39,6 +39,7 @@ validate_plugin() {
 }
 
 run_check "all plugin shell syntax" syntax_all
+run_check "portable temp helper stress" bash "$TEST_DIR/test-leadv2-temp-stress.sh"
 run_check "Claude plugin manifest/components" validate_plugin
 run_check "provider/model router" bash "$TEST_DIR/test-session-route.sh"
 run_check "Codex full-cycle runner" bash "$TEST_DIR/test-codex-session-runner.sh"

@@ -22,6 +22,7 @@
 #   2 — routing.yaml missing (caller should fall back to class-based routing)
 
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -82,7 +83,7 @@ fi
 # the SAME literal filename on every call and concurrent callers collide
 # (`mkstemp failed ... File exists`). Fix: mktemp with a trailing-X template
 # (portable on BSD + GNU), then rename to add the .py suffix.
-PY_HELPER_BASE=$(mktemp /tmp/leadv2-router-XXXXXX) || {
+PY_HELPER_BASE=$(lv2_mktemp_file "leadv2-router" "tmp") || {
   log_error "mktemp failed to create PY_HELPER_BASE — cannot proceed"
   exit 1
 }
