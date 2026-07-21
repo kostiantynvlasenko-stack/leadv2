@@ -441,7 +441,10 @@ CODEX_SKILL_SRC="${PLUGIN_ROOT}/codex-skills/source-command-leadv2"
 CODEX_SKILL_DST="${HOME}/.codex/skills/source-command-leadv2"
 if [[ -d "${CODEX_SKILL_SRC}" ]]; then
   log "Syncing -> Codex leadv2 skill (g): ${CODEX_SKILL_DST}"
-  _rsync_or_dry "codex-leadv2-skill" "${CODEX_SKILL_SRC}/" "${CODEX_SKILL_DST}" --recursive --delete
+  # No --delete: the skill dir only ever holds SKILL.md (nothing to prune), and
+  # --delete could follow a symlinked dst and remove unrelated Codex skills (Codex
+  # review HIGH). Additive copy is sufficient and symlink-safe.
+  _rsync_or_dry "codex-leadv2-skill" "${CODEX_SKILL_SRC}/" "${CODEX_SKILL_DST}" --recursive
   changed_summary+=("codex-skill")
 else
   log "SKIP (g) Codex leadv2 skill: source ${CODEX_SKILL_SRC} absent"
