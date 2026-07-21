@@ -138,6 +138,10 @@ for l in sys.stdin:
 # WITH quarantine is the only mode that both clears drift and loses nothing.
 _QUARANTINE_ROOT="${LEADV2_QUARANTINE_ROOT:-${HOME}/.claude/leadv2-quarantine}"
 _DIRECTION_SAFETY_CHECK="${SCRIPT_DIR}/leadv2-direction-safety-check.py"
+# Runtime/compiler debris is never a plugin artifact. Keep it out of both the
+# safety scan and rsync input so a local test run cannot manufacture drift or
+# trigger pointless quarantine of .pyc files.
+SYNC_HYGIENE_FILTERS=(--exclude='__pycache__/' --exclude='*.pyc' --exclude='.DS_Store')
 
 # _quarantine_copy — preserve a target file's CURRENT content to a timestamped
 # quarantine dir BEFORE rsync overwrites it (quarantine-then-reconcile).
@@ -191,12 +195,16 @@ _direction_safety_excludes() {
         # Quarantine-then-reconcile — see MODE doc above. Emit nothing so the
         # caller's rsync still overwrites (reconcile); the quarantine copy is
         # the safety net plain-warn mode lacked.
-        local qpath
-        qpath="$(_quarantine_copy "${dst_file}" "${copy_name}" "${relpath}")" || qpath=""
-        if [[ -n "${qpath}" ]]; then
-          log_warn "DIRECTION-SAFETY (warn+quarantine): ${dst_file} content not reachable in canonical's git history for ${canonical_relpath} (possible un-landed fix). Canonical is the pinned source of truth (SOURCE-PIN + CACHE-REFUSAL) — OVERWRITING this copy to reconcile (guard stays satisfiable). ORIGINAL CONTENT PRESERVED at: ${qpath} — if this was a real fix: cp it into canonical (${canonical_relpath}) and re-sync."
+        if [[ "${DRY_RUN}" == "true" ]]; then
+          log_warn "DRY_RUN DIRECTION-SAFETY (would quarantine+reconcile): ${dst_file} content is not reachable in canonical history for ${canonical_relpath}. No quarantine or target write performed."
         else
-          log_warn "DIRECTION-SAFETY (warn): ${dst_file} content not reachable in canonical history; quarantine unavailable but reconcile proceeds (guard satisfiability takes priority — content may be lost; investigate)."
+          local qpath
+          qpath="$(_quarantine_copy "${dst_file}" "${copy_name}" "${relpath}")" || qpath=""
+          if [[ -n "${qpath}" ]]; then
+            log_warn "DIRECTION-SAFETY (warn+quarantine): ${dst_file} content not reachable in canonical's git history for ${canonical_relpath} (possible un-landed fix). Canonical is the pinned source of truth (SOURCE-PIN + CACHE-REFUSAL) — OVERWRITING this copy to reconcile (guard stays satisfiable). ORIGINAL CONTENT PRESERVED at: ${qpath} — if this was a real fix: cp it into canonical (${canonical_relpath}) and re-sync."
+          else
+            log_warn "DIRECTION-SAFETY (warn): ${dst_file} content not reachable in canonical history; quarantine unavailable but reconcile proceeds (guard satisfiability takes priority — content may be lost; investigate)."
+          fi
         fi
       fi
     fi
@@ -269,7 +277,7 @@ _sync_project_root() {
   else
     log "Syncing -> project scripts (c): ${proj_scripts}"
     if [[ -d "${src}" ]]; then
-      _rsync_or_dry "project/scripts[${root##*/}]" "${src}" "${proj_scripts}" --recursive
+      _rsync_or_dry "project/scripts[${root##*/}]" "${src}" "${proj_scripts}" --recursive "${SYNC_HYGIENE_FILTERS[@]}"
     fi
   fi
 
@@ -290,8 +298,9 @@ _sync_project_root() {
   local proj_scripts_toplevel="${root}/scripts"
   local -a toplevel_curated_files=(
     leadv2-answer.sh leadv2-ask.sh leadv2-bus.sh leadv2-client-surface-gate.sh
-    leadv2-fanout-classify.sh leadv2-fanout.sh leadv2-finish.sh
-    leadv2-merge-queue.sh leadv2-provider-rollup.sh leadv2-session-runner.sh
+    leadv2-fanout-classify.sh leadv2-fanout.sh leadv2-phase8-assert.sh leadv2-phase8-close.sh
+    leadv2-merge-queue.sh leadv2-provider-rollup.sh leadv2-session-route.sh
+    leadv2-session-runner.sh leadv2-codex-session-runner.sh leadv2-progress-fingerprint.sh
     leadv2-state-path.sh leadv2-supervise.sh leadv2-tasks-regen-gate.sh
     leadv2-active-registry.sh leadv2-supervise-loop.sh leadv2-supervise-pick.sh
     leadv2-tasks-lib.sh
@@ -351,8 +360,8 @@ for subdir in scripts contracts workflows hooks config skills commands agents do
     while IFS= read -r _u; do
       [[ -z "${_u}" ]] && continue
       _unsafe_excludes+=(--exclude="${_u}")
-    done < <(_direction_safety_excludes "warn" "cache/${subdir}" "${subdir}" "${src}" "${dst}")
-    _rsync_or_dry "cache/${subdir}" "${src}" "${dst}" --recursive --delete "${_unsafe_excludes[@]}"
+    done < <(_direction_safety_excludes "warn" "cache/${subdir}" "${subdir}" "${src}" "${dst}" "${SYNC_HYGIENE_FILTERS[@]}")
+    _rsync_or_dry "cache/${subdir}" "${src}" "${dst}" --recursive --delete "${SYNC_HYGIENE_FILTERS[@]}" "${_unsafe_excludes[@]}"
     changed_summary+=("cache/${subdir}")
   fi
 done
@@ -367,8 +376,8 @@ for subdir in scripts contracts; do
     while IFS= read -r _u; do
       [[ -z "${_u}" ]] && continue
       _unsafe_excludes+=(--exclude="${_u}")
-    done < <(_direction_safety_excludes "warn" "shared/${subdir}" "${subdir}" "${src}" "${dst}")
-    _rsync_or_dry "shared/${subdir}" "${src}" "${dst}" --recursive --delete "${_unsafe_excludes[@]}"
+    done < <(_direction_safety_excludes "warn" "shared/${subdir}" "${subdir}" "${src}" "${dst}" "${SYNC_HYGIENE_FILTERS[@]}")
+    _rsync_or_dry "shared/${subdir}" "${src}" "${dst}" --recursive --delete "${SYNC_HYGIENE_FILTERS[@]}" "${_unsafe_excludes[@]}"
     changed_summary+=("shared/${subdir}")
   fi
 done
@@ -415,8 +424,8 @@ if [[ -d "${CANONICAL_ROOT}/.claude" ]]; then
   while IFS= read -r _u; do
     [[ -z "${_u}" ]] && continue
     _unsafe_excludes+=(--exclude="${_u}")
-  done < <(_direction_safety_excludes "warn" "leadv2-repo-vendored/scripts" "scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}")
-  _rsync_or_dry "leadv2-repo-vendored/scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}" --recursive --delete "${_unsafe_excludes[@]}"
+  done < <(_direction_safety_excludes "warn" "leadv2-repo-vendored/scripts" "scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}" "${SYNC_HYGIENE_FILTERS[@]}")
+  _rsync_or_dry "leadv2-repo-vendored/scripts" "${PLUGIN_ROOT}/scripts/" "${LEADV2_REPO_VENDORED}" --recursive --delete "${SYNC_HYGIENE_FILTERS[@]}" "${_unsafe_excludes[@]}"
   changed_summary+=("leadv2-repo-vendored")
 fi
 

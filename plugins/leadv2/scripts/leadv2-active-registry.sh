@@ -82,11 +82,12 @@ _leadv2_state_md() {
 #      update_phase <task_id> <phase>
 #      update_pulse <task_id> <ts>
 #      mark_stale  <task_id>
+#      append_provider_receipt <task_id> <receipt_json>
 #      read        → writes YAML to stdout (no mutation)
 #
 _leadv2_yaml_py_lock() {
   python3 - "$@" <<'PYEOF'
-import sys, os, fcntl, tempfile, datetime
+import sys, os, fcntl, tempfile, datetime, json
 try:
     import yaml
 except ImportError:
@@ -154,47 +155,61 @@ try:
         pid_int = int(pid) if pid not in ("null", "", "None") else None
         daemon_bool = daemon_mode.lower() in ("1", "true", "yes")
 
-        # Replace stale row for same task_id if PID is dead
+        # Replace stale row for same task_id if PID is dead. A fanout launch
+        # pre-registers the runner against the main checkout; when Gate 1 later
+        # registers from the real task worktree, refresh ownership metadata but
+        # preserve the live runner PID/provider receipts instead of appending a
+        # duplicate or leaving a false main-worktree claim.
         existing = next((s for s in sessions if s.get("task_id") == task_id), None)
+        refresh_existing = False
         if existing:
             if _pid_alive(existing.get("pid")):
-                # Active row already present — idempotent
-                sys.exit(0)
+                refresh_existing = True
+                existing["worktree"] = worktree
+                existing["branch"] = branch
+                existing["class"] = cls
+                existing["pulse_log"] = pulse_log
+                existing["log_path"] = existing.get("log_path") or pulse_log
+                existing["last_pulse_at"] = last_pulse_at
+                existing["updated_at"] = _now_iso()
+                existing["stale"] = False
+                print(existing.get("session_id") or session_id)
             else:
                 sessions.remove(existing)
 
-        now = _now_iso()
-        sessions.append({
-            "session_id": session_id,
-            "task_id": task_id,
-            "worktree": worktree,
-            "branch": branch,
-            "started_at": started_at,
-            "phase": phase,
-            "class": cls,
-            "pulse_log": pulse_log,
-            "pid": pid_int,
-            "pid_birth": pid_birth,
-            "parent_session_id": None if parent_session_id in ("null", "", "None") else parent_session_id,
-            "daemon_mode": daemon_bool,
-            "last_pulse_at": last_pulse_at,
-            "stale": False,
-            "note": "",
-            # D-d registry-honesty fields (SUPERVISE-V2-01 item 3) — additive,
-            # every new row registers V2 explicitly; legacy rows written by
-            # an older registry simply lack these keys (reader-side infers
-            # protocol_version: 1 for those — see leadv2-supervise.sh).
-            "protocol_version": 2,
-            "backend": "headless" if daemon_bool else "terminal",
-            "phase_started_at": started_at,
-            "updated_at": now,
-            "tmux_window": None,
-            "tmux_pane": None,
-            "log_path": pulse_log,
-            "provider_receipts": [],
-        })
-        # Return session_id on stdout
-        print(session_id)
+        if not refresh_existing:
+            now = _now_iso()
+            sessions.append({
+                "session_id": session_id,
+                "task_id": task_id,
+                "worktree": worktree,
+                "branch": branch,
+                "started_at": started_at,
+                "phase": phase,
+                "class": cls,
+                "pulse_log": pulse_log,
+                "pid": pid_int,
+                "pid_birth": pid_birth,
+                "parent_session_id": None if parent_session_id in ("null", "", "None") else parent_session_id,
+                "daemon_mode": daemon_bool,
+                "last_pulse_at": last_pulse_at,
+                "stale": False,
+                "note": "",
+                # D-d registry-honesty fields (SUPERVISE-V2-01 item 3) — additive,
+                # every new row registers V2 explicitly; legacy rows written by
+                # an older registry simply lack these keys (reader-side infers
+                # protocol_version: 1 for those — see leadv2-supervise.sh).
+                "protocol_version": 2,
+                "backend": "headless" if daemon_bool else "terminal",
+                "phase_started_at": started_at,
+                "updated_at": now,
+                "tmux_window": None,
+                "tmux_pane": None,
+                "log_path": pulse_log,
+                "provider_receipts": [],
+            })
+            # Return session_id on stdout
+            print(session_id)
 
     elif op == "unregister":
         task_id = args[0]
@@ -243,6 +258,39 @@ try:
                 s["stale"] = True
                 s["updated_at"] = _now_iso()
                 break
+
+    elif op == "append_provider_receipt":
+        task_id, receipt_json = args
+        try:
+            receipt = json.loads(receipt_json)
+        except json.JSONDecodeError as exc:
+            print(f"[registry] invalid provider receipt JSON: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not isinstance(receipt, dict):
+            print("[registry] provider receipt must be a JSON object", file=sys.stderr)
+            sys.exit(2)
+        provider = str(receipt.get("provider") or "")
+        if provider not in ("claude", "codex", "glm"):
+            print(f"[registry] unsupported provider receipt: {provider}", file=sys.stderr)
+            sys.exit(2)
+        target = next((s for s in sessions if s.get("task_id") == task_id), None)
+        if target is None:
+            print(f"[registry] task not registered for provider receipt: {task_id}", file=sys.stderr)
+            sys.exit(4)
+        receipts = target.setdefault("provider_receipts", [])
+        if not isinstance(receipts, list):
+            receipts = []
+            target["provider_receipts"] = receipts
+        receipts.append(receipt)
+        # Bound registry growth while keeping enough history for diagnosis.
+        if len(receipts) > 50:
+            del receipts[:-50]
+        target["provider"] = provider
+        if receipt.get("model"):
+            target["lead_model"] = receipt["model"]
+        if receipt.get("effort"):
+            target["lead_effort"] = receipt["effort"]
+        target["updated_at"] = _now_iso()
 
     elif op == "set_rendered_at":
         ts_val = args[0]
@@ -419,6 +467,18 @@ leadv2_active_update_pulse() {
   lockfile="$(_leadv2_yaml_lockfile)"
   [[ -f "$yaml_file" ]] || return 0
   _leadv2_yaml_py_lock "$lockfile" "$yaml_file" update_pulse "$task_id" "$ts"
+}
+
+# leadv2_active_append_provider_receipt <task_id> <receipt_json>
+# Appends an auditable provider/run receipt under the same active.yaml lock.
+leadv2_active_append_provider_receipt() {
+  local task_id="${1:?task_id required}"
+  local receipt_json="${2:?receipt_json required}"
+  local yaml_file lockfile
+  yaml_file="$(_leadv2_yaml_file)"
+  lockfile="$(_leadv2_yaml_lockfile)"
+  [[ -f "$yaml_file" ]] || return 4
+  _leadv2_yaml_py_lock "$lockfile" "$yaml_file" append_provider_receipt "$task_id" "$receipt_json"
 }
 
 # leadv2_active_render_index

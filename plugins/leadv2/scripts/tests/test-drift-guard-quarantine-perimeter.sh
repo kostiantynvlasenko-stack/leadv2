@@ -98,6 +98,26 @@ else
   fail "quarantine: warning must name warn+quarantine + quarantine path (stderr: $(tr '\n' ' ' < "${SYNC_STDERR}"))"
 fi
 
+# 1e. A declared dry-run is strictly read-only: it reports the unsafe copy
+# but neither reconciles it nor creates a quarantine artifact.
+Q_DRY_QUARANTINE="${TMPROOT}/q-dry-quarantine"
+printf -- '%s' "${UNLANDED}" > "${Q_CACHE}/probe.sh"
+DRY_STDERR="${TMPROOT}/dry-sync-stderr.log"
+env -u LEADV2_PROJECT_ROOT \
+  HOME="${Q_HOME}" LEADV2_CANONICAL_ROOT="${Q_CANON}" \
+  LEADV2_QUARANTINE_ROOT="${Q_DRY_QUARANTINE}" LEADV2_TEST_DRY_RUN=true \
+  PYTHONPATH="$(python3 -c 'import site; print(site.getusersitepackages())')" \
+  bash "${CACHE_SYNC_DRIVER}" "${PLUGIN_SYNC}" "${SCRIPTS_ROOT}" \
+  "${Q_CANON}/plugins/leadv2/scripts/" "${Q_CACHE}" \
+  >/dev/null 2>"${DRY_STDERR}"
+if diff -q <(printf -- '%s' "${UNLANDED}") "${Q_CACHE}/probe.sh" >/dev/null 2>&1 \
+   && [[ -z "$(find "${Q_DRY_QUARANTINE}" -type f -print -quit 2>/dev/null)" ]] \
+   && grep -q "DRY_RUN DIRECTION-SAFETY" "${DRY_STDERR}"; then
+  pass "quarantine: --dry-run reports divergence with zero target/quarantine writes"
+else
+  fail "quarantine: --dry-run must not reconcile or create quarantine content"
+fi
+
 # ════════════════════════════════════════════════════════════════════════════
 # Finding 2: guard catches divergence in EVERY warn-mode subdir (per copy,
 # the perimeter the sync --delete-pushes), and ignores runtime state.

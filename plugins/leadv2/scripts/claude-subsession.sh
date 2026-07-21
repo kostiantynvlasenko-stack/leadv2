@@ -4,9 +4,8 @@ set -euo pipefail
 # Part of /leadv2 orchestrator. Zero /lead token overlap: separate conversation, own session-id.
 #
 # ---------------------------------------------------------------------------
-# PROMPT CACHING — Anthropic 5-min TTL cache
+# STABLE PROMPT PREFIX — server cache telemetry is authoritative
 # ---------------------------------------------------------------------------
-# Claude CLI hashes the full -p prompt. Identical prefix bytes = cache hit.
 # We split FINAL_PROMPT into:
 #   STABLE PREFIX  = SYSTEM_PROMPT + SHARED_PROTOCOL_BOILERPLATE
 #                    (no task-specific vars → identical across all spawns with
@@ -14,16 +13,14 @@ set -euo pipefail
 #   TASK SUFFIX    = MISSION_BODY + PER_TASK_BOILERPLATE
 #                    (contains $TASK_ID, $ROLE, $AGENT_SKILLS — small, uncached)
 #
-# Per-role prefix is materialised to /tmp/leadv2-cache/prefix-<role>.<checksum>.md
-# and reused while fresh (<5 min). Stale files are deleted on each run.
+# Per-role prefix is materialised locally to keep prompt assembly deterministic
+# and attach a checksum to telemetry. Reusing this FILE is not itself a cache
+# hit: Claude Code manages server-side prompt caching, and only the reported
+# cache_read_input_tokens proves reuse.
 #
-# Expected cache-hit rate: ~90% input-token discount when two or more subagents
-# with the same role fire within the same 5-min window (Plan triad, Review trio).
-#
-# Note on ANTHROPIC_EXTRA_HEADERS: as of 2024-07-31 the prompt-caching feature
-# is GA and does NOT require a special header; the Claude CLI sends the correct
-# anthropic-beta header automatically. If the API ever requires opt-in again, set:
-#   export ANTHROPIC_EXTRA_HEADERS='{"anthropic-beta":"prompt-caching-2024-07-31"}'
+# Subscription-authenticated Claude Code manages a one-hour TTL automatically;
+# API-key/third-party sessions use their configured TTL. Do not issue a
+# separate "warm" API request: its system prefix differs from this CLI request.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -168,8 +165,8 @@ if [[ -z "$SESSION_ID" ]]; then
 fi
 
 # Persist the label ↔ UUID mapping for resume-by-label
-MAPFILE="$HANDOFF_DIR/sessions.map"
-printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$SESSION_LABEL" "$SESSION_ID" >> "$MAPFILE"
+SESSION_MAP_FILE="$HANDOFF_DIR/sessions.map"
+printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$SESSION_LABEL" "$SESSION_ID" >> "$SESSION_MAP_FILE"
 
 # Strip YAML frontmatter if source is agents/ (body-only as system prompt)
 if [[ "$ROLE_SOURCE" == "agents" ]]; then
@@ -236,12 +233,13 @@ PER_TASK_BOILERPLATE="Task binding:
 # ---------------------------------------------------------------------------
 build_cached_prefix() {
   local role="$1"
-  local role_file="$PROJECT_ROOT/.claude/agents/${role}.md"
   local skill_file="$PROJECT_ROOT/.claude/skills/leadv2-subagent-protocol/SKILL.md"
 
-  # Strip frontmatter from agent file (same logic as main body, deduped)
+  # Reuse the already-resolved agents/ OR legacy roles/ body. The previous
+  # implementation re-opened agents/<role>.md unconditionally here, silently
+  # dropping the supported roles/<role>.md fallback from the actual prompt.
   local role_body
-  role_body=$(awk 'BEGIN{c=0} /^---$/{c++; next} c>=2 {print}' "$role_file" 2>/dev/null || true)
+  role_body="$SYSTEM_PROMPT"
 
   # Strip YAML frontmatter from skill file (between first two --- lines)
   local skill_body
@@ -274,9 +272,9 @@ ${skill_body}"
 
   if [[ ! -f "$prefix_path" ]]; then
     printf '%s' "$prefix_content" > "$prefix_path"
-    echo "[claude-subsession] cache MISS: wrote prefix for ${role} → ${prefix_path}" >&2
+    echo "[claude-subsession] stable prefix materialised for ${role} → ${prefix_path}" >&2
   else
-    echo "[claude-subsession] cache HIT: reusing prefix for ${role} → ${prefix_path}" >&2
+    echo "[claude-subsession] stable prefix file reused for ${role} (server cache status comes from usage telemetry)" >&2
   fi
 
   printf '%s' "$prefix_path"
@@ -310,9 +308,10 @@ CLAUDE_ARGS=(
   --model "$MODEL"
   --session-id "$SESSION_ID"
   --output-format stream-json
-  --max-turns 50
+  --max-turns "${LEADV2_SUBSESSION_MAX_TURNS:-25}"
   --permission-mode acceptEdits
 )
+[[ -n "$EFFORT" ]] && CLAUDE_ARGS+=(--effort "$EFFORT")
 
 export CLAUDE_ROLE="$ROLE"
 export LEADV2_TASK_ID="$TASK_ID"
@@ -504,11 +503,9 @@ _check_cost_ceiling() {
     return 0
   }
 
-  local ceiling_status downgrade_applied router_model current_burn ceiling_usd
+  local ceiling_status current_burn ceiling_usd
   local recovery_status downgrade_active force_model hard_stop_flag fresh_trip burn_readable
   ceiling_status=$(printf '%s\n' "$router_out" | grep '^ceiling_status=' | cut -d= -f2 || true)
-  downgrade_applied=$(printf '%s\n' "$router_out" | grep '^downgrade_applied=' | cut -d= -f2 || true)
-  router_model=$(printf '%s\n' "$router_out" | grep '^model=' | cut -d= -f2 | cut -d+ -f1 | sed 's/-subsession//' || true)
   current_burn=$(printf '%s\n' "$router_out" | grep '^current_burn_usd=' | cut -d= -f2 || echo "0")
   ceiling_usd=$(printf '%s\n' "$router_out" | grep '^ceiling_usd=' | cut -d= -f2 || echo "0")
   # T8b ROUTING-TIER-RECOVERY-REDESIGN keys (additive; router recomputes fresh
@@ -747,53 +744,15 @@ done
 unset _cargs_i
 
 # ---------------------------------------------------------------------------
-# warm_chain() — materialise cache prefix for a list of role-model pairs in
-# parallel before a chain of spawns. Waits max 3 seconds then proceeds.
+# warm_chain() — deprecated zero-cost compatibility function.
 #
 # Usage: warm_chain "architect:opus" "critic:opus" "developer:sonnet"
 #
 # Each argument is "<role>:<model>". Skipped if warmer script not found.
 # ---------------------------------------------------------------------------
 warm_chain() {
-  local warmer_script
-  warmer_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-cache-warm.sh"
-  if [[ ! -x "$warmer_script" ]]; then
-    echo "[warm_chain] warmer not found: ${warmer_script}" >&2
-    return 0
-  fi
-
-  local pids=()
-  for pair in "$@"; do
-    local warm_role warm_model
-    warm_role="${pair%%:*}"
-    warm_model="${pair##*:}"
-    # Fire each warmer in background, stdout to /dev/null (YAML result not needed here)
-    "$warmer_script" --role "$warm_role" --model "$warm_model" > /dev/null &
-    pids+=("$!")
-    echo "[warm_chain] warming ${warm_role}/${warm_model} (pid $!)" >&2
-  done
-
-  # Wait max 3 seconds then proceed regardless
-  local deadline=$(( $(date +%s) + 3 ))
-  for pid in "${pids[@]}"; do
-    local remaining=$(( deadline - $(date +%s) ))
-    if [[ "$remaining" -le 0 ]]; then
-      break
-    fi
-    # Poll every 0.2s until done or timeout
-    local waited=0
-    while kill -0 "$pid" 2>/dev/null && [[ "$waited" -lt "$remaining" ]]; do
-      sleep 0.2
-      waited=$(( waited + 1 ))
-    done
-  done
-
-  # Reap any still-running warmers — non-blocking
-  for pid in "${pids[@]}"; do
-    wait "$pid" 2>/dev/null || true
-  done
-
-  echo "[warm_chain] warmers done (or timed out after 3s)" >&2
+  echo "[warm_chain] skipped: standalone API warming cannot warm the exact Claude Code prefix; rely on cache_read_input_tokens" >&2
+  return 0
 }
 
 # ---------------------------------------------------------------------------

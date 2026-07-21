@@ -47,19 +47,12 @@ Budget: spend <15% of tokens on file-context lookups (allowed when diff lacks co
 - `platform/auth/`
 - Any file matching `*crypto*`, `*auth*`, `*token*`, `*secret*`, `*webhook*`, `*billing*`
 
-## 1d. Cache warming before spawns (≥2 same-role spawns)
+## 1d. Prompt-cache discipline
 
-If Review phase will fire critic(opus) **and** security-auditor (Case B), pre-warm both:
-```bash
-# Call warm_chain if claude-subsession.sh is sourced, else call warmer directly:
-warm_chain "critic:opus" "security-auditor:sonnet"
-# Or directly:
-bash .claude/scripts/lv2 leadv2-cache-warm.sh --role critic --model opus &
-bash .claude/scripts/lv2 leadv2-cache-warm.sh --role security-auditor --model sonnet &
-# Proceed immediately (max 3s wait enforced by warm_chain)
-```
-
-Skip if single-spawn phase (only Codex + hack-detection, no critic/security-auditor).
+Never issue standalone API warm calls before Review. Their prefix differs from
+Claude Code's system/tool prefix, so they add spend without guaranteeing a
+cache hit. Keep model/cwd/tool definitions stable across reviewer spawns and
+use `cache_read_input_tokens` telemetry as the only cache-hit truth.
 
 ## 1e. Compress Build outputs before reading
 

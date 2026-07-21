@@ -207,6 +207,7 @@ rc=0
   cd "$WORK"
   CLAUDE_PROJECT_ROOT="$WORK" \
   LEADV2_PROJECT_ROOT="$WORK" \
+  LEADV2_STATE_ROOT="$STATE_ROOT" \
     bash "${SCRIPTS_DIR}/leadv2-phase8-assert.sh" "$TASK_ID"
 ) > "$PA_OUT" 2>&1 || rc=$?
 
@@ -311,6 +312,7 @@ rc=0
   cd "$WORK"
   CLAUDE_PROJECT_ROOT="$WORK" \
   LEADV2_PROJECT_ROOT="$WORK" \
+  LEADV2_STATE_ROOT="$STATE_ROOT" \
     bash "${SCRIPTS_DIR}/leadv2-phase8-assert.sh" "$TASK_ID"
 ) > "$PA_OUT2" 2>&1 || rc=$?
 
@@ -334,6 +336,50 @@ if grep -q "re-run leadv2-deploy-merge.sh ${TASK_ID}" "$PA_OUT2"; then
 else
   fail "S1: A6 failure message missing recovery guidance; output:"
   cat "$PA_OUT2" >&2
+fi
+
+# ── (S1.7) clearing the sole blocker publishes both local and shared proof ──
+rm -f "$BLOCKER"
+PA_OUT3="${TMP_DIR}/phase8-assert-pass.out"
+rc=0
+(
+  cd "$WORK"
+  CLAUDE_PROJECT_ROOT="$WORK" \
+  LEADV2_PROJECT_ROOT="$WORK" \
+  LEADV2_STATE_ROOT="$STATE_ROOT" \
+    bash "${SCRIPTS_DIR}/leadv2-phase8-assert.sh" "$TASK_ID"
+) > "$PA_OUT3" 2>&1 || rc=$?
+
+COMPLETION_RECEIPT="${STATE_ROOT}/completions/${TASK_ID}.json"
+if [[ "$rc" -eq 0 && -f "$SENTINEL" && -f "$COMPLETION_RECEIPT" ]]; then
+  pass "S1: Phase 8 PASS writes local sentinel and shared completion receipt"
+else
+  fail "S1: Phase 8 PASS did not write both completion proofs (rc=${rc}); output:"
+  cat "$PA_OUT3" >&2
+fi
+
+if python3 - "$COMPLETION_RECEIPT" "$TASK_ID" <<'PYEOF'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if data.get("task_id") == sys.argv[2]
+                 and data.get("status") == "phase8_passed"
+                 and data.get("assertions") == "7/7" else 1)
+PYEOF
+then
+  pass "S1: shared completion receipt has the fail-closed schema"
+else
+  fail "S1: shared completion receipt content invalid"
+fi
+
+if python3 - "$STATE_ROOT/bus.jsonl" "$TASK_ID" <<'PYEOF'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+raise SystemExit(0 if any(e.get("task_id") == sys.argv[2] and e.get("type") == "closed" for e in events) else 1)
+PYEOF
+then
+  pass "S1: Phase 8 PASS publishes a shared closed event"
+else
+  fail "S1: Phase 8 PASS did not publish a shared closed event"
 fi
 
 # =============================================================================

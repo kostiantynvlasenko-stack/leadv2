@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# lv2 — leadv2 plugin script dispatcher (committed repo entry-point).
+#
+# WHY: SKILL.md tells the lead to run `bash .claude/scripts/lv2 <script> [args]`.
+# After repo-local .claude/scripts/leadv2*.sh copies are deleted, the lead's
+# env-less Bash ($CLAUDE_PLUGIN_ROOT / $CLAUDE_PROJECT_DIR are UNSET there) must
+# still reach the installed plugin. This script locates the plugin robustly and
+# execs the requested script, falling back to PE domain scripts in overrides.
+#
+# Usage:  bash .claude/scripts/lv2 <script-name> [args...]
+# Example: bash .claude/scripts/lv2 leadv2-helpers.sh
+#
+# Resolution order for <script-name>:
+#   1. <plugin>/scripts/<script-name>                     (generic, plugin = SoT)
+#   2. $PWD/.claude/leadv2-overrides/scripts/<script-name> (PE domain scripts)
+#   3. error clearly.
+#
+# Plugin discovery (first existing wins):
+#   A. live local symlink: ~/.claude/plugins/local/*/plugins/leadv2/scripts
+#   B. installed_plugins.json installPath for leadv2* (handle both
+#      <installPath>/scripts and <installPath>/plugins/leadv2/scripts shapes)
+#   C. glob fallback over ~/.claude/plugins/{local,cache}/**/scripts
+# Symlinks are resolved. Side-effect-free, exit-fast.
+
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  echo "lv2: usage: bash .claude/scripts/lv2 <script-name> [args...]" >&2
+  exit 2
+fi
+
+_lv2_print_path=0
+if [[ "${1:-}" == "--path" ]]; then _lv2_print_path=1; shift; fi
+
+script_name="$1"; shift
+
+_lv2_home="${HOME:-$(cd ~ && pwd)}"
+_lv2_plugins_root="$_lv2_home/.claude/plugins"
+
+# Collect candidate plugin scripts dirs in priority order, first match wins.
+_lv2_find_plugin_scripts_dir() {
+  local d
+
+  # A. Live local symlink (founder's install — always freshest).
+  for d in "$_lv2_plugins_root"/local/*/plugins/leadv2/scripts; do
+    [[ -d "$d" ]] && { printf '%s\n' "$d"; return 0; }
+  done
+
+  # B. installed_plugins.json installPath (any key matching leadv2).
+  local json="$_lv2_plugins_root/installed_plugins.json"
+  if [[ -f "$json" ]] && command -v python3 >/dev/null 2>&1; then
+    local ip
+    while IFS= read -r ip; do
+      [[ -z "$ip" ]] && continue
+      # Cache shape: <installPath>/scripts
+      [[ -d "$ip/scripts" ]] && { printf '%s\n' "$ip/scripts"; return 0; }
+      # Marketplace shape: <installPath>/plugins/leadv2/scripts
+      [[ -d "$ip/plugins/leadv2/scripts" ]] && { printf '%s\n' "$ip/plugins/leadv2/scripts"; return 0; }
+    done < <(python3 - "$json" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for k, entries in (d.get("plugins") or {}).items():
+    if "leadv2" not in k.lower():
+        continue
+    for e in (entries or []):
+        ip = e.get("installPath")
+        if ip:
+            print(ip)
+PY
+    )
+  fi
+
+  # C. Glob fallback across both trees, any nesting depth.
+  for d in "$_lv2_plugins_root"/local/*/plugins/leadv2/scripts \
+           "$_lv2_plugins_root"/cache/*/leadv2/*/scripts \
+           "$_lv2_plugins_root"/cache/*/leadv2/*/plugins/leadv2/scripts; do
+    [[ -d "$d" ]] && { printf '%s\n' "$d"; return 0; }
+  done
+
+  return 1
+}
+
+_resolve_real() {
+  # Resolve symlinks without requiring GNU readlink -f (macOS bash).
+  local p="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$p"
+  else
+    printf '%s\n' "$p"
+  fi
+}
+
+plugin_scripts_dir="$(_lv2_find_plugin_scripts_dir || true)"
+
+# 1. Plugin (generic) script.
+if [[ -n "$plugin_scripts_dir" ]]; then
+  plugin_scripts_dir="$(_resolve_real "$plugin_scripts_dir")"
+  target="$plugin_scripts_dir/$script_name"
+  if [[ -f "$target" ]]; then
+    if [[ "$_lv2_print_path" == "1" ]]; then printf '%s\n' "$target"; exit 0; fi
+    exec bash "$target" "$@"
+  fi
+fi
+
+# 2. PE domain override script.
+override="$PWD/.claude/leadv2-overrides/scripts/$script_name"
+if [[ -f "$override" ]]; then
+  if [[ "$_lv2_print_path" == "1" ]]; then printf '%s\n' "$override"; exit 0; fi
+  exec bash "$override" "$@"
+fi
+
+# 3. Clear error.
+{
+  echo "lv2: cannot resolve script '$script_name'."
+  if [[ -n "$plugin_scripts_dir" ]]; then
+    echo "  plugin scripts dir: $plugin_scripts_dir (no '$script_name' there)"
+  else
+    echo "  plugin scripts dir: NOT FOUND under $_lv2_plugins_root"
+    echo "    looked: local/*/plugins/leadv2/scripts, installed_plugins.json installPath, cache globs"
+  fi
+  echo "  override dir: $PWD/.claude/leadv2-overrides/scripts (no '$script_name' there)"
+} >&2
+exit 127

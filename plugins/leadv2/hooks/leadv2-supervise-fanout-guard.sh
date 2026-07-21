@@ -48,20 +48,11 @@
 # silently passed through ungated. Both are now fail-CLOSED: default is
 # deny-when-self-supervising, not allow.
 #
-# MODE SPLIT (fix-2 R2-1, codex-review-2.md finding 1): the sentinel now
-# carries a "mode" field written by leadv2-supervise.sh. D-f=A's default flow
-# (SKILL.md step 3) REQUIRES the supervising session to spawn its own
-# in-session Workflow/Agent lanes — gating those unconditionally was a direct
-# contradiction of the resolved architecture. The gate below now only DENIES
-# when mode=="legacy-relay" (a session watching purely external tmux fanout
-# with no in-session lanes of its own — the guard's original purpose) OR
-# mode is absent (a sentinel from before this fix, or from any other writer
-# that never learns about `mode` — fail-CLOSED, same H2 philosophy as the
-# unknown-subagent-type default-deny above: an unlabeled sentinel is never
-# assumed to be the new interactive-lanes flow). Only an EXPLICIT
-# mode=="interactive-lanes" (the real production default -- leadv2-
-# supervise.sh always stamps it unless LEADV2_SUPERVISE_MODE=legacy-relay is
-# set) is never denied by this hook for the owning session.
+# MODE SPLIT: provider-aware full-cycle relay is now the default. It stamps
+# mode="legacy-relay" and denies abbreviated same-session workers; work must
+# go through leadv2-fanout.sh so every child receives Phase 0..8. An explicit
+# mode="interactive-lanes" remains a compatibility escape hatch and is the
+# only mode that permits owning-session Agent/Workflow spawns.
 #
 # Toggle: LEADV2_SUPERVISE_GUARD=0 disables this guard entirely.
 # Fail-safe: any internal error exits 0 (never bricks the session); a stale
@@ -172,11 +163,9 @@ if [[ -f "$REGISTRY" ]]; then
 fi
 [[ -z "$MY_PID" || "$MY_PID" != "$SENTINEL_PID" ]] && exit 0
 
-# MODE SPLIT (fix-2 R2-1): this IS the supervising session, but D-f=A's
-# default interactive-lanes mode REQUIRES this exact session to spawn its own
-# Workflow/Agent lanes — never deny those. Only legacy-relay mode (or a
-# sentinel with no mode at all, normalized to legacy-relay above) reaches the
-# BLOCK below.
+# Compatibility escape hatch: only an explicitly stamped interactive-lanes
+# session may create same-session workers. The default provider-aware relay
+# (and missing/unknown modes) reaches the BLOCK below.
 [[ "$SENTINEL_MODE" == "interactive-lanes" ]] && exit 0
 
 # This IS the supervising session in legacy-relay mode, and the

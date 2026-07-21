@@ -16,6 +16,10 @@ trap 'exit 0' ERR
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
+# shellcheck source=leadv2-mode-isolation.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-mode-isolation.sh"
+leadv2_hook_is_supervisor_session "$INPUT" && exit 0
+
 # Parse subagent_type and cwd from hook input JSON
 PARSED="$(python3 -c "
 import sys, json
@@ -42,32 +46,12 @@ case "$SUBTYPE" in
   *) exit 0 ;;
 esac
 
-# Determine active phase: env var first, then active.yaml
-ACTIVE_PHASE="${LEADV2_ACTIVE_PHASE:-}"
-
-if [[ -z "$ACTIVE_PHASE" ]]; then
-  for _cand in "$CWD/docs/leadv2/active.yaml" "$CWD/.claude/leadv2-tasks/active.yaml"; do
-    if [[ -f "$_cand" ]]; then
-      ACTIVE_PHASE="$(python3 -c "
-import sys
-try:
-    try:
-        import yaml
-        d = yaml.safe_load(open(sys.argv[1])) or {}
-    except ImportError:
-        import re
-        src = open(sys.argv[1]).read()
-        m = re.search(r'phase\s*:\s*(\S+)', src)
-        d = {'sessions': [{'phase': m.group(1).strip(\"'\\\"\")}]} if m else {}
-    sessions = d.get('sessions') or []
-    print((sessions[0].get('phase') or '').lower().strip() if sessions else '')
-except Exception:
-    pass
-" "$_cand" 2>/dev/null || true)"
-      break
-    fi
-  done
-fi
+# Determine the phase for this lead only; active.yaml is shared.
+ACTIVE_YAML=""
+for _cand in "$CWD/docs/leadv2/active.yaml" "$CWD/.claude/leadv2-tasks/active.yaml"; do
+  [[ -f "$_cand" ]] && { ACTIVE_YAML="$_cand"; break; }
+done
+ACTIVE_PHASE="$(leadv2_hook_resolve_phase "$INPUT" "$ACTIVE_YAML" 2>/dev/null || true)"
 
 # Only enforce during build phase
 case "${ACTIVE_PHASE:-}" in
@@ -75,8 +59,9 @@ case "${ACTIVE_PHASE:-}" in
   *) exit 0 ;;
 esac
 
-# Resolve TASK_ID: env first, then sanitize for filesystem use
-TASK_ID="$(printf '%s' "${LEADV2_TASK_ID:-}" | tr -cd 'A-Za-z0-9._-')"
+# Resolve TASK_ID for this lead process tree, then sanitize for filesystem use.
+TASK_ID="$(leadv2_hook_resolve_task_id "$INPUT" "$ACTIVE_YAML" 2>/dev/null || true)"
+TASK_ID="$(printf '%s' "$TASK_ID" | tr -cd 'A-Za-z0-9._-')"
 [[ -z "$TASK_ID" ]] && exit 0  # fail-open: no task id, cannot check
 
 HANDOFF_DIR="$CWD/docs/handoff/$TASK_ID"

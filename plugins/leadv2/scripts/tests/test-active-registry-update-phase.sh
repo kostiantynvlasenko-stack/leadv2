@@ -9,7 +9,8 @@
 #   3. a real phase change sets phase_started_at to a new timestamp
 #   4. heartbeat (update_pulse) does NOT reset phase_started_at
 #   5. unknown/custom fields on a session row survive a phase mutation
-#   6. bash -n syntax check
+#   6. live idempotent re-register refreshes worktree without duplicating row
+#   7. bash -n syntax check
 #
 # Portable: no GNU-only date/sed -i/timeout/flock — sandboxed via
 # LEADV2_PROJECT_ROOT / LEADV2_STATE_ROOT env overrides, no git repo needed
@@ -215,22 +216,56 @@ test_5_unknown_fields_preserved() {
   rm -rf "$sandbox"
 }
 
-# ── Test 6: syntax ───────────────────────────────────────────────────────────
+# ── Test 6: live registration refresh ───────────────────────────────────────
 
-test_6_syntax() {
-  log "Test 6: bash -n syntax check"
-  bash -n "$REGISTRY_SH" 2>/dev/null && pass "Test 6: bash -n OK" || fail "Test 6: bash -n FAILED"
+test_6_live_register_refresh() {
+  log "Test 6: live re-register refreshes worktree and preserves one row"
+
+  local sandbox out yaml_file result
+  sandbox="$(_new_sandbox)"
+  mkdir -p "${sandbox}/worktree"
+  out="$(
+    LEADV2_PROJECT_ROOT="${sandbox}/proj" LEADV2_STATE_ROOT="${sandbox}/state" bash -c '
+      set -euo pipefail
+      source "'"$REGISTRY_SH"'"
+      leadv2_active_register "'"$TASK_ID"'" "Standard" "$LEADV2_PROJECT_ROOT" "main" "true" >/dev/null
+      leadv2_active_register "'"$TASK_ID"'" "Standard" "'"${sandbox}/worktree"'" "worktree-branch" "false" >/dev/null
+      _leadv2_yaml_file
+    ' 2>&1
+  )" || true
+  yaml_file="$(printf -- '%s\n' "$out" | tail -1)"
+  result="$(python3 - "$yaml_file" "$TASK_ID" "${sandbox}/worktree" <<'PYEOF' 2>/dev/null || true
+import sys, yaml
+with open(sys.argv[1], encoding="utf-8") as fh:
+    rows = [r for r in (yaml.safe_load(fh) or {}).get("sessions", []) if r.get("task_id") == sys.argv[2]]
+print("ok" if len(rows) == 1 and rows[0].get("worktree") == sys.argv[3] and rows[0].get("branch") == "worktree-branch" else "bad")
+PYEOF
+)"
+  if [[ "$result" == "ok" ]]; then
+    pass "Test 6: one live row refreshed to the real task worktree"
+  else
+    fail "Test 6: live re-register did not refresh cleanly — output: $out"
+  fi
+  rm -rf "$sandbox"
+}
+
+# ── Test 7: syntax ───────────────────────────────────────────────────────────
+
+test_7_syntax() {
+  log "Test 7: bash -n syntax check"
+  bash -n "$REGISTRY_SH" 2>/dev/null && pass "Test 7: bash -n OK" || fail "Test 7: bash -n FAILED"
 }
 
 main() {
   log "=== leadv2-active-registry update_phase unit tests ==="
   log "Script: $REGISTRY_SH"
   echo ""
-  test_6_syntax
+  test_7_syntax
   test_1_legacy_1arg
   test_2_v2_2arg
   test_3_and_4_phase_started_at_semantics
   test_5_unknown_fields_preserved
+  test_6_live_register_refresh
   echo ""
   log "=== Results: PASS=$PASS FAIL=$FAIL ==="
   if [[ "${#ERRORS[@]}" -gt 0 ]]; then

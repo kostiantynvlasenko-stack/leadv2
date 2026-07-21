@@ -1,25 +1,7 @@
 ---
 name: modern-web-guidance
-description: |
-  Search tool for modern web development best practices from Google Chrome. MANDATORY: Execute FIRST for all HTML/CSS and clientside JS tasks. Do NOT skip — web APIs evolve rapidly and training weights contain obsolete patterns.
-
-  Trigger immediately for:
-  - UI/Layout: Modals, dialogs, popovers, glassmorphism/backdrop-filters, anchor positioning, container queries, `:has()`, `:user-valid`.
-  - Scroll/Motion: View Transitions, scroll-driven animations, scroll parallax/reveals.
-  - Performance: CWV (LCP, INP), content-visibility, Fetch Priority, image optimization, speculation rules.
-  - Forms: autofill (sign-in/sign-up/payment/address), `field-sizing`, `:user-invalid`, custom select, validation feedback.
-  - System/APIs: WebAuthn/Passkeys, WebUSB, file system access, WebMCP agentic tools.
-  - Frameworks: Adapting layout/styles in React/Next.js/Vue/Angular.
-
-  DO NOT trigger for:
-  - Backend: Python, Go, Node server code, database SQL, ORMs, gRPC, Kafka, Temporal.
-  - Pipelines: CI/CD deployment, Docker, Kubernetes, GitHub Actions, ArgoCD, systemd.
-  - Generic: shell scripts (Python/Go tools), ESLint, Git, infrastructure-as-code.
-when_to_invoke: |
-  - Frontend agent (frontend-developer, architect) is about to write/modify *.tsx, *.ts, *.jsx, *.css, *.html
-  - Diff under review touches web/, frontend/, apps/main/, apps/dashboard/, apps/admin/
-  - Plan step mentions UI/CSS/forms/scroll/performance/CWV/popover/dialog/animation
-  - DO NOT use if the task is purely backend, infra, or scripts — skip silently and report "not applicable"
+description: Google Chrome modern-web guidance for frontend code; run before changing HTML, CSS, client JS, UI APIs, forms, motion, or web performance.
+when_to_use: Frontend files or plans only; never backend, infrastructure, SQL, CI/CD, or generic shell tasks.
 ---
 
 # modern-web-guidance

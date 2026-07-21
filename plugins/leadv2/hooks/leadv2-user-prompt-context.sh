@@ -8,9 +8,17 @@ trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
+# shellcheck source=leadv2-mode-isolation.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-mode-isolation.sh"
+
 CWD="$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
 [[ -z "$CWD" ]] && CWD="$PWD"
 SESSION_ID="$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
+_lv2_safe_session="$(printf -- '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')"
+SUPERVISOR_SESSION=0
+if [[ -n "$_lv2_safe_session" && -f "/tmp/.leadv2-supervisor-mode-${_lv2_safe_session}" ]]; then
+  SUPERVISOR_SESSION=1
+fi
 
 CTX_PARTS=()
 
@@ -23,34 +31,21 @@ _lv2_handoff_dir=$(grep -E "^[[:space:]]*handoff_dir[[:space:]]*:" "$_lv2_sp_yam
 
 # === 0. /compact intercept: write pre-compact-resume.md BEFORE compact executes ===
 PROMPT_TEXT="$(echo "$INPUT" | jq -r '.prompt // .message // empty' 2>/dev/null || echo "")"
-if echo "$PROMPT_TEXT" | grep -q '<command-name>/compact</command-name>'; then
+if [[ "$SUPERVISOR_SESSION" != "1" ]] && echo "$PROMPT_TEXT" | grep -q '<command-name>/compact</command-name>'; then
   # Find active task
   ACTIVE_FILE=""
   for f in "$CWD/.claude/leadv2-tasks/active.yaml" "$CWD/${_lv2_leadv2_dir}/active.yaml"; do
     [[ -f "$f" ]] && ACTIVE_FILE="$f" && break
   done
   if [[ -n "$ACTIVE_FILE" ]]; then
-    TID_FOR_RESUME="$(python3 -c "
-import yaml
-try:
-    d = yaml.safe_load(open('$ACTIVE_FILE')) or {}
-    s = (d.get('sessions') or [])
-    print(s[0].get('task_id','') if s else '')
-except: print('')
-" 2>/dev/null || echo "")"
+    TID_FOR_RESUME="$(leadv2_hook_resolve_task_id "$INPUT" "$ACTIVE_FILE" 2>/dev/null || true)"
     if [[ -n "$TID_FOR_RESUME" ]]; then
       RESUME_DIR="$CWD/${_lv2_leadv2_dir}/tasks/$TID_FOR_RESUME"
       mkdir -p "$RESUME_DIR" 2>/dev/null || true
       RESUME_FILE="$RESUME_DIR/pre-compact-resume.md"
       # Read current phase from active.yaml
-      PHASE_NOW="$(python3 -c "
-import yaml
-try:
-    d = yaml.safe_load(open('$ACTIVE_FILE')) or {}
-    s = (d.get('sessions') or [])
-    print(s[0].get('phase','?') if s else '?')
-except: print('?')
-" 2>/dev/null || echo "?")"
+      PHASE_NOW="$(leadv2_hook_resolve_phase "$INPUT" "$ACTIVE_FILE" 2>/dev/null || true)"
+      [[ -z "$PHASE_NOW" ]] && PHASE_NOW="?"
       # Read latest handoff artifact to infer context
       HANDOFF_DIR="$CWD/${_lv2_handoff_dir}/$TID_FOR_RESUME"
       LATEST_ARTIFACT=""
@@ -90,6 +85,7 @@ fi
 
 # === 2. Active leadv2 task summary ===
 TID_ACTIVE=""
+if [[ "${LEADV2_ANCHOR_OWNS_CONTEXT:-1}" != "1" ]]; then
 ACTIVE=""
 for f in "$CWD/.claude/leadv2-tasks/active.yaml" "$CWD/${_lv2_leadv2_dir}/active.yaml"; do
   [[ -f "$f" ]] && ACTIVE="$f" && break
@@ -119,21 +115,7 @@ $ACTIVE_SUM
   fi
 
   # === 2.b. Auto-detect real phase from handoff/ artifacts (active.yaml often stale) ===
-  TID_ACTIVE="$(python3 -c "
-import yaml
-try:
-    d = yaml.safe_load(open('$ACTIVE')) or {}
-    s = (d.get('sessions') or [])
-    sid = '$SESSION_ID'
-    match = next((x for x in s if sid and x.get('session_id') == sid), None)
-    if match:
-        print(match.get('task_id',''))
-    elif s:
-        print(s[0].get('task_id',''))
-    else:
-        print('')
-except: print('')
-" 2>/dev/null || echo "")"
+  TID_ACTIVE="$(leadv2_hook_resolve_task_id "$INPUT" "$ACTIVE" 2>/dev/null || true)"
   if [[ -n "$TID_ACTIVE" ]]; then
     HANDOFF_DIR="$CWD/${_lv2_handoff_dir}/$TID_ACTIVE"
     if [[ -d "$HANDOFF_DIR" ]]; then
@@ -210,6 +192,8 @@ Rules that persist across /compact:
     CTX_PARTS+=("[ORCHESTRATOR_ROLE] full rules already injected this session — see above.")
   fi
 fi
+
+fi # LEADV2_ANCHOR_OWNS_CONTEXT: task-anchor owns active/phase/role context by default
 
 # === 2.5. Pending Stop-hook warnings (lead-prose-guard, etc.) ===
 if [[ -n "$SESSION_ID" ]]; then

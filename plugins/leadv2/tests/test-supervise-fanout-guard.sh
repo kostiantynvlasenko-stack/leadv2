@@ -39,9 +39,31 @@ SENTINEL="${STATE_ROOT}/.supervise-active"
 # whether this suite runs standalone or nested inside a live Claude Code
 # session (where the durable-pid ancestor walk finds the real outer `claude`
 # process rather than this script's own pid).
-REGISTRY_SH="${BASH_SOURCE[0]%/*}/../scripts/leadv2-active-registry.sh"
-SELF_PID="$(bash -c "source '${REGISTRY_SH}'; _lv2_durable_pid" 2>/dev/null || true)"
-[[ -z "$SELF_PID" ]] && SELF_PID="$$"
+# The guard's direct PPID is this test shell ($$). Reproduce the helper's
+# ancestor walk from that exact starting pid; a nested command-substitution
+# bash has a different short-lived PPID and made this test flaky outside
+# Claude Code.
+SELF_PID="$(python3 - "$$" <<'PYEOF'
+import subprocess, sys
+start = int(sys.argv[1])
+pid = start
+seen = set()
+while pid > 1 and pid not in seen:
+    seen.add(pid)
+    comm = subprocess.run(['ps', '-o', 'comm=', '-p', str(pid)], capture_output=True, text=True).stdout.strip().split('/')[-1].lower()
+    if 'claude' in comm:
+        print(pid)
+        break
+    raw = subprocess.run(['ps', '-o', 'ppid=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+    nxt = int(raw) if raw else 0
+    if nxt in (0, 1, pid):
+        print(start)
+        break
+    pid = nxt
+else:
+    print(start)
+PYEOF
+)"
 
 run_guard() {
   # $1 = payload json ; env overrides via remaining args
@@ -75,7 +97,8 @@ json.dump({'pid': $SELF_PID, 'started_at': '2026-07-16T00:00:00Z'}, open('$SENTI
 "
 b_stdout=""
 b_exit=0
-b_stdout=$(LEADV2_STATE_ROOT="$STATE_ROOT" bash "$GUARD" <<<"$WORKER_PAYLOAD" 2>/dev/null) || b_exit=$?
+LEADV2_STATE_ROOT="$STATE_ROOT" bash "$GUARD" <<<"$WORKER_PAYLOAD" >"$TMP_DIR/b.stdout" 2>/dev/null || b_exit=$?
+b_stdout="$(<"$TMP_DIR/b.stdout")"
 if [[ $b_exit -eq 2 ]] && printf '%s' "$b_stdout" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); assert d['hookSpecificOutput']['permissionDecision']=='deny'" 2>/dev/null; then
   pass "(b) live sentinel + worker spawn (developer) is denied (exit 2 + deny JSON)"
 else
@@ -195,9 +218,8 @@ rm -f "$SENTINEL"
 
 # ---------------------------------------------------------------------------
 # (j) MODE SPLIT (fix-2 R2-1): live sentinel, mode="interactive-lanes"
-# (the new skill's default) + worker (developer) spawn from the OWNING
-# session -> ALLOWED. D-f=A requires the supervising session to spawn its
-# own in-session Workflow/Agent lanes; the guard must not deny those.
+# (explicit compatibility mode) + worker (developer) spawn from the OWNING
+# session -> ALLOWED. Full-cycle relay remains the default.
 # ---------------------------------------------------------------------------
 python3 -c "
 import json
@@ -210,6 +232,40 @@ if [[ $j_exit -eq 0 ]]; then
 else
   fail "(j) mode=interactive-lanes should allow worker spawn (exit=$j_exit)"
 fi
+rm -f "$SENTINEL"
+
+# ---------------------------------------------------------------------------
+# (l) MODE OWNERSHIP: a supervise snapshot from a different live process
+# must not steal the sentinel from the interactive supervisor. This models
+# the background supervise-loop and an ordinary concurrent lead.
+# ---------------------------------------------------------------------------
+sleep 60 &
+BG_PID=$!
+python3 -c "
+import json
+json.dump({'pid': $BG_PID, 'started_at': '2026-07-16T00:00:00Z', 'mode': 'legacy-relay'}, open('$SENTINEL', 'w'))
+"
+cat > "$STATE_ROOT/active.yaml" <<'EOF'
+version: 2
+meta:
+  hard_limit: 3
+sessions: []
+EOF
+supervise_rc=0
+LEADV2_STATE_ROOT="$STATE_ROOT" \
+LEADV2_PROJECT_ROOT="$REPO_DIR" \
+LEADV2_SUPERVISE_OBSERVE_ONLY=1 \
+  bash "${BASH_SOURCE[0]%/*}/../scripts/leadv2-supervise.sh" --json \
+  >"$TMP_DIR/supervise-owner.json" 2>"$TMP_DIR/supervise-owner.err" || supervise_rc=$?
+owner_after="$(python3 -c "import json; print(json.load(open('$SENTINEL')).get('pid',''))")"
+if [[ "$supervise_rc" -eq 0 && "$owner_after" == "$BG_PID" ]]; then
+  pass "(l) background/concurrent snapshot does not steal supervisor sentinel ownership"
+else
+  fail "(l) supervisor ownership changed (rc=$supervise_rc expected=$BG_PID actual=$owner_after)"
+fi
+kill "$BG_PID" 2>/dev/null || true
+wait "$BG_PID" 2>/dev/null || true
+BG_PID=""
 rm -f "$SENTINEL"
 
 # ---------------------------------------------------------------------------

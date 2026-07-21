@@ -3,16 +3,16 @@
 # PostToolUse hook -- matcher `.*` (fires on EVERY tool call).
 # Spec: docs/handoff/LEAD-ANCHOR-01/mission-enforce.md
 #
-# Every LEADV2_STATUS_EVERY (default 15) lead tool calls, prints a compact
+# Every LEADV2_STATUS_EVERY (default 30) lead tool calls, prints a compact
 # (<=12 line) status block from local files only -- no network:
 #   - active task + phase (docs/leadv2/active.md)
-#   - up to 6 open tasks (docs/tasks.yaml), labeled in_progress/open
+#   - up to 3 open tasks (docs/tasks.yaml), labeled in_progress/open
 #   - count of DUE/OVERDUE scheduled-decisions.md rows
 #   - count of background agents with no watchdog (leadv2-bg-watchdog-enforce
 #     state file, read-only here -- never written by this hook)
 #
 # Perf: single python3 process per invocation (reads stdin directly). The
-# every-Nth check happens BEFORE any file parsing, so 14/15 calls do only a
+# every-Nth check happens BEFORE any file parsing, so 29/30 calls do only a
 # counter increment + a single isdir check. tasks.yaml parse result is
 # cached in /tmp keyed on the file's mtime; only re-parsed when it changes.
 # This is the highest-risk hook in the batch (matcher `.*`, EVERY tool call)
@@ -177,7 +177,7 @@ def main():
         pass
 
     try:
-        every = int(os.environ.get('LEADV2_STATUS_EVERY', '15') or '15')
+        every = int(os.environ.get('LEADV2_STATUS_EVERY', '30') or '30')
     except Exception:
         every = 15
     if every <= 0 or turn % every != 0:
@@ -202,7 +202,7 @@ def main():
         if r.get('status') not in ('done', 'closed', 'complete', 'resolved')
     ]
     open_rows.sort(key=lambda r: 0 if r.get('status') == 'in_progress' else 1)
-    shown = open_rows[:6]
+    shown = open_rows[:3]
     if shown:
         lines.append(f"Open tasks ({len(shown)}/{len(open_rows)}):")
         for r in shown:

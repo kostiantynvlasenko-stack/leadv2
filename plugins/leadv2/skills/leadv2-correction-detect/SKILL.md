@@ -1,6 +1,6 @@
 ---
 name: leadv2-correction-detect
-description: "[internal] §6.5 of lead-reflect — classify last N user messages as correction/reinforcement/preference/context using haiku; write high-confidence corrections to docs/leadv2/immune-patterns.yaml (plugin immune store); candidates.jsonl stored at docs/leadv2/correction-detect-candidates.jsonl. Never writes to global MEMORY.md."
+description: "[internal] At reflection, classify recent user corrections and update plugin immune patterns; never global memory."
 allowed-tools:
   - Read
   - Write

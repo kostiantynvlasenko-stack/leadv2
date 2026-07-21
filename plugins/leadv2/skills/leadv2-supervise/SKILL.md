@@ -1,13 +1,11 @@
 ---
 name: leadv2-supervise
-description: "[internal] D-f=variant A (fat interactive supervisor, SUPERVISE-V2-01). The main /leadv2 lead reconciles+adopts existing work, lets the founder pick <=5 tasks, runs them as IN-SESSION Workflow/bg-agent lanes (own worktree each), and attaches leadv2-supervise-loop.sh via Monitor to watch. Legacy tmux/headless fanout (leadv2-fanout.sh) is supervised too but is compatibility-only, not the default dispatch path."
+description: "[internal] Provider-aware full-cycle supervisor. The main /leadv2 lead reconciles work, lets the founder pick <=5 tasks, dispatches each as an independent Claude or Codex /leadv2 session that must complete Phase 0..8, then attaches leadv2-supervise-loop.sh via Monitor."
 allowed-tools:
   - Bash
   - Read
   - AskUserQuestion
   - Monitor
-  - Workflow
-  - Agent
 ---
 
 # Lead v2 Supervise Mode (D-f = variant A)
@@ -19,8 +17,11 @@ what needs him. When NOT: single-task interactive work (use `/leadv2` normally
 ## Target scenario
 
 "I open `/leadv2 supervise`, it reconciles what's already running, I pick a
-few more tasks from a list — it runs them itself and just watches, forwards
-me messages." The main lead becomes a dispatcher + overseer of N task lanes.
+few more tasks from a list — it dispatches them and just watches, forwarding
+me messages." This is a distinct supervisor session, not a single-task lead.
+It owns no task, phase, worktree, task lock, or child prompt history. Each
+child is an independent full lead session; only the shared control plane
+(registry, quota, questions, completion receipts) crosses that boundary.
 Only things that need the founder reach chat.
 
 ## Flow (5 steps, in order)
@@ -43,22 +44,21 @@ Only things that need the founder reach chat.
    first with `recommend:true`). It NEVER dispatches anything itself. Present
    the ranked list via `AskUserQuestion` (multiSelect); founder picks 0-5.
    Zero selection is valid — it means "just watch what's already adopted".
-3. **Run picked lanes IN-SESSION.** For each selected task, the lead spawns a
-   `Workflow` or a background `Agent` lane, each in its OWN worktree (never
-   touching a live child's worktree — off_limits) — this is the default
-   execution architecture per D-f variant A, not N autonomous `claude -p`
-   leads. Register one row per lane in `active.yaml` (via
-   `leadv2-active-registry.sh`) with `protocol_version: 2`,
-   `backend: workflow`, and an (initially empty) `provider_receipts: []`
-   populated as the lane's Codex/GLM calls complete with real job/run ids.
-   This is safe against `hooks/leadv2-supervise-fanout-guard.sh`: step 1's
-   call to `leadv2-supervise.sh` stamps `.supervise-active` with
-   `mode: interactive-lanes` by default (fix-2 R2-1) — the guard never
-   denies THIS session's own Agent/Workflow spawns in that mode; it only
-   denies in `mode: legacy-relay` (a session watching purely external tmux
-   fanout with no in-session lanes of its own — set via
-   `LEADV2_SUPERVISE_MODE=legacy-relay` before invoking `leadv2-supervise.sh`,
-   not used by this flow).
+3. **Dispatch picked tasks as complete child sessions.** Call
+   `scripts/leadv2-fanout.sh --tasks <comma-separated-ids> --provider auto
+   --headless`. Each selected task gets an independent provider session and
+   its own Phase-0 worktree claim. `leadv2-session-route.sh` deterministically
+   chooses the provider/model: routine Light/Standard work may use Codex when
+   its CLI, leadv2 skill, and quota headroom are available; Heavy/Strategic or
+   high-risk tags stay on Claude/Opus. The provider-neutral runner passes
+   `/leadv2 <task-id>` (or the Codex skill-equivalent) and resumes the SAME
+   Claude session/Codex thread until the common
+   canonical `docs/handoff/<task-id>/phase8-passed.flag` or its validated
+   shared control-plane completion receipt exists. A clean model
+   turn without that sentinel is INCOMPLETE, never complete. Child-internal
+   Workflow/Agent calls remain valid phase helpers, but they are not
+   top-level supervised task lanes. Every launch and resume writes auditable
+   `provider_receipts` to `active.yaml`.
 4. **Attach the loop.** `scripts/leadv2-supervise-loop.sh --ensure` via
    `Monitor` — idempotent PID+birth-sentinel attach, never a duplicate loop on
    re-entry/PostCompact. The LOOP renders output, not the lead: URGENT events
@@ -75,18 +75,14 @@ Only things that need the founder reach chat.
      first), `restart`, `abandon`. Only an explicit `restart` answer may
      dispatch again.
 
-## Legacy fanout — compatibility only, not the default
+## Direct fanout — full-cycle dispatch without the supervisor UI
 
-`/leadv2 fanout [--n N] [--backend tmux|headless]` remains a bare
-dispatch-only path: it launches N terminal/headless children via
-`scripts/leadv2-fanout.sh` and exits — no supervision loop attached, no
-picker, no reconciliation. It is **not** the default `/leadv2 supervise`
-dispatch mechanism (D-f resolved: fat interactive supervisor + in-session
-lanes is default). Existing tmux/headless children spawned this way are
-still observed, triple-proof-adopted, and pulse-supervised by the same
-`leadv2-supervise.sh` / `leadv2-supervise-loop.sh` used for Workflow lanes —
-D-e's additive rollout guarantees the 5 pre-existing live children are never
-killed, renamed, or rewritten by the V2 reconciliation.
+`/leadv2 fanout [--n N] [--provider auto|claude|codex]
+[--backend tmux|headless]` uses the same provider router and full Phase 0..8
+runner, but exits after dispatch: no picker, reconciliation, or watch loop.
+`/leadv2 supervise` is fanout plus the interactive selection and monitoring
+control plane. Existing tmux/headless children remain observed and adopted by
+the same `leadv2-supervise.sh` / `leadv2-supervise-loop.sh` machinery.
 
 ## Async question channel — canonical scripts, two stores by design
 
@@ -101,7 +97,7 @@ Both scripts below are REAL, canonical, and live in this plugin's
   its own `git worktree add` checkout needs) and blocks until answered.
   Answered via `scripts/leadv2-answer.sh <q-id> <option-label>` — wired to
   `/leadv2 reply <q-id> <option>` and `/leadv2 questions`.
-- **Same-session embedded subagents (legacy, still valid for THIS use case):**
+- **Same-session embedded subagents (only for child-internal phase helpers):**
   `leadv2_ask_async` / `leadv2_wait_answer` (in `leadv2-helpers.sh`) write
   `docs/handoff/<task_id>/questions-async/<qid>-pending.yaml` — worktree-local,
   fine for an embedded subagent in the SAME session/worktree as the lead.
@@ -136,10 +132,11 @@ given lane's protocol version uses. Do not add a third store.
 
 ## Entry points
 
-- `/leadv2 supervise` — full D-f=A flow above (reconcile+adopt -> pick <=5 ->
-  run in-session lanes -> attach loop).
-- `/leadv2 fanout [--n N] [--backend tmux|headless]` — legacy dispatch-only
-  compatibility path, no supervision loop attached (see above).
+- `/leadv2 supervise` — reconcile+adopt -> pick <=5 -> provider-aware full
+  `/leadv2` child sessions -> attach loop.
+- `/leadv2 fanout [--n N] [--provider auto|claude|codex]
+  [--backend tmux|headless]` — the same full-cycle dispatch, without the
+  interactive supervisor loop.
 
 ## Verification
 
@@ -150,5 +147,10 @@ given lane's protocol version uses. Do not add a third store.
   adoption matrix, tombstone-before-prune, observe_only visibility
   (would_adopt/would_prune never drop an eligible candidate), truth-probe
   timeout->unavailable.
+- `plugins/leadv2/scripts/tests/test-session-route.sh` — deterministic
+  provider/model decisions, quota fallback, and high-risk fail-closed cases.
+- `plugins/leadv2/scripts/tests/test-codex-session-runner.sh` — fake Codex
+  fresh/resume smoke test proving the runner requires the common Phase-8
+  sentinel and persists provider receipts.
 
 Run both before relying on the watch loop in a real session.

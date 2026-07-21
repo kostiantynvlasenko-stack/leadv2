@@ -8,9 +8,8 @@
 #      guard -> loud WARN -> safe fallback (existing class or Standard),
 #      never a silent Heavy escalation.
 #   2. launch_headless(): a missing/non-executable leadv2-session-runner.sh
-#      used to `exec` a dead path. Fixed: existence guard -> loud WARN ->
-#      fallback to a plain `claude -p` launch (no resume-on-exit loop, but a
-#      REAL launch instead of a silent no-op).
+#      must fail closed. A raw one-shot fallback cannot prove Phase 0..8 or
+#      the canonical Phase-8 completion proof.
 #
 # Tests:
 #   1. bash -n syntax check (fanout.sh + the two promoted scripts)
@@ -18,8 +17,7 @@
 #   3. classify script hidden -> WARN on stderr, class falls back to
 #      Standard/existing (NOT Heavy) -- calls the REAL fanout.sh --dry-run,
 #      not a reimplementation
-#   4. session-runner hidden -> real --headless launch WARNs and falls back
-#      to a plain claude -p invocation instead of silently failing
+#   4. session-runner hidden -> real --headless launch is refused loudly
 #
 # Portable: no GNU-only date/sed -i/timeout/flock. Sandboxed via
 # LEADV2_PROJECT_ROOT / LEADV2_STATE_ROOT / LEADV2_FANOUT_CLAUDE_BIN /
@@ -67,9 +65,13 @@ YAML
 
 test_1_syntax() {
   log "Test 1: bash -n syntax check"
-  bash -n "$FANOUT_SH" 2>/dev/null && bash -n "$CLASSIFY_SH" 2>/dev/null && bash -n "$RUNNER_SH" 2>/dev/null \
-    && pass "Test 1: bash -n OK (fanout + classify + session-runner)" \
-    || fail "Test 1: bash -n FAILED"
+  if bash -n "$FANOUT_SH" 2>/dev/null \
+     && bash -n "$CLASSIFY_SH" 2>/dev/null \
+     && bash -n "$RUNNER_SH" 2>/dev/null; then
+    pass "Test 1: bash -n OK (fanout + classify + session-runner)"
+  else
+    fail "Test 1: bash -n FAILED"
+  fi
 }
 
 test_2_classify_present_standard() {
@@ -78,7 +80,8 @@ test_2_classify_present_standard() {
   sandbox="$(_new_sandbox)"
   out="$(
     LEADV2_PROJECT_ROOT="${sandbox}/proj" LEADV2_STATE_ROOT="${sandbox}/state" \
-      bash "$FANOUT_SH" --dry-run --tasks FCG-T1 2>&1
+      LEADV2_SKIP_DRIFT_GUARD=1 \
+      bash "$FANOUT_SH" --provider claude --dry-run --tasks FCG-T1 2>&1
   )" || true
   rm -rf "$sandbox"
   if [[ "$out" == *"class=Standard"* && "$out" != *"classify script unavailable"* ]]; then
@@ -97,7 +100,8 @@ test_3_classify_missing_safe_fallback() {
   trap 'mv "'"$hidden"'" "'"$CLASSIFY_SH"'" 2>/dev/null || true' RETURN
   out="$(
     LEADV2_PROJECT_ROOT="${sandbox}/proj" LEADV2_STATE_ROOT="${sandbox}/state" \
-      bash "$FANOUT_SH" --dry-run --tasks FCG-T1 2>&1
+      LEADV2_SKIP_DRIFT_GUARD=1 \
+      bash "$FANOUT_SH" --provider claude --dry-run --tasks FCG-T1 2>&1
   )" || true
   mv "$hidden" "$CLASSIFY_SH"
   trap - RETURN
@@ -109,8 +113,8 @@ test_3_classify_missing_safe_fallback() {
   fi
 }
 
-test_4_runner_missing_falls_back_to_claude_p() {
-  log "Test 4: session-runner hidden -> real headless launch WARNs and falls back to plain claude -p"
+test_4_runner_missing_fails_closed() {
+  log "Test 4: session-runner hidden -> real headless launch fails closed"
   local sandbox out hidden stub
   sandbox="$(_new_sandbox)"
   hidden="${RUNNER_SH}.hidden-for-test"
@@ -124,15 +128,15 @@ STUB
   chmod +x "$stub"
   out="$(
     LEADV2_PROJECT_ROOT="${sandbox}/proj" LEADV2_STATE_ROOT="${sandbox}/state" \
+      LEADV2_SKIP_DRIFT_GUARD=1 \
       LEADV2_FANOUT_CLAUDE_BIN="$stub" \
-      bash "$FANOUT_SH" --headless --tasks FCG-T1 2>&1
+      bash "$FANOUT_SH" --provider claude --headless --tasks FCG-T1 2>&1
   )" || true
   mv "$hidden" "$RUNNER_SH"
   trap - RETURN
-  sleep 0.3  # let the backgrounded stub process exit before sandbox teardown
   rm -rf "$sandbox"
-  if [[ "$out" == *"WARN: leadv2-session-runner.sh missing"* && "$out" == *"headless launch: task=FCG-T1"* ]]; then
-    pass "Test 4: WARN printed, launch still happened via the fallback claude -p path"
+  if [[ "$out" == *"ERROR: leadv2-session-runner.sh missing/not executable"* && "$out" != *"headless launch: task=FCG-T1"* ]]; then
+    pass "Test 4: missing completion runner refused the launch"
   else
     fail "Test 4: out=$out"
   fi
@@ -145,7 +149,7 @@ main() {
   test_1_syntax
   test_2_classify_present_standard
   test_3_classify_missing_safe_fallback
-  test_4_runner_missing_falls_back_to_claude_p
+  test_4_runner_missing_fails_closed
   echo ""
   log "=== Results: PASS=$PASS FAIL=$FAIL ==="
   if [[ "${#ERRORS[@]}" -gt 0 ]]; then

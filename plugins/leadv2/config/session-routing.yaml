@@ -1,0 +1,37 @@
+version: 1
+
+# Provider policy for autonomous full-session /leadv2 children.
+# A repo may replace this file with:
+#   .claude/leadv2-overrides/session-routing.yaml
+# Environment overrides remain the final authority (see leadv2-session-route.sh).
+default_provider: auto
+
+codex:
+  enabled: true
+  require_leadv2_skill: true
+  max_used_percent: 85
+  prefer_for_classes: [Light, Standard, Standard-light]
+  models:
+    light:
+      model: gpt-5.6-luna
+      effort: low
+    standard:
+      model: gpt-5.6-terra
+      effort: medium
+
+claude:
+  models:
+    light:
+      model: sonnet
+      effort: medium
+    standard:
+      model: sonnet
+      effort: medium
+    heavy:
+      model: opus
+      effort: high
+
+high_risk:
+  force_provider: claude
+  tags: [auth, rls, safety, publish, security, arch]
+

@@ -107,19 +107,13 @@ SUPERVISE_SENTINEL="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-p
 # R2-1): (re)write the supervise-mode sentinel -- {"pid","started_at","mode"}
 # -- consumed by hooks/leadv2-supervise-fanout-guard.sh (PreToolUse:Agent).
 # `mode` resolves the D-f=A contradiction found in codex-review-2.md finding
-# 1: D-f=A's default flow (SKILL.md step 3) REQUIRES the supervising session
-# to spawn in-session Workflow/Agent lanes itself, so the guard must NOT deny
-# those. Two modes:
-#   - "interactive-lanes" (DEFAULT, this is the new skill's flow): the guard
-#     never denies this session's own Agent/Workflow spawns -- they ARE the
-#     lanes D-f=A requires.
-#   - "legacy-relay": the ORIGINAL guard purpose -- a session watching only
-#     external tmux fanout with no in-session lanes of its own; any Agent
-#     spawn here is presumptively accidental and the guard denies it,
-#     directing the caller to scripts/leadv2-fanout.sh instead. Set via
-#     LEADV2_SUPERVISE_MODE=legacy-relay before invoking this script (no
-#     current caller sets this yet -- reserved for a future legacy-only
-#     entry point / compat wrapper).
+# 1. The current default is provider-aware full-cycle relay: the supervisor
+# dispatches complete Claude/Codex sessions through leadv2-fanout.sh and must
+# not create abbreviated in-session worker lanes. Two compatibility modes:
+#   - "legacy-relay" (DEFAULT): coordinator-only; any Agent spawn is denied
+#     and directed to the provider-neutral full-cycle fanout runner.
+#   - "interactive-lanes": compatibility escape hatch for old flows that
+#     intentionally use same-session Workflow/Agent lanes.
 # `mode` is recomputed on every (re)write (reflects the CURRENT invocation's
 # intent), while pid/started_at identity is preserved for a live sentinel.
 # Idempotent: a live sentinel keeps its original started_at; a missing/dead
@@ -129,9 +123,9 @@ SUPERVISE_SENTINEL="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-p
 # guard itself the next time it sees a dead pid. Deleted by 799dc99's B1
 # root-resolution refactor and never re-added -- guard was silently inert
 # (lying-green: hook installed, reads a file nobody wrote) until fix-1.
-_SUP_MODE="${LEADV2_SUPERVISE_MODE:-interactive-lanes}"
+_SUP_MODE="${LEADV2_SUPERVISE_MODE:-legacy-relay}"
 if [[ "$_SUP_MODE" != "interactive-lanes" && "$_SUP_MODE" != "legacy-relay" ]]; then
-  _SUP_MODE="interactive-lanes"
+  _SUP_MODE="legacy-relay"
 fi
 if [[ -f "${SCRIPT_DIR}/leadv2-active-registry.sh" ]]; then
   # shellcheck source=leadv2-active-registry.sh
@@ -151,16 +145,37 @@ def pid_alive(pid_val):
         return False
 
 existing_started_at = None
+existing_pid = None
+existing_mode = None
 if os.path.isfile(path):
     try:
         with open(path, encoding="utf-8") as fh:
             d = json.load(fh) or {}
         if pid_alive(d.get("pid")):
             existing_started_at = d.get("started_at")
+            existing_pid = int(d.get("pid"))
+            existing_mode = d.get("mode")
     except Exception:
         pass
 
-out = {"pid": int(pid_str), "started_at": existing_started_at or ts, "mode": mode}
+# A background supervise-loop and a concurrent ordinary lead both call this
+# snapshot script. Neither may steal ownership from the live interactive
+# supervisor: the PreToolUse guard is intentionally scoped to one process
+# tree. Only the current owner may refresh its own mode; a different live PID
+# preserves the existing identity and mode verbatim.
+caller_pid = int(pid_str)
+if existing_pid is not None and existing_pid != caller_pid:
+    owner_pid = existing_pid
+    owner_mode = existing_mode or "legacy-relay"
+else:
+    owner_pid = caller_pid
+    owner_mode = mode
+
+out = {
+    "pid": owner_pid,
+    "started_at": existing_started_at or ts,
+    "mode": owner_mode,
+}
 dir_ = os.path.dirname(path)
 os.makedirs(dir_, exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
@@ -174,9 +189,8 @@ fi
 # worktree of this repo, unlike HANDOFF_DIR above.
 CP_QUESTIONS_DIR="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" questions)"
 # SUPERVISOR-RETRO-01 §5: consume the `closed` bus event published by
-# scripts/leadv2-finish.sh — a second, independent signal alongside the
-# phase8-passed.flag diff above (a task can close via leadv2-finish.sh from
-# a HOST outside this worktree, where the flag file may not be visible yet).
+# scripts/leadv2-phase8-assert.sh after all seven hard assertions pass — a
+# second, shared signal alongside the worktree-local phase8-passed.flag.
 LEADV2_DIR_RESOLVED="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" 2>/dev/null || true)"
 BUS_JSONL="${LEADV2_DIR_RESOLVED:+${LEADV2_DIR_RESOLVED}/bus.jsonl}"
 BUS_OFFSET_FILE="${LEADV2_DIR_RESOLVED:+${LEADV2_DIR_RESOLVED}/.bus-offsets/supervise-closed-consumer}"
@@ -351,6 +365,7 @@ try:
 except Exception:
     _truth = {"status": "unavailable", "breaches": []}
 truth_probe_status = _truth.get("status", "unavailable")
+truth_probe_reason = _truth.get("reason")
 truth_breaches = _truth.get("breaches") or []
 
 STUCK_MIN = 25
@@ -1042,6 +1057,7 @@ if json_mode:
         # calls always report status "skipped" with an empty list; consumers
         # must not read that as "clear".
         "truth_probe": truth_probe_status,
+        "truth_probe_reason": truth_probe_reason,
         "truth_breaches": truth_breaches,
         # D-d (item 4): orphans are reported, NEVER silently adopted; dead
         # rows are corroborated-twice and already tombstoned+pruned above

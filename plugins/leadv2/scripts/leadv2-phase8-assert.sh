@@ -24,7 +24,8 @@
 #   W4  docs/agents/product-owner/QUEUE.md  has "[x]" line for task_id
 #
 # Exit codes:
-#   0   all HARD assertions PASS — writes sentinel docs/handoff/<task_id>/phase8-passed.flag
+#   0   all HARD assertions PASS — writes the worktree-local sentinel and a
+#       shared control-plane completion receipt visible from every worktree
 #   1   one or more HARD assertions FAILED — prints missing-item list to stderr
 #   2   bad usage (missing task_id arg)
 
@@ -180,7 +181,6 @@ fi
 # entry in reflect-history.yaml is required — it proves lead-reflect §5a ran
 # and learning data was captured (not just a board cosmetic render).
 A4_REFLECT_OK=0
-A4_BOARD_OK=0
 
 # Primary: structured entry in reflect-history.yaml
 if [[ -f "$REFLECT_HISTORY" ]]; then
@@ -217,7 +217,6 @@ if re.search(r'\b${TASK_ID}\s+✅', content):
     sys.exit(0)
 sys.exit(1)
 " 2>/dev/null; then
-    A4_BOARD_OK=1
     log_pass "A4 LEAD_V2_STATE.md: board has ${TASK_ID} ✅ (cosmetic)"
   else
     log_warning "A4 LEAD_V2_STATE.md: missing '${TASK_ID} ✅' board line — non-blocking (reflect-history.yaml is authoritative)"
@@ -234,7 +233,6 @@ fi
 # (case-insensitive: pending, verify-tonight, verify tonight, DO AFTER COMPACT, TODO verify)
 # When field is simply ABSENT/empty -> WARNING only (non-blocking). Keeps anti-lying-green
 # teeth without blocking 294/304 legacy closed YAMLs that lack the field entirely.
-A5_OK=0
 if [[ -f "$CLOSED_YAML" ]]; then
   # Use python3 -c with args to avoid heredoc; exit 0=ok 1=placeholder 2=absent/unparseable
   # Initialize before invocation so set -e abort cannot prevent capture.
@@ -255,7 +253,6 @@ sys.exit(1 if PLACEHOLDER_RE.search(value) else 0)
   '  "$TASK_ID" "$CLOSED_YAML" 2>/dev/null || a5_rc=$?
   case $a5_rc in
     0)
-      A5_OK=1
       log_pass "A5 closed YAML: live_signal/verification present and not a placeholder"
       ;;
     1)
@@ -263,7 +260,6 @@ sys.exit(1 if PLACEHOLDER_RE.search(value) else 0)
       failures+=("A5: ${CLOSED_YAML} has placeholder lie-language (pending/TODO verify/etc.) -- replace with real evidence or remove the field")
       ;;
     *)
-      A5_OK=1
       log_warning "A5 closed YAML: live_signal/verification absent or empty -- non-blocking (set when evidence available)"
       ;;
   esac
@@ -374,12 +370,68 @@ fi
 
 # ── write sentinel on full PASS ───────────────────────────────────────────────
 mkdir -p "$(dirname "$SENTINEL")"
+ASSERTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf -- 'phase8-passed: %s\nasserted_at: %s\ntask_id: %s\nassertions: 7/7\n' \
   "${TASK_ID}" \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "${ASSERTED_AT}" \
   "${TASK_ID}" \
   > "$SENTINEL"
 
+# A linked worktree's docs/handoff directory is private to that worktree. The
+# supervisor and provider-neutral runner live in the main checkout, so the
+# local flag alone is not a cross-session completion signal. Mirror the PASS
+# into the canonical control plane atomically. This receipt is written only
+# after all hard Phase-8 assertions passed; consumers validate its schema and
+# never infer completion from a clean model exit.
+COMPLETION_RECEIPT="$(
+  PROJECT_ROOT="$LEADV2_PROJECT_ROOT" \
+    "${SCRIPT_DIR}/leadv2-state-path.sh" --no-link "completions/${TASK_ID}.json"
+)"
+if ! python3 - "$COMPLETION_RECEIPT" "$TASK_ID" "$ASSERTED_AT" "$SENTINEL" "$LEADV2_PROJECT_ROOT" <<'PYEOF'
+import json, os, sys, tempfile
+
+path, task_id, asserted_at, sentinel, project_root = sys.argv[1:]
+payload = {
+    "schema_version": 1,
+    "task_id": task_id,
+    "status": "phase8_passed",
+    "asserted_at": asserted_at,
+    "assertions": "7/7",
+    "worktree": project_root,
+    "sentinel": sentinel,
+}
+directory = os.path.dirname(path)
+os.makedirs(directory, exist_ok=True)
+fd, tmp = tempfile.mkstemp(prefix=".completion.", suffix=".tmp", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, sort_keys=True)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
+PYEOF
+then
+  rm -f "$SENTINEL"
+  log_error "Phase 8 assertions passed, but shared completion receipt could not be written: ${COMPLETION_RECEIPT}"
+  exit 1
+fi
+
+# Bus publication is a wake-up optimization for the periodic supervisor. The
+# durable receipt above remains the source of truth if bus publication fails.
+if ! PROJECT_ROOT="$LEADV2_PROJECT_ROOT" \
+  "${SCRIPT_DIR}/leadv2-bus.sh" publish "$TASK_ID" closed \
+  "{\"status\":\"phase8_passed\",\"asserted_at\":\"${ASSERTED_AT}\"}"; then
+  log_warning "shared completion receipt exists, but closed bus event could not be published"
+fi
+
 log_info "Sentinel written: ${SENTINEL}"
+log_info "Completion receipt written: ${COMPLETION_RECEIPT}"
 log_info "Phase 8 gate PASSED for ${TASK_ID} (7/7 hard assertions)"
 exit 0

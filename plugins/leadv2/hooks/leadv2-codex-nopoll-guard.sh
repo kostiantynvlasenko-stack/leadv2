@@ -12,6 +12,10 @@ trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
+# shellcheck source=leadv2-mode-isolation.sh
+source "$_LV2_D/leadv2-mode-isolation.sh"
+leadv2_hook_is_supervisor_session "$INPUT" && exit 0
+
 CMD="$(printf '%s' "$INPUT" | python3 -c "
 import sys, json
 try:
@@ -51,17 +55,7 @@ done
 
 _TASK_ID=""
 if [[ -n "$_ACTIVE_YAML" ]]; then
-    _TASK_ID="$(python3 - "$_ACTIVE_YAML" <<'PYEOF' 2>/dev/null || true
-import sys, yaml
-try:
-    d = yaml.safe_load(open(sys.argv[1])) or {}
-    sessions = d.get('sessions') or []
-    if sessions:
-        print(sessions[0].get('task_id', '').strip())
-except Exception:
-    pass
-PYEOF
-)"
+    _TASK_ID="$(leadv2_hook_resolve_task_id "$INPUT" "$_ACTIVE_YAML" 2>/dev/null || true)"
 fi
 
 _TOOL_CALL=0

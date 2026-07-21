@@ -1,178 +1,148 @@
 #!/usr/bin/env bash
-# leadv2-session-spawner.sh — Spawn a new /leadv2 daemon session for a given task.
+# leadv2-session-spawner.sh — compatibility entrypoint for autonomous child
+# dispatch. All launches delegate to leadv2-fanout.sh so self-spawn, daemon,
+# and interactive supervise use the same classifier, provider router,
+# active-registry schema, Phase 0..8 runner, and completion contract.
 #
-# Usage: leadv2-session-spawner.sh <task_id_to_spawn>
-#        leadv2-session-spawner.sh --dry-run <task_id_to_spawn>   (print command, no spawn)
+# Usage:
+#   leadv2-session-spawner.sh [--dry-run] [--wait] <task_id>
 #
 # Environment:
-#   LEADV2_DAEMON                   — set to 1 in child (passed via env)
-#   LEADV2_GATE1_AUTO_ACCEPT_SEC    — auto-accept timeout for child gate1 (default 5)
-#   LEADV2_MAX_SELF_SPAWNS_PER_DAY  — daily spawn cap (default 4)
-#   LEADV2_PROJECT_ROOT             — project root (default pwd)
-#
-# Optional spawn-flag env vars (all forwarded to `claude -p` only when set):
-#   LEADV2_SPAWN_MODEL              — e.g. "sonnet", "opus"
-#   LEADV2_SPAWN_EFFORT             — e.g. "low", "medium", "high", "max"
-#   LEADV2_SPAWN_MCP_CONFIG         — path to an MCP config JSON file
-#   LEADV2_SPAWN_SETTINGS           — path to a settings.json file
-#   LEADV2_SPAWN_PERMISSION_MODE    — e.g. "auto", "acceptEdits"
+#   LEADV2_PROJECT_ROOT               project root
+#   LEADV2_SPAWN_PROVIDER             auto|claude|codex (default auto)
+#   LEADV2_SPAWN_MODEL                optional explicit model override
+#   LEADV2_SPAWN_BUDGET               Claude per-attempt USD ceiling
+#   LEADV2_SPAWN_PERMISSION_MODE      Claude permission mode override
+#   LEADV2_MAX_SELF_SPAWNS_PER_DAY    default 4
+#   LEADV2_SPAWN_WAIT_TIMEOUT_S       default 7200 when --wait is used
+#   LEADV2_SPAWN_WAIT_POLL_S          default 5
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Resolution order: explicit override → CLAUDE_PROJECT_DIR (v2.1.144+) → PROJECT_ROOT → script-relative fallback
-LEADV2_PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}}}"
-
-# shellcheck source=leadv2-active-registry.sh
-source "$SCRIPT_DIR/leadv2-active-registry.sh"
+PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}}}"
+FANOUT="${LEADV2_FANOUT_BIN:-$SCRIPT_DIR/leadv2-fanout.sh}"
+STATE_PATH="${LEADV2_STATE_PATH_BIN:-$SCRIPT_DIR/leadv2-state-path.sh}"
 
 log() { printf -- '[spawner] %s\n' "$*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
 
-# ── Dry-run flag ──────────────────────────────────────────────────────────────
 DRY_RUN=false
-if [[ "${1:-}" == "--dry-run" ]]; then
-  DRY_RUN=true
-  shift
-fi
-
-task_id="${1:?Usage: leadv2-session-spawner.sh [--dry-run] <task_id_to_spawn>}"
-
-SPAWNED_DIR="${LEADV2_PROJECT_ROOT}/docs/leadv2/spawned"
-SPAWN_LOG_DIR="${LEADV2_PROJECT_ROOT}/docs/leadv2/spawned"
-MAX_SPAWNS_PER_DAY="${LEADV2_MAX_SELF_SPAWNS_PER_DAY:-4}"
-TODAY_UTCZ=$(date -u +"%Y%m%d")
-
-# ── 1: Check hard limit ────────────────────────────────────────────────────
-if ! leadv2_active_check_limits "Standard"; then
-  rc=$?
-  case "$rc" in
-    1) log "ERROR: hard session limit reached — refusing spawn"; exit 1 ;;
-    2) log "ERROR: heavy/strategic conflict — refusing spawn"; exit 1 ;;
-    *) log "ERROR: limit check failed (rc=$rc) — refusing spawn"; exit 1 ;;
+WAIT_FOR_CLOSE="${LEADV2_SPAWN_WAIT:-0}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true; shift ;;
+    --wait) WAIT_FOR_CLOSE=1; shift ;;
+    -h|--help)
+      sed -n '2,19p' "$0"
+      exit 0
+      ;;
+    --*) die "unknown option: $1" ;;
+    *) break ;;
   esac
-fi
+done
 
-# ── Daily spawn cap check ──────────────────────────────────────────────────
+TASK_ID="${1:-}"
+[[ -n "$TASK_ID" && $# -eq 1 ]] || die "usage: leadv2-session-spawner.sh [--dry-run] [--wait] <task_id>"
+[[ -x "$FANOUT" ]] || die "provider-neutral fanout missing/not executable: $FANOUT"
+
+PROVIDER="${LEADV2_SPAWN_PROVIDER:-${LEADV2_SESSION_PROVIDER:-auto}}"
+case "$PROVIDER" in
+  auto|claude|codex) ;;
+  *) die "LEADV2_SPAWN_PROVIDER must be auto, claude, or codex (got: $PROVIDER)" ;;
+esac
+
+# Daily cap lives in the shared control plane; worktree-local spawned/ folders
+# previously let parallel sessions each believe they had their own fresh cap.
+SPAWNED_DIR="$(PROJECT_ROOT="$PROJECT_ROOT" "$STATE_PATH" --no-link spawned)"
 mkdir -p "$SPAWNED_DIR"
-today_spawn_count=0
-if [[ -d "$SPAWNED_DIR" ]]; then
-  today_spawn_count=$(find "$SPAWNED_DIR" -maxdepth 1 -name "${TODAY_UTCZ}-*.json" 2>/dev/null | wc -l | tr -d ' ')
-fi
-if [[ "$today_spawn_count" -ge "$MAX_SPAWNS_PER_DAY" ]]; then
-  log "ERROR: daily spawn cap reached ($today_spawn_count/$MAX_SPAWNS_PER_DAY) — refusing"
-  exit 1
+MAX_SPAWNS_PER_DAY="${LEADV2_MAX_SELF_SPAWNS_PER_DAY:-4}"
+TODAY_UTCZ="$(date -u +%Y%m%d)"
+SPAWN_COUNT="$(find "$SPAWNED_DIR" -maxdepth 1 -name "${TODAY_UTCZ}-*.json" 2>/dev/null | wc -l | tr -d ' ')"
+if (( SPAWN_COUNT >= MAX_SPAWNS_PER_DAY )); then
+  die "daily spawn cap reached (${SPAWN_COUNT}/${MAX_SPAWNS_PER_DAY})"
 fi
 
-# ── 2: Generate child session ID ──────────────────────────────────────────
-CHILD_SID="s-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+fanout_args=(--tasks "$TASK_ID" --n 1 --provider "$PROVIDER" --headless)
+[[ "$DRY_RUN" == "true" ]] && fanout_args+=(--dry-run)
+[[ -n "${LEADV2_SPAWN_MODEL:-}" ]] && fanout_args+=(--lead-model "$LEADV2_SPAWN_MODEL")
 
-# ── 3: Write PENDING row to active.yaml BEFORE spawn ──────────────────────
-yaml_file="$(_leadv2_yaml_file)"
-lockfile="$(_leadv2_yaml_lockfile)"
-ts_now="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-worktree="${LEADV2_PROJECT_ROOT}"
-branch="$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || printf -- 'unknown')"
-pulse_log="docs/leadv2/tasks/${task_id}/pulse.md"
-
-_leadv2_yaml_py_lock \
-  "$lockfile" "$yaml_file" register \
-  "$CHILD_SID" "$task_id" "$worktree" "$branch" "$ts_now" \
-  "spawning" "Standard" "null" "pending" "$$" \
-  "true" "$ts_now" "$pulse_log"
-
-log "pending row written for task=${task_id} sid=${CHILD_SID}"
-
-# ── 4: Create spawned/<CHILD_SID>.json ────────────────────────────────────
-mkdir -p "$SPAWNED_DIR"
-SPAWN_JSON="${SPAWNED_DIR}/${CHILD_SID}.json"
-python3 - "$SPAWN_JSON" "$CHILD_SID" "$task_id" "$ts_now" "$$" <<'PYEOF'
-import sys, json
-spawn_file, sid, task_id, started_at, parent_pid = sys.argv[1:]
-with open(spawn_file, "w") as f:
-    json.dump({
-        "session_id": sid,
-        "task_id": task_id,
-        "started_at": started_at,
-        "parent_session_id": f"s-parent-{parent_pid}",
-        "pid": None,
-        "status": "pending",
-    }, f, indent=2)
-PYEOF
-log "spawn record created: $SPAWN_JSON"
-
-# ── 5: Spawn the child session ─────────────────────────────────────────────
-SPAWN_LOG="${SPAWN_LOG_DIR}/${CHILD_SID}.log"
-mkdir -p "$SPAWN_LOG_DIR"
-
+log "delegating task=${TASK_ID} provider=${PROVIDER} to the common full-cycle fanout"
+export LEADV2_PROJECT_ROOT="$PROJECT_ROOT"
 export LEADV2_DAEMON=1
-export LEADV2_GATE1_AUTO_ACCEPT_SEC="${LEADV2_GATE1_AUTO_ACCEPT_SEC:-5}"
-export LEADV2_PROJECT_ROOT
-export LEADV2_PARENT_SESSION_ID="$CHILD_SID"
-
-# ── Build spawn command array (safe quoting via printf %q) ────────────────────
-# Base flags — always present
-# Budget: LEADV2_SPAWN_BUDGET may be set by parallel dispatch (D17) per class.
-# Default = 5 (Standard). Light = 3, Heavy = 12 (set by caller).
-_spawn_budget="${LEADV2_SPAWN_BUDGET:-5}"
-_spawn_cmd=(
-  claude -p "/leadv2 next"
-  --output-format text
-  --max-turns 50
-  --max-budget-usd "$_spawn_budget"
-)
-
-# Permission mode: use env override if set, else fall back to bypassPermissions (D8)
-# bypassPermissions ensures unattended children never stall on a permission prompt.
-_perm_mode="${LEADV2_SPAWN_PERMISSION_MODE:-bypassPermissions}"
-_spawn_cmd+=(--permission-mode "$_perm_mode")
-
-# Optional flags — appended only when the corresponding env var is non-empty
-[[ -n "${LEADV2_SPAWN_MODEL:-}" ]]       && _spawn_cmd+=(--model       "$LEADV2_SPAWN_MODEL")
-[[ -n "${LEADV2_SPAWN_EFFORT:-}" ]]      && _spawn_cmd+=(--effort      "$LEADV2_SPAWN_EFFORT")
-[[ -n "${LEADV2_SPAWN_MCP_CONFIG:-}" ]]  && _spawn_cmd+=(--mcp-config  "$LEADV2_SPAWN_MCP_CONFIG")
-[[ -n "${LEADV2_SPAWN_SETTINGS:-}" ]]    && _spawn_cmd+=(--settings    "$LEADV2_SPAWN_SETTINGS")
+export LEADV2_ASYNC_QUESTIONS=1
+export LEADV2_CLAUDE_MAX_BUDGET_USD="${LEADV2_CLAUDE_MAX_BUDGET_USD:-${LEADV2_SPAWN_BUDGET:-}}"
+export LEADV2_CLAUDE_PERMISSION_MODE="${LEADV2_CLAUDE_PERMISSION_MODE:-${LEADV2_SPAWN_PERMISSION_MODE:-bypassPermissions}}"
+"$FANOUT" "${fanout_args[@]}"
 
 if [[ "$DRY_RUN" == "true" ]]; then
-  log "DRY_RUN: would execute: ${_spawn_cmd[*]}"
   exit 0
 fi
 
-# macOS has no setsid (FIX-FANOUT-MACOS-LAUNCH-01): fall back to a plain
-# backgrounded nohup + disown, which still detaches from the controlling
-# terminal; stdin/stdout/stderr redirection is identical on both branches.
-if command -v setsid >/dev/null 2>&1; then
-  setsid nohup "${_spawn_cmd[@]}" \
-    </dev/null \
-    >>"$SPAWN_LOG" 2>&1 &
-else
-  nohup "${_spawn_cmd[@]}" \
-    </dev/null \
-    >>"$SPAWN_LOG" 2>&1 &
-  disown
-fi
-
-CHILD_PID=$!
-
-# ── 6: Record child PID in spawned/<CHILD_SID>.json ───────────────────────
-python3 - "$SPAWN_JSON" "$CHILD_PID" <<'PYEOF'
-import sys, json
-spawn_file, pid_str = sys.argv[1], sys.argv[2]
-with open(spawn_file) as f:
-    d = json.load(f)
-d["pid"] = int(pid_str)
-d["status"] = "running"
-with open(spawn_file, "w") as f:
-    json.dump(d, f, indent=2)
+SPAWN_ID="${TODAY_UTCZ}-$(date -u +%H%M%S)-$$"
+SPAWN_RECORD="${SPAWNED_DIR}/${SPAWN_ID}.json"
+python3 - "$SPAWN_RECORD" "$SPAWN_ID" "$TASK_ID" "$PROVIDER" <<'PYEOF'
+import datetime, json, os, sys, tempfile
+path, spawn_id, task_id, provider = sys.argv[1:]
+payload = {
+    "schema_version": 2,
+    "spawn_id": spawn_id,
+    "task_id": task_id,
+    "requested_provider": provider,
+    "status": "dispatched",
+    "dispatched_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+fd, tmp = tempfile.mkstemp(prefix=".spawn.", suffix=".tmp", dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+os.replace(tmp, path)
 PYEOF
 
-# Update pid in active.yaml now that we have the real pid
-_leadv2_yaml_py_lock \
-  "$lockfile" "$yaml_file" update_pid "$task_id" "$CHILD_PID" 2>/dev/null || true
-_leadv2_yaml_py_lock \
-  "$lockfile" "$yaml_file" update_pulse "$task_id" "$ts_now" 2>/dev/null || true
+if [[ "$WAIT_FOR_CLOSE" != "1" && "$WAIT_FOR_CLOSE" != "true" ]]; then
+  log "dispatched ${TASK_ID}; receipt=${SPAWN_RECORD}"
+  exit 0
+fi
 
-# ── 7: Print summary ───────────────────────────────────────────────────────
-printf -- 'spawned session %s → PID %d for task %s. log: %s\n' \
-  "$CHILD_SID" "$CHILD_PID" "$task_id" "$SPAWN_LOG"
+COMPLETION_RECEIPT="$(PROJECT_ROOT="$PROJECT_ROOT" "$STATE_PATH" --no-link "completions/${TASK_ID}.json")"
+LOCAL_SENTINEL="$PROJECT_ROOT/docs/handoff/$TASK_ID/phase8-passed.flag"
+RUNNER_PID_FILE="$PROJECT_ROOT/docs/handoff/$TASK_ID/.session-runner.pid"
+WAIT_TIMEOUT_S="${LEADV2_SPAWN_WAIT_TIMEOUT_S:-7200}"
+WAIT_POLL_S="${LEADV2_SPAWN_WAIT_POLL_S:-5}"
+START_EPOCH="$(date +%s)"
+SAW_RUNNER=false
 
-exit 0
+completion_valid() {
+  [[ -f "$LOCAL_SENTINEL" ]] && return 0
+  [[ -f "$COMPLETION_RECEIPT" ]] || return 1
+  python3 - "$COMPLETION_RECEIPT" "$TASK_ID" <<'PYEOF' >/dev/null 2>&1
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if data.get("schema_version") == 1
+                 and data.get("task_id") == sys.argv[2]
+                 and data.get("status") == "phase8_passed"
+                 and data.get("assertions") == "7/7" else 1)
+PYEOF
+}
+
+while true; do
+  if completion_valid; then
+    log "task=${TASK_ID} reached validated Phase-8 completion"
+    exit 0
+  fi
+
+  if [[ -s "$RUNNER_PID_FILE" ]]; then
+    runner_pid="$(tr -d '[:space:]' < "$RUNNER_PID_FILE")"
+    if [[ "$runner_pid" =~ ^[0-9]+$ ]] && kill -0 "$runner_pid" 2>/dev/null; then
+      SAW_RUNNER=true
+    elif [[ "$SAW_RUNNER" == "true" ]]; then
+      die "runner pid=${runner_pid:-unknown} exited without validated Phase-8 completion"
+    fi
+  fi
+
+  now_epoch="$(date +%s)"
+  if (( now_epoch - START_EPOCH >= WAIT_TIMEOUT_S )); then
+    die "timed out after ${WAIT_TIMEOUT_S}s waiting for task=${TASK_ID} completion"
+  fi
+  sleep "$WAIT_POLL_S"
+done

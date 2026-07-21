@@ -95,18 +95,13 @@ Skills: codebase-memory, supabase-ops, database-patterns
 
 **Override rule:** lead may override `agent_hint` by writing `agent_hint_override: <type>` in the per-step mission file. Include a one-line justification comment. Never silently ignore hint — either use it or document the override.
 
-### 1d. Cache warming before parallel developer spawns
+### 1d. Prompt-cache discipline for parallel developer spawns
 
-If `plan.parallel_groups` has >1 developer in the same group → pre-warm before spawning:
-```bash
-# Warm developer/sonnet prefix if ≥2 developer spawns in first group
-warm_chain "developer:sonnet"
-# Or directly:
-bash .claude/scripts/lv2 leadv2-cache-warm.sh --role developer --model sonnet &
-# Proceed to spawn — warm runs in background, max 3s wait enforced
-```
-
-Skip if single-spawn phase (break-even only at N≥2 same-role spawns).
+Do **not** run a standalone API cache-warmer. Its system prefix does not match
+Claude Code's system/tool prefix, so it spends tokens without guaranteeing a
+hit. Claude Code manages prompt caching automatically. Keep the same model,
+cwd, MCP set, and stable role prompt; verify savings from
+`cache_read_input_tokens` in `costs.yaml`.
 
 ### 1e. Graph pre-injection for Build (MANDATORY, same as Plan §1a)
 
@@ -519,4 +514,3 @@ Proceed to Phase 5 Review (after PO loop completes, if invoked).
 - Trusting "DELIVERABLE_COMPLETE" marker without `git diff` check — MD-04.
 - Adding new steps mid-Build because "would be nice" — scope creep, park as follow-up.
 - Using claude-subsession by default for every developer task — 5-10x cost for no benefit on short tasks.
-

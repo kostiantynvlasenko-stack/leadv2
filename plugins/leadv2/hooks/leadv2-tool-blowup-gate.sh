@@ -11,6 +11,10 @@ HARD_THRESHOLD="${LEADV2_TOOL_BLOWUP_HARD:-120}"
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
+# shellcheck source=leadv2-mode-isolation.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-mode-isolation.sh"
+leadv2_hook_is_supervisor_session "$INPUT" && exit 0
+
 SESSION_ID="$(printf -- '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)"
 [[ -z "$SESSION_ID" ]] && exit 0
 
@@ -35,15 +39,7 @@ done
 # No active task → can't determine phase, pass silently
 [[ -z "$ACTIVE_YAML" ]] && exit 0
 
-CURRENT_PHASE="$(python3 -c "
-import sys, yaml
-try:
-    d = yaml.safe_load(open('$ACTIVE_YAML')) or {}
-    s = d.get('sessions') or []
-    print(s[0].get('phase', '').lower().strip() if s else '')
-except Exception:
-    pass
-" 2>/dev/null || true)"
+CURRENT_PHASE="$(leadv2_hook_resolve_phase "$INPUT" "$ACTIVE_YAML" 2>/dev/null || true)"
 
 # Allow-listed phases: build, plan, review (legitimate fan-out)
 case "$CURRENT_PHASE" in

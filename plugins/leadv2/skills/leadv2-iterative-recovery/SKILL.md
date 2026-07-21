@@ -1,6 +1,6 @@
 ---
 name: leadv2-iterative-recovery
-description: "Structured layer-peeling recovery when each fix opens the next blocker. Hard cap 5 iterations, per-blocker commits, mandatory verify between each. Triggers: verify-probe returns BLOCKED after fix; symptom changes post-deploy; recovery note says \"layer N/N\"; >2 sequential hotfixes on same symptom."
+description: "[internal] Layer-peeling recovery for changing blockers: per-layer verify/commit, hard cap five iterations."
 allowed-tools:
   - Read
   - Write

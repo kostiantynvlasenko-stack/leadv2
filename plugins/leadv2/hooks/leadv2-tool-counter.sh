@@ -9,6 +9,10 @@ trap 'exit 0' ERR
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
+# shellcheck source=leadv2-mode-isolation.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-mode-isolation.sh"
+leadv2_hook_is_supervisor_session "$INPUT" && exit 0
+
 # Locate the project cwd from hook input (falls back to PWD)
 CWD="$(printf -- '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [[ -z "$CWD" ]] && CWD="$PWD"
@@ -21,18 +25,8 @@ done
 # No active.yaml found → not a leadv2 session, exit silently
 [[ -z "$ACTIVE_YAML" ]] && exit 0
 
-# Extract first active task_id (python3 always available in this env)
-TASK_ID="$(python3 - "$ACTIVE_YAML" <<'PYEOF' 2>/dev/null || true
-import sys, yaml
-try:
-    d = yaml.safe_load(open(sys.argv[1])) or {}
-    sessions = d.get('sessions') or []
-    if sessions:
-        print(sessions[0].get('task_id', '').strip())
-except Exception:
-    pass
-PYEOF
-)"
+# Resolve only the task owned by this lead/runner process tree.
+TASK_ID="$(leadv2_hook_resolve_task_id "$INPUT" "$ACTIVE_YAML" 2>/dev/null || true)"
 
 # No active task → exit silently
 [[ -z "$TASK_ID" ]] && exit 0

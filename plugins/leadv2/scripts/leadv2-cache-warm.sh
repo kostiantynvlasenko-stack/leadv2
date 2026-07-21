@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# leadv2-cache-warm.sh — materialise Anthropic prompt-cache entry for a role/model prefix
-# before a chain of spawns so all downstream spawns hit cache instead of paying creation cost.
+# leadv2-cache-warm.sh — deprecated compatibility shim.
+#
+# A standalone Messages API request cannot warm the exact Claude Code prefix:
+# Claude Code prepends its own system prompt/tool definitions and cache hits
+# require an exact prefix in the same cache scope. The old implementation
+# spent API tokens while reporting that the next CLI/Agent spawn was expected
+# to hit; that expectation was false. Default behavior is now a zero-cost
+# no-op. LEADV2_LEGACY_API_CACHE_WARM=1 retains the old experimental request
+# only for controlled measurements; never enable it as a production saving.
 #
 # Usage:
 #   leadv2-cache-warm.sh --role <critic|developer|architect|...> --model <sonnet|opus|haiku>
@@ -10,8 +17,8 @@ set -euo pipefail
 # Writes: /tmp/leadv2-cache/.warm-log.json (tracks last-warm-ts per role-model)
 # Stdout: YAML warm_result block
 #
-# Idempotent: skips if last warm was <4 min ago (Anthropic TTL=5 min).
-# Graceful: exits 0 on missing prefix file or missing ANTHROPIC_API_KEY.
+# Legacy experimental mode is idempotent within four minutes and always
+# reports next_spawn_cache_hit_expected=false.
 
 readonly CACHE_DIR="/tmp/leadv2-cache"
 readonly WARM_LOG="${CACHE_DIR}/.warm-log.json"
@@ -36,6 +43,12 @@ done
 
 [[ -z "$ROLE" || -z "$MODEL" ]] && usage
 
+if [[ "${LEADV2_LEGACY_API_CACHE_WARM:-0}" != "1" ]]; then
+  printf -- 'warm_result:\n  role: %s\n  model: %s\n  prefix_bytes: 0\n  status: skipped_unsupported\n  ttl_seconds: 0\n  next_spawn_cache_hit_expected: false\n  reason: standalone_api_prefix_does_not_match_claude_code_prefix\n' "$ROLE" "$MODEL"
+  exit 0
+fi
+log_warn "LEADV2_LEGACY_API_CACHE_WARM=1: running an experimental API warm that does NOT guarantee a Claude Code cache hit"
+
 mkdir -p "$CACHE_DIR"
 
 # Idempotency check: skip if warmed <4min ago
@@ -56,7 +69,7 @@ PY
   AGE=$(( NOW - LAST_TS ))
   if [[ "$AGE" -lt "$WARM_WINDOW_SEC" ]]; then
     log "skip: ${KEY} warmed ${AGE}s ago (< ${WARM_WINDOW_SEC}s window)"
-    printf -- 'warm_result:\n  role: %s\n  model: %s\n  prefix_bytes: 0\n  status: skipped_recent\n  ttl_seconds: 300\n  next_spawn_cache_hit_expected: true\n' "$ROLE" "$MODEL"
+    printf -- 'warm_result:\n  role: %s\n  model: %s\n  prefix_bytes: 0\n  status: skipped_recent_experimental\n  ttl_seconds: 300\n  next_spawn_cache_hit_expected: false\n' "$ROLE" "$MODEL"
     exit 0
   fi
 fi
@@ -176,5 +189,5 @@ with open(tmp, "w") as fh:
 os.replace(tmp, log_file)
 PY
 
-printf -- 'warm_result:\n  role: %s\n  model: %s\n  prefix_bytes: %s\n  status: %s\n  ttl_seconds: 300\n  next_spawn_cache_hit_expected: true\n' \
+printf -- 'warm_result:\n  role: %s\n  model: %s\n  prefix_bytes: %s\n  status: %s\n  ttl_seconds: 300\n  next_spawn_cache_hit_expected: false\n' \
   "$ROLE" "$MODEL" "$PREFIX_BYTES" "$WARM_STATUS"

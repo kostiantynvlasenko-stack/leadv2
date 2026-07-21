@@ -1,6 +1,6 @@
 ---
 name: leadv2-bg-spawn-protocol
-description: "Watchdog protocol for background agent spawns: every Agent(run_in_background=true) MUST be followed immediately by Monitor(path=<deliverable-file>). Enforced by leadv2-bg-watchdog-gate.sh PostToolUse hook. Triggers: background spawn, run_in_background, Monitor watchdog."
+description: "[internal] Require every background agent spawn to attach a deliverable Monitor immediately."
 ---
 
 # leadv2-bg-spawn-protocol

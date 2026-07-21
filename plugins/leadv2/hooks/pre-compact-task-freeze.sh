@@ -95,8 +95,9 @@ def parse_tasks_yaml(path):
             tid = str(t.get("id", "")).strip()
             status = str(t.get("status", "")).strip()
             intent = str(t.get("intent", "")).strip()
+            priority = str(t.get("priority", "")).strip()
             if tid and status.lower() not in CLOSED_STATUSES:
-                out.append((tid, status, intent))
+                out.append((tid, status, intent, priority))
         return out
     except Exception:
         pass
@@ -110,11 +111,13 @@ def parse_tasks_yaml(path):
             if not m_id or not m_status:
                 continue
             m_intent = re.search(r"\n\s*intent:\s*'?(.+)", entry)
+            m_priority = re.search(r"\n\s*priority:\s*'?([Pp]\d)", entry)
             tid = m_id.group(1).strip()
             status = m_status.group(1).strip()
             intent = (m_intent.group(1).strip() if m_intent else "")[:120]
+            priority = (m_priority.group(1).strip().upper() if m_priority else "")
             if status.lower() not in CLOSED_STATUSES:
-                out.append((tid, status, intent))
+                out.append((tid, status, intent, priority))
     except Exception:
         pass
     return out
@@ -174,12 +177,29 @@ def main():
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     header = [f"# compact-freeze @ {ts}", f"open_task_count: {len(open_tasks)}"]
 
-    task_lines = ["## OPEN TASK IDS (docs/tasks.yaml, file-only, no network)"]
-    for tid, status, intent in open_tasks:
+    # Cap the dumped task list to the top-N by priority (P0<P1<P2<P3<unranked).
+    # The FULL backlog always stays in docs/tasks.yaml; this only bounds the
+    # per-compact context injection (LEADV2_FREEZE_TASK_CAP overrides; default 40).
+    task_dump_cap = int(os.environ.get("LEADV2_FREEZE_TASK_CAP", "40"))
+    def _prank(pr):
+        m = re.match(r"[Pp](\d)", pr or "")
+        return int(m.group(1)) if m else 9
+    ranked = sorted(enumerate(open_tasks), key=lambda x: (_prank(x[1][3]), x[0]))
+    shown = [t for _, t in ranked[:task_dump_cap]]
+    hidden = len(open_tasks) - len(shown)
+    task_lines = [
+        f"## OPEN TASK IDS (docs/tasks.yaml \u2014 top {task_dump_cap} by priority; full list in file)"
+    ]
+    for tid, status, intent, priority in shown:
         snippet = re.sub(r"\s+", " ", intent).strip()[:70]
-        task_lines.append(f"- {tid} [{status}] {snippet}")
+        pfx = (priority + " ") if priority else ""
+        task_lines.append(f"- {tid} [{status}] {pfx}{snippet}")
     if not open_tasks:
         task_lines.append("(none found / docs/tasks.yaml missing or empty)")
+    elif hidden > 0:
+        task_lines.append(
+            f"- \u2026 +{hidden} more open tasks hidden (P0->P3->unranked sort; see docs/tasks.yaml)"
+        )
 
     ot_lines = read_file(os.path.join(leadv2_abs, "open-threads.md"))
     ot_section = (

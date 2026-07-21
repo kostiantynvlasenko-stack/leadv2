@@ -1,7 +1,7 @@
 {
   "name": "leadv2",
   "version": "0.1.0",
-  "description": "Autonomous engineering orchestrator — Sonnet main, Opus on triggers, optional Codex 2nd brain. One plan-approval gate, then autopilot. Multi-stack via .claude/leadv2-overrides/.",
+  "description": "Autonomous engineering orchestrator with separate single-task lead and Opus-supervisor modes, provider-routed Claude/Codex Phase 0..8 children, shared guards, and quota-aware token controls.",
   "author": {
     "name": "kostiantynvlasenko-stack",
     "url": "https://github.com/kostiantynvlasenko-stack"

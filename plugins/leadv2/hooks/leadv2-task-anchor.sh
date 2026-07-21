@@ -42,7 +42,14 @@ trap 'rm -f "${TMPFILE:-}"' EXIT
 trap 'rm -f "${TMPFILE:-}"; exit 0' ERR
 python3 -c "import sys; open('$TMPFILE','w').write(sys.stdin.read())" 2>/dev/null || exit 0
 
-OUT="$(python3 - "$TMPFILE" <<'PYEOF' 2>/dev/null
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -x "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-state-path.sh" ]]; then
+    STATE_RESOLVER="${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-state-path.sh"
+else
+    STATE_RESOLVER="${HOOK_DIR}/../scripts/leadv2-state-path.sh"
+fi
+
+OUT="$(python3 - "$TMPFILE" "$STATE_RESOLVER" <<'PYEOF' 2>/dev/null
 import sys, os, json, subprocess, glob, time, re
 
 def git_toplevel(path):
@@ -101,6 +108,57 @@ def grep_phase(path):
     except Exception:
         pass
     return ""
+
+
+def process_ancestors():
+    """Return this hook's live OS process ancestry, nearest parent first."""
+    out = []
+    seen = set()
+    pid = os.getppid()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        out.append(pid)
+        try:
+            raw = subprocess.run(
+                ["ps", "-o", "ppid=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=1,
+            ).stdout.strip()
+            nxt = int(raw) if raw else 0
+        except Exception:
+            break
+        if nxt <= 1 or nxt == pid:
+            break
+        pid = nxt
+    return out
+
+
+def control_plane_path(root, resolver, name):
+    if os.environ.get("LEADV2_STATE_ROOT"):
+        return os.path.join(os.environ["LEADV2_STATE_ROOT"], name)
+    if not resolver or not os.path.isfile(resolver):
+        return ""
+    try:
+        result = subprocess.run(
+            [resolver, "--no-link", name],
+            cwd=root,
+            env={**os.environ, "PROJECT_ROOT": root},
+            capture_output=True, text=True, timeout=2,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def live_supervisor_owned_by_this_process(root, resolver, ancestors):
+    path = control_plane_path(root, resolver, ".supervise-active")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh) or {}
+        pid = int(data.get("pid"))
+        os.kill(pid, 0)
+        return pid in ancestors
+    except Exception:
+        return False
 
 
 # ── LEAD-ANCHOR-01 round 2: Hole 1 — THREAD anchor fallback ────────────────
@@ -292,6 +350,7 @@ def safe_capture(root, leadv2_dir, payload):
 
 def main():
     tmpfile = sys.argv[1]
+    state_resolver = sys.argv[2] if len(sys.argv) > 2 else ""
     try:
         with open(tmpfile, encoding="utf-8") as f:
             payload = json.load(f)
@@ -308,6 +367,29 @@ def main():
 
     leadv2_dir = resolve_dir(root, "leadv2_dir", "docs/leadv2")
     handoff_dir = resolve_dir(root, "handoff_dir", "docs/handoff")
+    ancestors = process_ancestors()
+
+    # SUPERVISOR/LEAD MODE ISOLATION: the supervising session shares the
+    # registry and main checkout with its children, but it owns no task and
+    # must never inherit a child's anchor. Scope by the live sentinel's owner
+    # PID, not by repo/worktree. A child/ordinary lead has a different process
+    # tree and therefore continues into normal task resolution below.
+    if live_supervisor_owned_by_this_process(root, state_resolver, ancestors):
+        session_id = re.sub(r"[^A-Za-z0-9._-]", "", str(payload.get("session_id") or ""))
+        if session_id:
+            try:
+                marker = f"/tmp/.leadv2-supervisor-mode-{session_id}"
+                with open(marker, "a", encoding="utf-8"):
+                    pass
+            except Exception:
+                pass
+        print("\n".join([
+            "<supervisor-anchor>",
+            "ACTIVE MODE: SUPERVISOR — no task/worktree/phase is owned by this session.",
+            "Observe shared receipts/questions and dispatch only independent full Phase 0..8 lead sessions; never adopt a child task as your own.",
+            "</supervisor-anchor>",
+        ]))
+        return
 
     task_id = None
     phase = "?"
@@ -321,7 +403,23 @@ def main():
         if isinstance(s, dict) and not s.get("stale")
     ]
     candidates = []
+    owned_candidates = []
     for s in sessions:
+        try:
+            session_pid = int(s.get("pid"))
+        except (TypeError, ValueError):
+            session_pid = None
+        if session_pid is not None and session_pid in ancestors:
+            owned_candidates.append(s)
+        elif session_pid is not None:
+            # A valid PID belonging to a different live process tree is a
+            # different lead session even when both rows temporarily point at
+            # the main checkout. Never select it by worktree fallback.
+            try:
+                os.kill(session_pid, 0)
+                continue
+            except (ProcessLookupError, PermissionError):
+                continue
         wt = s.get("worktree") or ""
         try:
             wt_real = os.path.realpath(wt) if wt else ""
@@ -329,9 +427,10 @@ def main():
             wt_real = wt
         if wt_real and (wt_real == cwd or wt_real == root):
             candidates.append(s)
-    if candidates:
-        candidates.sort(key=lambda s: str(s.get("started_at") or ""), reverse=True)
-        best = candidates[0]
+    selected = owned_candidates or candidates
+    if selected:
+        selected.sort(key=lambda s: str(s.get("started_at") or ""), reverse=True)
+        best = selected[0]
         task_id = best.get("task_id")
         phase = str(best.get("phase") or "?")
         cls = str(best.get("class") or "?")
@@ -366,6 +465,27 @@ def main():
         if thread_out:
             print(thread_out)
         return  # no active leadv2 task — THREAD anchor (if any) already printed
+
+    # TOKEN-EFFICIENCY: the full anchor (goal, plan, journal, other sessions,
+    # 10-line directive) used to be re-injected on every founder message and
+    # then remain in the conversation forever. Emit it once per session+task;
+    # subsequent prompts get only the live task/phase and the scope rule.
+    # /compact starts a new prompt context but keeps the same session id, so
+    # post-compact regrounding remains owned by the dedicated compact hooks.
+    session_id = re.sub(r"[^A-Za-z0-9._-]", "", str(payload.get("session_id") or ""))
+    anchor_marker = ""
+    if session_id and os.environ.get("LEADV2_TASK_ANCHOR_COMPACT_REPEAT", "1") != "0":
+        safe_task = re.sub(r"[^A-Za-z0-9._-]", "", str(task_id))
+        anchor_marker = f"/tmp/.leadv2-task-anchor-full-{session_id}-{safe_task}"
+        if os.path.isfile(anchor_marker):
+            safe_capture(root, leadv2_dir, payload)
+            print("\n".join([
+                "<task-anchor>",
+                f"ACTIVE TASK: {task_id} | phase: {phase} | class: {cls}",
+                "This message does not replace it: answer a question in <=3 lines, then continue. Only explicit stop/scope-change pauses it.",
+                "</task-anchor>",
+            ]))
+            return
 
     # ── gather details ───────────────────────────────────────────────────────
     context_path = os.path.join(root, handoff_dir, task_id, "context.yaml")
@@ -516,6 +636,14 @@ def main():
         content = content[:budget]
 
     print("\n".join(header + content + footer))
+    if anchor_marker:
+        try:
+            with open(anchor_marker, "x", encoding="utf-8") as fh:
+                fh.write(f"{task_id}\n")
+        except FileExistsError:
+            pass
+        except Exception:
+            pass
     safe_capture(root, leadv2_dir, payload)
 
 

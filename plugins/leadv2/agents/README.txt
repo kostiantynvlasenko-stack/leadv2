@@ -1,4 +1,5 @@
-# Shared Cross-Cutting Agents
+Shared Cross-Cutting Agents
+============================
 
 Project-specific schema (DB tables, columns, invariants) lives in
 `.claude/leadv2-overrides/extensions.md`.

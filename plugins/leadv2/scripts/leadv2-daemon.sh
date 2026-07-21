@@ -10,8 +10,8 @@ _LV2_D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #      classifies by outcome field (completed_success|completed_with_warnings → SUCCESS;
 #      rolled_back|paused_recovery|failed|missing-entry → FAIL; blocked → BLOCKED).
 #      Exit code alone is no longer authoritative.
-#   2. Parallel independent tasks: LEADV2_MAX_PARALLEL (default 1) spawns multiple
-#      claude -p processes concurrently when tasks have zero file-set overlap.
+#   2. Parallel independent tasks: LEADV2_MAX_PARALLEL (default 1) dispatches
+#      provider-neutral Phase 0..8 runners when tasks have zero file overlap.
 #
 # TESTING:
 #   Outcome parsing:
@@ -713,10 +713,10 @@ PY
     (
       export LEADV2_DAEMON=1
       export LEADV2_DAEMON_TASK_ID="$tid"
-      if claude -p "/leadv2 next" \
-          --output-format text \
-          --max-turns 50 \
-          --permission-mode acceptEdits \
+      if LEADV2_SPAWN_WAIT=1 \
+          LEADV2_SPAWN_PROVIDER="${LEADV2_DAEMON_PROVIDER:-auto}" \
+          LEADV2_SPAWN_PERMISSION_MODE="${LEADV2_DAEMON_PERMISSION_MODE:-acceptEdits}" \
+          bash "${_LV2_D}/leadv2-session-spawner.sh" --wait "$tid" \
           >> "$LOGFILE" 2>&1; then
         echo 0 > "$exit_file"
       else

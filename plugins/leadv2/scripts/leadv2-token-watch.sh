@@ -1,41 +1,82 @@
 #!/usr/bin/env bash
-# leadv2-token-watch.sh — show recent model burn against your daily/weekly cap.
-# Reads ~/.claude/burn/ if present (claude-burn telemetry).
-# Helps decide: continue on Opus or switch lead to Sonnet for this task.
-#
-# Ported from m3-market/.claude/scripts/leadv2-token-watch.sh
-# No m3-specific content — ported as-is.
-# Complements leadv2-budget-check.sh (per-task gate) — this shows global model burn.
+# leadv2-token-watch.sh — provider headroom plus observed Claude token/cache
+# telemetry. It deliberately does not invent token/day subscription caps:
+# Claude Code and Codex subscriptions are windowed, model/context dependent,
+# and provider-owned live percentages are the only routing-safe signal.
+
 set -euo pipefail
 
-BURN="$HOME/.claude/burn"
-if [[ ! -d "$BURN" ]]; then
-  echo "no burn telemetry at $BURN"
-  echo "tip: install claude-burn (https://github.com/anthropics/claude-burn) or run \`claude-burn dashboard\`"
-  exit 1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+QUOTA_LIVE="${LEADV2_QUOTA_LIVE:-$SCRIPT_DIR/leadv2-quota-live.sh}"
+BURN_DIR="${LEADV2_CLAUDE_BURN_DIR:-$HOME/.claude/burn}"
+
+printf -- '=== Live provider headroom ===\n'
+if [[ -x "$QUOTA_LIVE" ]]; then
+  "$QUOTA_LIVE" report || printf -- 'quota endpoints unavailable; routing must treat them as unknown\n'
+else
+  printf -- 'quota reader unavailable: %s\n' "$QUOTA_LIVE"
 fi
 
-# 24h window
-echo "=== Model burn (24h) ==="
-find "$BURN" -name '*.jsonl' -mtime -1 2>/dev/null | head -50 | xargs cat 2>/dev/null \
-  | python3 -c "
-import sys, json, collections
-totals = collections.defaultdict(int)
-for line in sys.stdin:
-    try:
-        r = json.loads(line)
-        m = r.get('model','?')
-        t = r.get('input_tokens',0) + r.get('output_tokens',0)
-        totals[m] += t
-    except Exception: pass
-for m, t in sorted(totals.items(), key=lambda x: -x[1]):
-    print(f'  {m:<28} {t:>12,} tokens')
-" 2>/dev/null || echo "(no recent activity)"
+printf -- '\n=== Claude telemetry (last 24h, if available) ===\n'
+if [[ ! -d "$BURN_DIR" ]]; then
+  printf -- 'no local burn telemetry at %s\n' "$BURN_DIR"
+  printf -- 'routing still uses provider-owned live quota above; no allowance is inferred from missing logs\n'
+  exit 0
+fi
 
-echo ""
-echo "=== Daily cap heuristic ==="
-echo "  Opus 1M context (Max plan): ~50M tokens/day before throttle"
-echo "  Sonnet:                      ~200M tokens/day"
-echo ""
-echo "If Opus 24h > 30M → consider switching lead to Sonnet for next task:"
-echo "  unset FORCE_OPUS_LEAD; export LEADV2_MAIN_MODEL=sonnet"
+python3 - "$BURN_DIR" <<'PYEOF'
+import collections, json, os, sys, time
+
+root = sys.argv[1]
+cutoff = time.time() - 86400
+totals = collections.defaultdict(lambda: collections.Counter())
+files = 0
+for base, _, names in os.walk(root):
+    for name in names:
+        if not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(base, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                continue
+            fh = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        files += 1
+        with fh:
+            for raw in fh:
+                try:
+                    row = json.loads(raw)
+                except Exception:
+                    continue
+                model = str(row.get("model") or "unknown")
+                usage = row.get("usage") if isinstance(row.get("usage"), dict) else row
+                for key in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                ):
+                    value = usage.get(key, 0)
+                    if isinstance(value, (int, float)):
+                        totals[model][key] += int(value)
+
+if not totals:
+    print(f"no parseable activity in {files} recent telemetry file(s)")
+    raise SystemExit(0)
+
+print(f"{'model':<30} {'input':>12} {'output':>12} {'cache-read':>14} {'cache-write':>14}")
+for model, values in sorted(
+    totals.items(), key=lambda item: -(item[1]["input_tokens"] + item[1]["output_tokens"])
+):
+    print(
+        f"{model[:29]:<30} "
+        f"{values['input_tokens']:>12,} "
+        f"{values['output_tokens']:>12,} "
+        f"{values['cache_read_input_tokens']:>14,} "
+        f"{values['cache_creation_input_tokens']:>14,}"
+    )
+PYEOF
+
+printf -- '\nRaw token totals diagnose context growth; they are not subscription limits.\n'
+printf -- 'For cache truth, use cache-read/cache-write telemetry—not a standalone warm-up call.\n'

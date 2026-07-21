@@ -11,7 +11,7 @@ set -euo pipefail
 # Exit: 0 always (fallback is safe)
 #
 # Guardrail checks:
-#   require_prompt_caching      → CACHE_DIR /tmp/leadv2-cache/ writable
+#   require_prompt_caching      → Claude Code prompt caching is not disabled
 #   require_summary_full_split  → .claude/skills/leadv2-subagent-protocol/SKILL.md mentions .summary.md
 #   require_diff_only_reviews   → .claude/scripts/leadv2-codex-planner.sh exists
 #   require_mcp_memoization     → .claude/scripts/leadv2-mcp-cache.sh exists
@@ -23,8 +23,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 readonly PROJECT_ROOT
 
 readonly MAIN_MODEL_YAML="$PROJECT_ROOT/.claude/ref/leadv2-main-model.yaml"
-readonly QUOTA_SCRIPT="$SCRIPT_DIR/leadv2-quota-status.sh"
-readonly CACHE_DIR="/tmp/leadv2-cache"
+readonly QUOTA_SCRIPT="${LEADV2_QUOTA_LIVE:-$SCRIPT_DIR/leadv2-quota-live.sh}"
 
 log()        { printf '[leadv2-main-model-check] %s\n' "$*" >&2; }
 log_warn()   { printf '[leadv2-main-model-check] WARN: %s\n' "$*" >&2; }
@@ -34,7 +33,7 @@ fallback()   { log_warn "$1 — falling back to sonnet"; printf 'sonnet\n'; exit
 # ---------------------------------------------------------------------------
 # 0. If main-model.yaml missing → default sonnet (backward compat)
 # ---------------------------------------------------------------------------
-if [[ ! -f "$MAIN_MODEL_YAML" ]]; then
+if [[ ! -f "$MAIN_MODEL_YAML" && "${LEADV2_FORCE_OPUS_LEAD:-0}" != "1" ]]; then
   log_info "main-model.yaml not found — defaulting to sonnet"
   printf 'sonnet\n'
   exit 0
@@ -43,21 +42,25 @@ fi
 # ---------------------------------------------------------------------------
 # 1. Parse main_model field
 # ---------------------------------------------------------------------------
-MAIN_MODEL=$(python3 - "$MAIN_MODEL_YAML" <<'PY'
+if [[ -f "$MAIN_MODEL_YAML" ]]; then
+  MAIN_MODEL=$(python3 - "$MAIN_MODEL_YAML" <<'PY'
 import sys, yaml
 cfg = yaml.safe_load(open(sys.argv[1])) or {}
 print(cfg.get("main_model", "sonnet"))
 PY
-)
+  )
+else
+  MAIN_MODEL="opus"
+fi
+
+if [[ "${LEADV2_FORCE_OPUS_LEAD:-0}" == "1" ]]; then
+  MAIN_MODEL="opus"
+fi
 
 if [[ "$MAIN_MODEL" != "opus" ]]; then
-  if [[ "${LEADV2_FORCE_OPUS_LEAD:-0}" == "1" ]]; then
-    log_info "main_model=${MAIN_MODEL} but LEADV2_FORCE_OPUS_LEAD=1 — falling through to guardrail checks"
-  else
-    log_info "main_model=${MAIN_MODEL} — no guardrail checks needed"
-    printf '%s\n' "$MAIN_MODEL"
-    exit 0
-  fi
+  log_info "main_model=${MAIN_MODEL} — no Opus guardrail checks needed"
+  printf '%s\n' "$MAIN_MODEL"
+  exit 0
 fi
 
 log_info "main_model=$MAIN_MODEL — verifying guardrails..."
@@ -65,13 +68,18 @@ log_info "main_model=$MAIN_MODEL — verifying guardrails..."
 # ---------------------------------------------------------------------------
 # 2. Load guardrail config
 # ---------------------------------------------------------------------------
-GUARDRAILS=$(python3 - "$MAIN_MODEL_YAML" <<'PY'
+if [[ -f "$MAIN_MODEL_YAML" ]]; then
+  GUARDRAILS=$(python3 - "$MAIN_MODEL_YAML" <<'PY'
 import sys, yaml, json
 cfg = yaml.safe_load(open(sys.argv[1])) or {}
 g = cfg.get("opus_mode_guardrails", {})
 print(json.dumps(g))
 PY
-)
+  )
+else
+  GUARDRAILS='{}'
+  log_warn "forced Opus without main-model.yaml — only runtime quota guard can be verified"
+fi
 
 get_guard() {
   printf '%s' "$GUARDRAILS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$1',''))"
@@ -81,11 +89,11 @@ get_guard() {
 # 3. Check require_prompt_caching
 # ---------------------------------------------------------------------------
 if [[ "$(get_guard require_prompt_caching)" == "True" ]]; then
-  mkdir -p "$CACHE_DIR" 2>/dev/null || true
-  if [[ ! -d "$CACHE_DIR" ]] || [[ ! -w "$CACHE_DIR" ]]; then
-    fallback "require_prompt_caching: cache dir $CACHE_DIR not writable"
+  if [[ "${DISABLE_PROMPT_CACHING:-0}" == "1" \
+     || "${DISABLE_PROMPT_CACHING_OPUS:-0}" == "1" ]]; then
+    fallback "require_prompt_caching: Claude Code prompt caching is disabled by environment"
   fi
-  log_info "require_prompt_caching: OK ($CACHE_DIR writable)"
+  log_info "require_prompt_caching: OK (Claude Code server caching enabled; subscription sessions choose TTL automatically)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -120,26 +128,43 @@ if [[ "$(get_guard require_mcp_memoization)" == "True" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Quota check (replaces $-budget; reads ~/.claude/burn/history.db)
+# 7. Provider-owned live quota check. Raw token history is not a subscription
+# allowance and must never decide whether Opus is available.
 # ---------------------------------------------------------------------------
-if [[ -f "$QUOTA_SCRIPT" ]]; then
-  if ! bash "$QUOTA_SCRIPT" --check 2>/dev/null; then
-    fallback "5h / weekly quota exhausted (see leadv2-quota-status.sh --report)"
+if [[ -x "$QUOTA_SCRIPT" ]]; then
+  _anthropic_quota="$(bash "$QUOTA_SCRIPT" anthropic 2>/dev/null || true)"
+  _anthropic_used="$(python3 - "$_anthropic_quota" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(0)
+values = []
+for account in data.get("accounts") or []:
+    for key in ("five_hour_pct", "seven_day_pct"):
+        value = account.get(key)
+        if isinstance(value, (int, float)):
+            values.append(float(value))
+if values:
+    print(max(values))
+PY
+  )"
+  _quota_max="${LEADV2_OPUS_MAX_USED_PERCENT:-95}"
+  if [[ -n "$_anthropic_used" ]] && ! awk -v used="$_anthropic_used" -v max="$_quota_max" 'BEGIN { exit !(used < max) }'; then
+    fallback "Anthropic live quota ${_anthropic_used}% reached Opus threshold ${_quota_max}%"
+  elif [[ -n "$_anthropic_used" ]]; then
+    log_info "Anthropic live quota: ${_anthropic_used}% used (<${_quota_max}%)"
+  else
+    log_warn "Anthropic live quota unknown — preserving requested model; router will keep telemetry honest"
   fi
-  log_info "quota: OK"
 else
-  log_warn "leadv2-quota-status.sh not found — skipping quota check"
+  log_warn "leadv2-quota-live.sh not found — skipping quota check"
 fi
 
 # ---------------------------------------------------------------------------
-# All checks passed — honour LEADV2_FORCE_OPUS_LEAD override or default to sonnet
+# All checks passed — honor the requested/configured main model.
 # ---------------------------------------------------------------------------
 log_info "All guardrails satisfied"
-if [[ "${LEADV2_FORCE_OPUS_LEAD:-0}" == "1" ]]; then
-  log_info "LEADV2_FORCE_OPUS_LEAD=1 — main model: $MAIN_MODEL"
-  printf '%s\n' "$MAIN_MODEL"
-else
-  log_info "LEADV2_FORCE_OPUS_LEAD not set — defaulting to sonnet"
-  printf 'sonnet\n'
-fi
+log_info "main model: $MAIN_MODEL"
+printf '%s\n' "$MAIN_MODEL"
 exit 0

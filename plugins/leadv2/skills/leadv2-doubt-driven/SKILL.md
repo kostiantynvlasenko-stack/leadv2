@@ -1,6 +1,6 @@
 ---
 name: leadv2-doubt-driven
-description: Adversarial self-review for non-trivial Phase 4 decisions. Runs CLAIM/EXTRACT/DOUBT/RECONCILE/STOP loop with fresh-context critic. Trigger when a decision involves branching logic, irreversible operations, unverifiable invariants, or module boundary contracts.
+description: "[internal] Fresh-context adversarial review for risky Phase-4 branching, irreversible changes, invariants, or module contracts."
 ---
 
 # leadv2-doubt-driven

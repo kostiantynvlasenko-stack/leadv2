@@ -1,6 +1,6 @@
 ---
 name: leadv2-token-discipline
-description: Enforce token-budget discipline in every /leadv2 phase — background-only Agent spawns, Read with offset/limit, Bash output pre-truncation, pulse-mode silence, MCP caching, and compact triggers. Apply when a session grows long, context cost spikes, a subagent deliverable risks flooding chat, or you are about to spawn agents / read files / emit Bash output. Always on; never skip.
+description: "[internal] Token discipline for every phase: bounded reads/output, compact handoffs, quiet pulses, cache telemetry, and capped spawns."
 allowed-tools:
   - Read
   - Bash
@@ -126,14 +126,17 @@ Rationale: V4 session hit 783K without a resume artifact. A future /compact afte
 - Long heredoc prompts: `cat > /tmp/foo <<'EOF' (200 lines) EOF`
 - TaskOutput on subagent stream files (full transcript overflow)
 
-## Caching opt-in (1h prompt cache)
+## Prompt caching
 
-In `~/.claude/settings.json env`:
-```json
-"ENABLE_PROMPT_CACHING_1H": "1"
-"MAX_MCP_OUTPUT_TOKENS": "15000"
-```
-Effective for Sonnet/Haiku via OAuth. Opus 1h cache via direct SDK requires `ANTHROPIC_API_KEY` (not OAuth subscription).
+Claude Code manages prompt caching automatically. Subscription-authenticated
+main sessions receive the one-hour TTL automatically; API-key and third-party
+providers use their configured TTL and may opt into one hour with
+`ENABLE_PROMPT_CACHING_1H=1`. Never call `leadv2-cache-warm.sh` as a supposed
+saving: a separate Messages API system prefix does not match Claude Code's
+system/tool prefix. `cache_read_input_tokens` is the only hit truth.
+
+Keep `MAX_MCP_OUTPUT_TOKENS=15000` if your environment supports it, and avoid
+mid-session model or MCP-set changes because they invalidate the cache prefix.
 
 ## Trade-off table
 

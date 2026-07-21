@@ -20,6 +20,7 @@
 #
 # Usage:
 #   leadv2-fanout.sh [--n N] [--filter STR] [--tasks ID1,ID2,ID3]
+#                     [--provider auto|claude|codex]
 #                     [--dry-run] [--tmux|--windows|--headless]
 #
 # Task LEAD-FANOUT-01. See docs/handoff/LEAD-ANCHOR-01/mission-fanout.md.
@@ -100,6 +101,7 @@ FORCE=false
 TMUX_FLAG=false
 WINDOWS_FLAG=false
 LEAD_MODEL_OVERRIDE=""
+PROVIDER_REQUEST="${LEADV2_SESSION_PROVIDER:-auto}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -112,8 +114,9 @@ while [[ $# -gt 0 ]]; do
     --windows)    WINDOWS_FLAG=true;       shift   ;;
     --force)      FORCE=true;              shift   ;;
     --lead-model) LEAD_MODEL_OVERRIDE="$2"; shift 2 ;;
+    --provider)   PROVIDER_REQUEST="$2";   shift 2 ;;
     -h|--help)
-      printf -- 'Usage: leadv2-fanout.sh [--n N] [--filter STR] [--tasks ID1,ID2] [--dry-run] [--tmux|--windows|--headless] [--force] [--lead-model MODEL]\n'
+      printf -- 'Usage: leadv2-fanout.sh [--n N] [--filter STR] [--tasks ID1,ID2] [--provider auto|claude|codex] [--dry-run] [--tmux|--windows|--headless] [--force] [--lead-model MODEL]\n'
       printf -- '  --tmux: one shared tmux session "leadv2", one window per task. Default\n'
       printf -- '          backend on macOS when tmux is on PATH.\n'
       printf -- '  --windows: force Terminal.app/iTerm2 osascript windows (old default).\n'
@@ -125,14 +128,29 @@ while [[ $# -gt 0 ]]; do
       printf -- '           launched by this invocation (default: classifier picks sonnet for\n'
       printf -- '           Light/Standard, opus for Heavy/Strategic). Use `--lead-model opus`\n'
       printf -- '           when the founder explicitly wants an Opus child; never on by default.\n'
+      printf -- '  --provider auto|claude|codex: provider for COMPLETE Phase 0..8 child\n'
+      printf -- '           sessions. auto routes routine work by live policy/quota; high-risk\n'
+      printf -- '           classes/tags remain on Claude unless an explicit policy override exists.\n'
       exit 0
       ;;
     *) log_error "unknown arg: $1"; exit 1 ;;
   esac
 done
 
+case "$PROVIDER_REQUEST" in
+  auto|claude|codex) ;;
+  *) log_error "--provider must be auto, claude, or codex (got: $PROVIDER_REQUEST)"; exit 1 ;;
+esac
+
 if [[ -n "$LEAD_MODEL_OVERRIDE" ]]; then
   log "--lead-model override active: every launch this run uses model=${LEAD_MODEL_OVERRIDE} (classifier's per-task pick is ignored for model; effort is unaffected)"
+  if [[ "$PROVIDER_REQUEST" == "auto" ]]; then
+    case "$LEAD_MODEL_OVERRIDE" in
+      gpt-*|codex-*) PROVIDER_REQUEST="codex" ;;
+      *)            PROVIDER_REQUEST="claude" ;;
+    esac
+    log "--lead-model implies provider=${PROVIDER_REQUEST}; use --provider explicitly to override"
+  fi
 fi
 
 if ! [[ "$N" =~ ^[0-9]+$ ]]; then
@@ -420,7 +438,14 @@ FORCED_ANY=false
 NO_TITLE_COLUMN=false
 declare -a LAUNCH_IDS=() LAUNCH_CLASSES=() LAUNCH_LABELS=()
 declare -a LAUNCH_MODELS=() LAUNCH_EFFORTS=() LAUNCH_RISK_TAGS=() LAUNCH_REASONS=()
+declare -a LAUNCH_PROVIDERS=() LAUNCH_ROUTE_REASONS=()
 declare -a REPORT_LINES=()
+
+SESSION_ROUTER="${LEADV2_SESSION_ROUTER:-$SCRIPT_DIR/leadv2-session-route.sh}"
+if [[ ! -x "$SESSION_ROUTER" ]]; then
+  log_error "provider router missing/not executable at $SESSION_ROUTER — refusing to launch an unclassified provider session"
+  exit 1
+fi
 
 while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9; do
   [[ -z "$f1" ]] && continue
@@ -440,15 +465,54 @@ while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9; do
     reason="${reason} (--lead-model override -> ${LEAD_MODEL_OVERRIDE})"
   fi
   if [[ "$decision" == "launch" ]]; then
+    set +e
+    route_output="$(LEADV2_PROJECT_ROOT="$PROJECT_ROOT" "$SESSION_ROUTER" \
+      --class "$cls" \
+      --risk-tags "$risk_tags" \
+      --suggested-model "${lead_model:-sonnet}" \
+      --suggested-effort "${lead_effort:-medium}" \
+      --provider "$PROVIDER_REQUEST")"
+    route_rc=$?
+    set -e
+    if [[ "$route_rc" -ne 0 ]]; then
+      log_error "provider routing failed for task=${tid} (rc=${route_rc}) — refusing to launch"
+      exit 1
+    fi
+    route_provider="" route_model="" route_effort="" route_reason=""
+    while IFS='=' read -r route_key route_value; do
+      case "$route_key" in
+        provider) route_provider="$route_value" ;;
+        model)    route_model="$route_value" ;;
+        effort)   route_effort="$route_value" ;;
+        reason)   route_reason="$route_value" ;;
+      esac
+    done <<< "$route_output"
+    if [[ -z "$route_provider" || -z "$route_model" || -z "$route_effort" ]]; then
+      log_error "provider router returned an incomplete decision for task=${tid} — refusing to launch"
+      exit 1
+    fi
+    # An explicit model is the founder's final model choice. Provider inference
+    # above keeps aliases on the correct runtime; the router still owns all
+    # high-risk/provider-availability decisions.
+    if [[ -n "$LEAD_MODEL_OVERRIDE" ]]; then
+      if [[ "$route_provider" == "codex" && "$LEAD_MODEL_OVERRIDE" == gpt-* ]] \
+         || [[ "$route_provider" == "claude" && "$LEAD_MODEL_OVERRIDE" != gpt-* && "$LEAD_MODEL_OVERRIDE" != codex-* ]]; then
+        route_model="$LEAD_MODEL_OVERRIDE"
+      else
+        route_reason="${route_reason}; incompatible --lead-model ignored after provider safety fallback"
+      fi
+    fi
     LAUNCH_COUNT=$((LAUNCH_COUNT + 1))
     LAUNCH_IDS+=("$tid")
     LAUNCH_CLASSES+=("$cls")
     LAUNCH_LABELS+=("$label")
-    LAUNCH_MODELS+=("${lead_model:-sonnet}")
-    LAUNCH_EFFORTS+=("${lead_effort:-medium}")
+    LAUNCH_PROVIDERS+=("$route_provider")
+    LAUNCH_MODELS+=("$route_model")
+    LAUNCH_EFFORTS+=("$route_effort")
     LAUNCH_RISK_TAGS+=("$risk_tags")
     LAUNCH_REASONS+=("$reason")
-    REPORT_LINES+=("- LAUNCH \`${label}\` (\`${tid}\`) — class=${cls}, priority=${pri}, model=${lead_model:-sonnet}/${lead_effort:-medium}, risk_tags=[${risk_tags}] — ${reason}")
+    LAUNCH_ROUTE_REASONS+=("$route_reason")
+    REPORT_LINES+=("- LAUNCH \`${label}\` (\`${tid}\`) — class=${cls}, priority=${pri}, provider=${route_provider}, model=${route_model}/${route_effort}, risk_tags=[${risk_tags}] — ${reason}; route=${route_reason}")
     [[ "$reason" == *"FORCE OVERRIDE"* ]] && FORCED_ANY=true
   else
     SKIP_COUNT=$((SKIP_COUNT + 1))
@@ -518,8 +582,6 @@ if [[ "$LAUNCH_COUNT" -eq 0 ]]; then
   exit 0
 fi
 
-CLAUDE_BIN="${LEADV2_FANOUT_CLAUDE_BIN:-claude}"
-
 # _fanout_register_session — atomic write-temp+rename under flock on the
 # SAME lockfile leadv2-active-registry.sh uses, so up to N fanout launches
 # (and any concurrently-running gate1 self-registrations) serialize safely.
@@ -537,6 +599,8 @@ _fanout_register_session() {
   local lead_model="${9:-}"
   local lead_effort="${10:-}"
   local class_reason="${11:-}"
+  local provider="${12:-claude}"
+  local route_reason="${13:-}"
   local branch ts_now yaml_file lockfile session_id
   branch="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || printf -- 'unknown')"
   ts_now="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -547,13 +611,15 @@ _fanout_register_session() {
   python3 - "$lockfile" "$yaml_file" "$session_id" "$tid" "$PROJECT_ROOT" \
     "$branch" "$ts_now" "$cls" "$pid_val" "$window_title" "$daemon_mode" \
     "docs/leadv2/tasks/${tid}/pulse.md" "$pid_pending" "$where" \
-    "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" <<'PYEOF' \
+    "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" \
+    "$provider" "$route_reason" <<'PYEOF' \
     || log "WARN: could not register ${tid} in active.yaml — session is running unregistered"
 import sys, os, fcntl, tempfile, yaml
 
 (lockfile, yaml_path, session_id, task_id, worktree, branch, started_at,
  cls, pid_str, window_title, daemon_mode_str, pulse_log, pid_pending_str,
- where, risk_tags, lead_model, lead_effort, class_reason) = sys.argv[1:19]
+ where, risk_tags, lead_model, lead_effort, class_reason,
+ provider, route_reason) = sys.argv[1:21]
 
 pid_val = None if pid_str in ("null", "", "None") else int(pid_str)
 daemon_mode = daemon_mode_str.lower() in ("1", "true", "yes")
@@ -603,6 +669,8 @@ try:
         "lead_model": lead_model,
         "lead_effort": lead_effort,
         "class_reason": class_reason,
+        "provider": provider,
+        "route_reason": route_reason,
         # SUPERVISE-V2-01 fix-1 (Codex#2): same registry-honesty field set
         # leadv2_active_register()/op=register writes (leadv2-active-registry.sh)
         # -- fanout is a SECOND writer of active.yaml (window_title has no slot
@@ -617,7 +685,17 @@ try:
         # -- upgrade when launch_tmux ever splits panes within a window.
         "tmux_pane": None,
         "log_path": pulse_log,
-        "provider_receipts": [],
+        "provider_receipts": [{
+            "provider": provider,
+            "task_id": task_id,
+            "model": lead_model,
+            "effort": lead_effort,
+            "run_id": session_id,
+            "status": "launched",
+            "exit_code": None,
+            "attempt": 0,
+            "recorded_at": started_at,
+        }],
     })
 
     d = os.path.dirname(yaml_path)
@@ -638,6 +716,7 @@ PYEOF
 launch_headless() {
   local tid="$1" cls="$2" lead_model="${3:-sonnet}" lead_effort="${4:-medium}"
   local risk_tags="${5:-}" class_reason="${6:-}"
+  local provider="${7:-claude}" route_reason="${8:-}"
   local task_dir="${PROJECT_ROOT}/docs/handoff/${tid}"
   mkdir -p "$task_dir"
   local logf="${task_dir}/fanout.log"
@@ -655,41 +734,33 @@ launch_headless() {
   # inside the same subshell; nohup + trailing `&` still detaches from the
   # controlling terminal, and $! below keeps resolving to the runner pid on
   # both branches (see comment above).
-  # C2 fix (SUPERVISE-V2-01 fix-1): leadv2-session-runner.sh is a hard
-  # dependency of every real headless launch -- an existence guard so a
-  # generated-target repo whose sync lagged behind this canonical source
-  # fails LOUDLY (and falls back to the pre-runner `claude -p` invocation)
-  # instead of `exec`-ing a path that silently doesn't exist.
+  # The provider-neutral runner is a hard dependency. Falling back to a raw
+  # one-shot CLI would violate the supervisor's Phase 0..8 + sentinel contract.
   local _runner="${SCRIPT_DIR}/leadv2-session-runner.sh"
   if [[ ! -x "$_runner" ]]; then
-    log "WARN: leadv2-session-runner.sh missing/not executable at ${_runner} -- falling back to a plain 'claude -p' launch with NO resume-on-exit loop. Run leadv2-plugin-sync.sh to fix."
-    if command -v setsid >/dev/null 2>&1; then
-      ( cd "$PROJECT_ROOT" && \
-        exec setsid nohup "${CLAUDE_BIN}" -p --model "${lead_model}" --effort "${lead_effort}" \
-          --permission-mode bypassPermissions "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
-    else
-      ( cd "$PROJECT_ROOT" && \
-        exec nohup "${CLAUDE_BIN}" -p --model "${lead_model}" --effort "${lead_effort}" \
-          --permission-mode bypassPermissions "/leadv2 ${tid}" </dev/null >>"$logf" 2>&1 ) &
-    fi
-  elif command -v setsid >/dev/null 2>&1; then
+    log_error "leadv2-session-runner.sh missing/not executable at ${_runner} — refusing an unguarded one-shot launch"
+    return 1
+  fi
+  if command -v setsid >/dev/null 2>&1; then
     ( cd "$PROJECT_ROOT" && \
-      export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
-             LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
-             LEADV2_LEAD_EFFORT="${lead_effort}" LEADV2_RUNNER_FORCE_FRESH="${FORCE}" && \
-      exec setsid nohup "$_runner" </dev/null >>"$logf" 2>&1 ) &
+      exec env LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
+        LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
+        LEADV2_LEAD_EFFORT="${lead_effort}" LEADV2_SESSION_PROVIDER="${provider}" \
+        LEADV2_RUNNER_FORCE_FRESH="${FORCE}" \
+        setsid nohup "$_runner" </dev/null >>"$logf" 2>&1 ) &
   else
     ( cd "$PROJECT_ROOT" && \
-      export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
-             LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
-             LEADV2_LEAD_EFFORT="${lead_effort}" LEADV2_RUNNER_FORCE_FRESH="${FORCE}" && \
-      exec nohup "$_runner" </dev/null >>"$logf" 2>&1 ) &
+      exec env LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
+        LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
+        LEADV2_LEAD_EFFORT="${lead_effort}" LEADV2_SESSION_PROVIDER="${provider}" \
+        LEADV2_RUNNER_FORCE_FRESH="${FORCE}" \
+        nohup "$_runner" </dev/null >>"$logf" 2>&1 ) &
   fi
   local pid=$!
-  log "headless launch: task=${tid} pid=${pid} model=${lead_model}/${lead_effort} log=${logf}"
+  log "headless launch: task=${tid} pid=${pid} provider=${provider} model=${lead_model}/${lead_effort} log=${logf}"
 
   _fanout_register_session "$tid" "$cls" "$pid" "leadv2: ${tid}" "true" "false" "headless" \
-    "$risk_tags" "$lead_model" "$lead_effort" "$class_reason"
+    "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason"
 }
 
 # Escape a string for safe interpolation into an AppleScript double-quoted
@@ -709,7 +780,15 @@ _osa_escape() {
 # (tmux new-window hands back no `claude` pid either, only the shell's) — do
 # not duplicate this poll loop per backend.
 _fanout_resolve_spawned_pid() {
-  local tid="$1" yaml_file candidates registered p newest=""
+  local tid="$1" yaml_file candidates registered p newest="" pid_file runner_pid
+  pid_file="${PROJECT_ROOT}/docs/handoff/${tid}/.session-runner.pid"
+  if [[ -f "$pid_file" ]]; then
+    runner_pid="$(tr -d '[:space:]' < "$pid_file")"
+    if [[ "$runner_pid" =~ ^[0-9]+$ ]] && kill -0 "$runner_pid" 2>/dev/null; then
+      printf -- '%s' "$runner_pid"
+      return 0
+    fi
+  fi
   candidates="$(pgrep -f "/leadv2 ${tid}" 2>/dev/null || true)"
   [[ -z "$candidates" ]] && return 1
   yaml_file="$(_leadv2_yaml_file)"
@@ -735,6 +814,7 @@ print(' '.join(str(s.get('pid')) for s in (data.get('sessions') or []) if s.get(
 launch_windowed() {
   local tid="$1" cls="$2" lead_model="${3:-sonnet}" lead_effort="${4:-medium}"
   local risk_tags="${5:-}" class_reason="${6:-}"
+  local provider="${7:-claude}" route_reason="${8:-}"
   if [[ "$(uname -s)" != "Darwin" ]]; then
     log_error "windowed launch requires macOS (osascript). Use --headless on this platform."
     exit 1
@@ -746,16 +826,16 @@ launch_windowed() {
 
   local title="leadv2: ${tid}"
   local cmd
-  # LEAD-ANCHOR-01: same async-question env export as launch_headless above.
-  # lean: windowed backend keeps calling `claude -p` directly (not routed
-  # through leadv2-session-runner.sh) — the daemon-mode resume loop targets
-  # unattended headless/tmux fanout (design doc §2); an interactive Terminal
-  # window already has a human watching to relaunch on exit. LEADV2_LEAD_MODEL
-  # is still exported so the classifier's model/effort decision (item 1)
-  # applies uniformly across all three backends. Upgrade when windowed fanout
-  # needs unattended resume too.
-  printf -v cmd 'cd %q && export LEADV2_ASYNC_QUESTIONS=1 LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q && %q --model %q --effort %q %q' \
-    "$PROJECT_ROOT" "$lead_model" "$lead_effort" "$CLAUDE_BIN" "$lead_model" "$lead_effort" "/leadv2 ${tid}"
+  local _runner="${SCRIPT_DIR}/leadv2-session-runner.sh"
+  if [[ ! -x "$_runner" ]]; then
+    log_error "leadv2-session-runner.sh missing/not executable at ${_runner} — refusing an unguarded one-shot launch"
+    return 1
+  fi
+  # Windowed children use the same provider-neutral completion runner as
+  # headless/tmux. The visible terminal is observability, not a weaker
+  # lifecycle contract.
+  printf -v cmd 'cd %q && export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q LEADV2_SESSION_PROVIDER=%q LEADV2_RUNNER_FORCE_FRESH=%q; exec %q' \
+    "$PROJECT_ROOT" "$tid" "$lead_model" "$lead_effort" "$provider" "$FORCE" "$_runner"
 
   # AppleScript double-quoted strings treat backslash as an escape char, but
   # bash's %q emits backslash-escaped tokens (e.g. `/leadv2\ ${tid}`) — raw
@@ -785,7 +865,7 @@ tell application "Terminal"
 end tell
 OSA
   fi
-  log "windowed launch: task=${tid} title='${title}'"
+  log "windowed launch: task=${tid} provider=${provider} model=${lead_model}/${lead_effort} title='${title}'"
 
   # osascript hands the shell command to Terminal/iTerm2 asynchronously and
   # never hands back the spawned `claude` process pid directly. Registering
@@ -807,11 +887,11 @@ OSA
   if [[ -n "$_resolved_pid" ]]; then
     log "windowed launch: task=${tid} resolved pid=${_resolved_pid} model=${lead_model}/${lead_effort}"
     _fanout_register_session "$tid" "$cls" "$_resolved_pid" "$title" "false" "false" "terminal" \
-      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason"
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason"
   else
     log "WARN: could not resolve pid for task=${tid} within 10s — registering pid_pending=true"
     _fanout_register_session "$tid" "$cls" "null" "$title" "false" "true" "terminal" \
-      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason"
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason"
   fi
 }
 
@@ -827,6 +907,7 @@ declare -a TMUX_LAUNCHED_IDS=()
 launch_tmux() {
   local tid="$1" cls="$2" lead_model="${3:-sonnet}" lead_effort="${4:-medium}"
   local risk_tags="${5:-}" class_reason="${6:-}"
+  local provider="${7:-claude}" route_reason="${8:-}"
   local window="$tid"
   local target="${TMUX_SESSION_NAME}:${window}"
   local task_dir="${PROJECT_ROOT}/docs/handoff/${tid}"
@@ -890,18 +971,13 @@ launch_tmux() {
   # daemon=false was previously registered here even though nothing acted as
   # a daemon; the runner makes that field honest.
   local cmd
-  # C2 fix (SUPERVISE-V2-01 fix-1): same existence guard as launch_headless --
-  # a missing/non-executable runner must not silently `exec` a dead path
-  # inside the tmux window (the window would just show "command not found").
   local _runner="${SCRIPT_DIR}/leadv2-session-runner.sh"
   if [[ ! -x "$_runner" ]]; then
-    log "WARN: leadv2-session-runner.sh missing/not executable at ${_runner} -- falling back to a plain 'claude -p' launch with NO resume-on-exit loop. Run leadv2-plugin-sync.sh to fix."
-    printf -v cmd 'exec %q -p --model %q --effort %q --permission-mode bypassPermissions %q' \
-      "$CLAUDE_BIN" "$lead_model" "$lead_effort" "/leadv2 ${tid}"
-  else
-    printf -v cmd 'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q LEADV2_RUNNER_FORCE_FRESH=%q; exec %q' \
-      "$tid" "$lead_model" "$lead_effort" "$FORCE" "$_runner"
+    log_error "leadv2-session-runner.sh missing/not executable at ${_runner} — refusing an unguarded one-shot launch"
+    return 1
   fi
+  printf -v cmd 'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q LEADV2_SESSION_PROVIDER=%q LEADV2_RUNNER_FORCE_FRESH=%q; exec %q' \
+    "$tid" "$lead_model" "$lead_effort" "$provider" "$FORCE" "$_runner"
   tmux send-keys -t "$target" "$cmd" C-m 2>/dev/null || true
 
   # tmux new-window hands back the pane's shell pid, not the exec'd `claude`
@@ -915,13 +991,13 @@ launch_tmux() {
   done
 
   if [[ -n "$_resolved_pid" ]]; then
-    log "tmux launch: task=${tid} window=${window} resolved pid=${_resolved_pid} model=${lead_model}/${lead_effort}"
+    log "tmux launch: task=${tid} window=${window} resolved pid=${_resolved_pid} provider=${provider} model=${lead_model}/${lead_effort}"
     _fanout_register_session "$tid" "$cls" "$_resolved_pid" "$window" "true" "false" "tmux" \
-      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason"
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason"
   else
     log "WARN: could not resolve pid for task=${tid} within 10s — registering pid_pending=true"
     _fanout_register_session "$tid" "$cls" "null" "$window" "true" "true" "tmux" \
-      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason"
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason"
   fi
 
   TMUX_LAUNCHED_IDS+=("$tid")
@@ -930,14 +1006,16 @@ launch_tmux() {
 for i in "${!LAUNCH_IDS[@]}"; do
   tid="${LAUNCH_IDS[$i]}"
   cls="${LAUNCH_CLASSES[$i]}"
+  provider="${LAUNCH_PROVIDERS[$i]:-claude}"
   lead_model="${LAUNCH_MODELS[$i]:-sonnet}"
   lead_effort="${LAUNCH_EFFORTS[$i]:-medium}"
   risk_tags="${LAUNCH_RISK_TAGS[$i]:-}"
   class_reason="${LAUNCH_REASONS[$i]:-}"
+  route_reason="${LAUNCH_ROUTE_REASONS[$i]:-}"
   case "$BACKEND" in
-    headless) launch_headless "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" ;;
-    tmux)     launch_tmux "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" ;;
-    windows)  launch_windowed "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" ;;
+    headless) launch_headless "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" "$provider" "$route_reason" ;;
+    tmux)     launch_tmux "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" "$provider" "$route_reason" ;;
+    windows)  launch_windowed "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" "$provider" "$route_reason" ;;
   esac
 done
 

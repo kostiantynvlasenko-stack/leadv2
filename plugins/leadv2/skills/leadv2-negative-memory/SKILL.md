@@ -1,6 +1,6 @@
 ---
 name: leadv2-negative-memory
-description: "[internal] Use before Plan emits steps, before Build spawns developer, after Review findings land, and before any Recovery retry: loads active entries from docs/leadv2-negative-memory.yaml and matches phase/change_kind/approach against them, blocking or auto-elevating severity for any approach whose failure_mode has recurred before. Not for trivial tasks (still run once at build start) or after a task is closed (use leadv2-close / lead-reflect instead)."
+description: "[internal] Match active negative-memory failures before Plan, Build, Review, and Recovery; block repeated failed approaches."
 allowed-tools:
   - Read
   - Write

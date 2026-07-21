@@ -8,6 +8,10 @@ trap 'exit 0' ERR
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
+# shellcheck source=leadv2-mode-isolation.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-mode-isolation.sh"
+leadv2_hook_is_supervisor_session "$INPUT" && exit 0
+
 # --- Guard 1: lead-only — subagents have agent_type field; skip if present ---
 HAS_AGENT_TYPE="$(printf -- '%s' "$INPUT" | python3 -c "
 import sys, json
@@ -45,23 +49,10 @@ fi
 
 # --- Read active task info for payload ---
 TASK_ID_PHASE="none"
-if [[ -n "$ACTIVE_YAML" ]]; then
-  TASK_ID_PHASE="$(python3 -c "
-import yaml, sys
-try:
-    d = yaml.safe_load(open(sys.argv[1])) or {}
-    s = d.get('sessions') or []
-    if s:
-        tid = s[0].get('task_id','?')
-        phase = s[0].get('phase','?')
-        print(f'{tid}: {phase}')
-    else:
-        print('none')
-except Exception:
-    print('none')
-" "$ACTIVE_YAML" 2>/dev/null || printf 'none')"
-fi
-[[ -z "$TASK_ID_PHASE" ]] && TASK_ID_PHASE="${LEADV2_TASK_ID:-none}"
+TASK_ID="$(leadv2_hook_resolve_task_id "$INPUT" "$ACTIVE_YAML" 2>/dev/null || true)"
+[[ -z "$TASK_ID" ]] && exit 0
+ACTIVE_PHASE="$(leadv2_hook_resolve_phase "$INPUT" "$ACTIVE_YAML" 2>/dev/null || true)"
+TASK_ID_PHASE="${TASK_ID}: ${ACTIVE_PHASE:-unknown}"
 
 # --- Extract session_id for counter file ---
 SESSION_ID="$(printf -- '%s' "$INPUT" | python3 -c "

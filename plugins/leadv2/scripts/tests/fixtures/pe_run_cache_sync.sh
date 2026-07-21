@@ -20,9 +20,12 @@ source <(sed -n "1,${cutoff_line}p" "${plugin_sync}")
 # real (stateless) canonical checker explicitly. PLUGIN_GIT_ROOT/CANONICAL_ROOT
 # already resolved correctly at source time from LEADV2_CANONICAL_ROOT.
 _DIRECTION_SAFETY_CHECK="${scripts_root}/leadv2-direction-safety-check.py"
+DRY_RUN="${LEADV2_TEST_DRY_RUN:-${DRY_RUN}}"
 _unsafe_excludes=()
 while IFS= read -r _u; do
   [[ -z "${_u}" ]] && continue
   _unsafe_excludes+=(--exclude="${_u}")
 done < <(_direction_safety_excludes "warn" "cache/scripts" "scripts" "${src}" "${dst}")
-rsync --checksum --recursive --delete "${_unsafe_excludes[@]}" "${src}" "${dst}"
+if [[ "${DRY_RUN}" != "true" ]]; then
+  rsync --checksum --recursive --delete "${_unsafe_excludes[@]}" "${src}" "${dst}"
+fi

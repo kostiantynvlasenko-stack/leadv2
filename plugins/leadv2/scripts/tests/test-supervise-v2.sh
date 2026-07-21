@@ -220,7 +220,7 @@ test_3_adoption_triple_proof() {
   tmux -L "$sock" new-session -d -s leadv2 -n KEEPALIVE 'sleep 90' 2>/dev/null
 
   # 3a: name-only orphan — window name matches NO known task id, no claude PID.
-  tmux -L "$sock" new-window -t leadv2 -n UNKNOWN-WINDOW 'sleep 60' 2>/dev/null
+  tmux -L "$sock" new-window -t leadv2 -n UNKNOWN-WINDOW 'sleep 600' 2>/dev/null
 
   local out3a
   out3a="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
@@ -240,8 +240,8 @@ test_3_adoption_triple_proof() {
 
   # 3b: full triple proof — window name == known task id, AND a live process
   # descending from the pane has "claude" in its command name.
-  tmux -L "$sock" new-window -t leadv2 -n TASK-KNOWN 'exec -a claude sleep 60' 2>/dev/null \
-    || tmux -L "$sock" new-window -t leadv2 -n TASK-KNOWN 'sleep 60' 2>/dev/null
+  tmux -L "$sock" new-window -t leadv2 -n TASK-KNOWN 'exec -a claude sleep 600' 2>/dev/null \
+    || tmux -L "$sock" new-window -t leadv2 -n TASK-KNOWN 'sleep 600' 2>/dev/null
   sleep 0.3
 
   local out3b adopted_b
@@ -308,9 +308,9 @@ print(any(s.get('task_id')=='DEAD-1' for s in d.get('sessions', [])))
   fi
 
   # 4b: real prune (no observe_only) -> tombstone written BEFORE/with the prune, row removed.
-  local out4b removed tombstone_has
-  out4b="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
-    LEADV2_SUPERVISE_OBSERVE_ONLY=0 bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+  local removed tombstone_has
+  LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_OBSERVE_ONLY=0 bash "$SUPERVISE_SH" --json >/dev/null 2>&1 \
     || { fail "Test 4b: supervise.sh exited nonzero"; return; }
   removed="$(python3 -c "
 import yaml
@@ -337,7 +337,7 @@ print(any(t.get('task_id')=='DEAD-1' for t in d))
 test_5_truth_probe_timeout() {
   log "Test 5: truth-probe timeout -> unavailable (fail-open-to-EMPTY, never -clear)"
 
-  local repo state active_path overrides_dir probe
+  local repo state active_path overrides_dir probe probe_completed
   read -r repo state < <(_new_fixture)
   active_path="$(_active_yaml "$repo" "$state")"
   mkdir -p "$(dirname "$active_path")"
@@ -345,26 +345,30 @@ test_5_truth_probe_timeout() {
   overrides_dir="$repo/.claude/leadv2-overrides"
   mkdir -p "$overrides_dir"
   probe="$overrides_dir/supervise-truth-probe.sh"
-  cat > "$probe" <<'SH'
+  probe_completed="$state/truth-probe-completed"
+  cat > "$probe" <<SH
 #!/usr/bin/env bash
 sleep 15
+printf done > "$probe_completed"
 echo '{"breaches":[]}'
 SH
   chmod +x "$probe"
 
-  local start end elapsed out status
-  start="$(date +%s)"
+  local out status reason
   out="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
     bash "$SUPERVISE_SH" --json 2>/dev/null)" \
     || { fail "Test 5: supervise.sh exited nonzero"; return; }
-  end="$(date +%s)"
-  elapsed=$((end - start))
 
   status="$(printf -- '%s' "$out" | json_get "d.get('truth_probe',{}).get('status') if isinstance(d.get('truth_probe'), dict) else d.get('truth_probe')")"
-  if [[ "$status" == "unavailable" && "$elapsed" -lt 14 ]]; then
-    pass "Test 5: probe timeout (${elapsed}s) -> status=unavailable, never 'clear'"
+  reason="$(printf -- '%s' "$out" | json_get "d.get('truth_probe_reason')")"
+  # Wall-clock assertions were flaky on loaded macOS hosts because unrelated
+  # ps/tmux probes in the same snapshot can be slow. The completion marker is
+  # stronger: if the 15s child survived the 12s process-group timeout it must
+  # write this file, regardless of total snapshot runtime.
+  if [[ "$status" == "unavailable" && "$reason" == "timeout" && ! -e "$probe_completed" ]]; then
+    pass "Test 5: timed-out probe process group was killed; status never reported clear"
   else
-    fail "Test 5: status=$status elapsed=${elapsed}s (expected unavailable in <14s)"
+    fail "Test 5: status=$status reason=$reason completed_marker=$([[ -e "$probe_completed" ]] && echo yes || echo no)"
   fi
 }
 
@@ -416,9 +420,9 @@ YAML
   sock7a="sv2-t7a-$$-$RANDOM"
   TMUX_SOCKETS+=("$sock7a")   # never started -- has-session fails -> tmux_windows empty -> window "missing"
 
-  local out7a_1 out7a_2
-  out7a_1="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
-    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7a" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+  local out7a_2
+  LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7a" bash "$SUPERVISE_SH" --json >/dev/null 2>&1 \
     || { fail "Test 7a: poll 1 exited nonzero"; return; }
   out7a_2="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
     LEADV2_SUPERVISE_TMUX_SOCKET="$sock7a" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
@@ -441,7 +445,7 @@ print(any(s.get('task_id')=='LIVE-WINDOW-FLAP' for s in d.get('sessions', [])))
   local sock7b
   sock7b="sv2-t7b-$$-$RANDOM"
   TMUX_SOCKETS+=("$sock7b")
-  tmux -L "$sock7b" new-session -d -s leadv2 -n DEAD-PID-LIVE-WINDOW 'sleep 60' 2>/dev/null
+  tmux -L "$sock7b" new-session -d -s leadv2 -n DEAD-PID-LIVE-WINDOW 'sleep 600' 2>/dev/null
 
   cat > "$active_path" <<'YAML'
 sessions:
@@ -459,9 +463,9 @@ sessions:
 YAML
   printf -- '{"rendered_at":"2020-01-01T00:00:00+00:00","tasks":{},"reported_events":[],"dead_candidates":{},"reconcile_cycle_count":5}' > "$snap"
 
-  local out7b_1 out7b_2
-  out7b_1="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
-    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7b" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+  local out7b_2
+  LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7b" bash "$SUPERVISE_SH" --json >/dev/null 2>&1 \
     || { fail "Test 7b: poll 1 exited nonzero"; return; }
   out7b_2="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
     LEADV2_SUPERVISE_TMUX_SOCKET="$sock7b" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
@@ -501,12 +505,11 @@ sessions:
 YAML
   printf -- '{"rendered_at":"2020-01-01T00:00:00+00:00","tasks":{},"reported_events":[],"dead_candidates":{},"reconcile_cycle_count":5}' > "$snap"
 
-  local out7c_1 out7c_2
-  out7c_1="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
-    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7c" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+  LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7c" bash "$SUPERVISE_SH" --json >/dev/null 2>&1 \
     || { fail "Test 7c: poll 1 exited nonzero"; return; }
-  out7c_2="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
-    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7c" bash "$SUPERVISE_SH" --json 2>/dev/null)" \
+  LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_TMUX_SOCKET="$sock7c" bash "$SUPERVISE_SH" --json >/dev/null 2>&1 \
     || { fail "Test 7c: poll 2 exited nonzero"; return; }
   local removed7c
   removed7c="$(python3 -c "
@@ -658,7 +661,7 @@ json.dump({'pid': $$, 'pid_birth': '$birth', 'started_at': '2020-01-01T00:00:00Z
 "
   before="$(cat "$sentinel")"
   out="$(LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
-    timeout 10 bash "$LOOP_SH" --ensure)" || { fail "Test 10: --ensure exited nonzero"; return; }
+    timeout 30 bash "$LOOP_SH" --ensure)" || { fail "Test 10: --ensure exited nonzero"; return; }
   after="$(cat "$sentinel")"
 
   if [[ "$out" == *"already running"* && "$before" == "$after" ]]; then
@@ -688,16 +691,29 @@ log "=== leadv2-supervise V2 unit tests (SUPERVISE-V2-01 batch-2 item 6) ==="
 log "Scripts: $SUPERVISE_SH / $LOOP_SH / $PICK_SH"
 echo
 
-test_6_syntax
-test_1_loop_cadence_ceiling
-test_2_pick_schema
-test_3_adoption_triple_proof
-test_4_tombstone_before_prune
-test_5_truth_probe_timeout
-test_7_and_condition_death_matrix
-test_8_tombstone_failure_keeps_row
-test_9_dead_event_dedup
-test_10_ensure_atomic_attach
+case "${LEADV2_SUPERVISE_TEST_ONLY:-all}" in
+  truth-probe)
+    test_5_truth_probe_timeout
+    ;;
+  ensure)
+    test_10_ensure_atomic_attach
+    ;;
+  all)
+    test_6_syntax
+    test_1_loop_cadence_ceiling
+    test_2_pick_schema
+    test_3_adoption_triple_proof
+    test_4_tombstone_before_prune
+    test_5_truth_probe_timeout
+    test_7_and_condition_death_matrix
+    test_8_tombstone_failure_keeps_row
+    test_9_dead_event_dedup
+    test_10_ensure_atomic_attach
+    ;;
+  *)
+    fail "unknown LEADV2_SUPERVISE_TEST_ONLY=${LEADV2_SUPERVISE_TEST_ONLY}"
+    ;;
+esac
 
 echo
 log "=== Results: PASS=$PASS FAIL=$FAIL ==="

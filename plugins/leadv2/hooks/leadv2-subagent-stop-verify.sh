@@ -9,6 +9,10 @@ trap 'echo "[$(basename "$0")] error at line $LINENO" >&2; exit 0' ERR
 INPUT="$(cat 2>/dev/null || true)"
 [[ -z "$INPUT" ]] && exit 0
 
+# shellcheck source=leadv2-mode-isolation.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-mode-isolation.sh"
+leadv2_hook_is_supervisor_session "$INPUT" && exit 0
+
 CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
 [[ -z "$CWD" ]] && CWD="$PWD"
 SESSION_ID="$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
@@ -20,14 +24,7 @@ for f in "$CWD/.claude/leadv2-tasks/active.yaml" "$CWD/docs/leadv2/active.yaml";
 done
 [[ -z "$ACTIVE" ]] && exit 0
 
-TASK_ID="$(python3 -c "
-import yaml
-try:
-    d = yaml.safe_load(open('$ACTIVE')) or {}
-    s = d.get('sessions') or []
-    print(s[0].get('task_id','') if s else '')
-except: print('')
-" 2>/dev/null || echo "")"
+TASK_ID="$(leadv2_hook_resolve_task_id "$INPUT" "$ACTIVE" 2>/dev/null || true)"
 [[ -z "$TASK_ID" ]] && exit 0
 
 # Look for any .md deliverable in handoff dir modified within last 60s
@@ -39,13 +36,14 @@ HAS_RECENT=0
 HAS_MARKER=0
 for hd in "${HANDOFF_DIRS[@]}"; do
   [[ -d "$hd" ]] || continue
-  for f in $(find "$hd" -maxdepth 2 -name '*.md' -mmin -1 -type f 2>/dev/null); do
+  while IFS= read -r -d '' f; do
     HAS_RECENT=1
     if tail -5 "$f" 2>/dev/null | grep -q 'DELIVERABLE_COMPLETE'; then
       HAS_MARKER=1
-      break 2
+      break
     fi
-  done
+  done < <(find "$hd" -maxdepth 2 -name '*.md' -mmin -1 -type f -print0 2>/dev/null)
+  [[ "$HAS_MARKER" -eq 1 ]] && break
 done
 
 # If recent file exists but no marker → soft warn (or strict block)
