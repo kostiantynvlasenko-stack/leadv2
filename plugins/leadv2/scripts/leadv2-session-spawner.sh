@@ -73,6 +73,9 @@ export LEADV2_DAEMON=1
 export LEADV2_ASYNC_QUESTIONS=1
 export LEADV2_CLAUDE_MAX_BUDGET_USD="${LEADV2_CLAUDE_MAX_BUDGET_USD:-${LEADV2_SPAWN_BUDGET:-}}"
 export LEADV2_CLAUDE_PERMISSION_MODE="${LEADV2_CLAUDE_PERMISSION_MODE:-${LEADV2_SPAWN_PERMISSION_MODE:-acceptEdits}}"
+# Passed through to session runners; it is consumed only when active.yaml says
+# this task is in Phase 6 Deploy or Phase 7 Verify.
+export LEADV2_PHASE67_ALLOWED_TOOLS="${LEADV2_PHASE67_ALLOWED_TOOLS:-Bash(plugins/leadv2/scripts/leadv2-deploy-merge.sh:*),Bash(.claude/leadv2-overrides/deploy.sh:*),Bash(.claude/leadv2-overrides/verify.sh:*)}"
 "$FANOUT" "${fanout_args[@]}"
 
 if [[ "$DRY_RUN" == "true" ]]; then

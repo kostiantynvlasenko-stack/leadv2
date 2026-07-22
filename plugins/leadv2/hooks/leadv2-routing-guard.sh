@@ -224,24 +224,49 @@ print('DENY')
 " "$CALLER_AGENT_TYPE" "$SUBAGENT_TYPE" "$MODEL" "${_POLICY_SRC:-}" 2>/dev/null || echo "DENY")"
 
   if [[ "$_POLICY_RESULT" == "ALLOW" ]]; then
-    # Gap #3 — PER-TASK COUNT: count all prior successful nested spawns for
-    # this task (fail-safe: unreadable/missing task log = 0).
+    # Count and record an allowed task-scoped spawn under one lock. Taskless
+    # probes deliberately skip this quota: the global log is cross-task
+    # forensic history and must not become a permanent shared cap.
     if [[ "$_DEPTH_GATE" != "0" ]]; then
-      _COUNT_LOG="${_REPO_ROOT}/docs/leadv2/nested-spawns.log"
-      [[ -n "$SAFE_TASK_ID" ]] && _COUNT_LOG="${_REPO_ROOT}/docs/leadv2/tasks/${SAFE_TASK_ID}/nested-spawns.log"
-      _PRIOR_COUNT=0
-      if [[ -f "$_COUNT_LOG" ]]; then
-        _PRIOR_COUNT="$(grep -Ec 'verdict=(allow|escalation)' "$_COUNT_LOG" 2>/dev/null || echo 0)"
-      fi
-      [[ "$_PRIOR_COUNT" =~ ^[0-9]+$ ]] || _PRIOR_COUNT=0
-
-      if [[ "$_PRIOR_COUNT" -ge "$_MAX_SUBRUNS" ]]; then
-        _audit_log "deny" "route.subrun.count_exceeded"
-        printf -- '[leadv2-routing-guard] DENIED nested spawn: task "%s" reached max_nested_per_task=%s (prior=%s) — return blocker to lead.\n' "$SAFE_TASK_ID" "$_MAX_SUBRUNS" "$_PRIOR_COUNT" >&2
-        exit 2
+      if [[ -n "$SAFE_TASK_ID" ]]; then
+        _COUNT_LOG="${_REPO_ROOT}/docs/leadv2/tasks/${SAFE_TASK_ID}/nested-spawns.log"
+        if ! mkdir -p "$(dirname "$_COUNT_LOG")" 2>/dev/null || ! touch "$_COUNT_LOG" 2>/dev/null; then
+          _audit_log "deny" "route.subrun.count_log_unavailable"
+          printf -- '[leadv2-routing-guard] DENIED nested spawn: task audit log unavailable — return blocker to lead.\n' >&2
+          exit 2
+        fi
+        _ALLOW_LINE="$(printf -- '%s caller=%s target=%s model=%s verdict=allow reason=policy_base' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$CALLER_AGENT_TYPE" "$SUBAGENT_TYPE" "$MODEL")"
+        _LOCK_RC=0
+        _LOCK_RESULT="$(flock -x "$_COUNT_LOG" bash -c '
+          log="$1" max="$2" line="$3"
+          count="$(grep -Ec "verdict=(allow|escalation)" "$log" 2>/dev/null || printf 0)"
+          case "$count" in (""|*[!0-9]*) exit 3;; esac
+          if [ "$count" -ge "$max" ]; then printf "%s" "$count"; exit 2; fi
+          printf "%s\\n" "$line" >> "$log" || exit 3
+          printf "%s" "$count"
+        ' bash "$_COUNT_LOG" "$_MAX_SUBRUNS" "$_ALLOW_LINE" 2>/dev/null)" || _LOCK_RC=$?
+        if [[ "$_LOCK_RC" -ne 0 ]]; then
+          _PRIOR_COUNT="${_LOCK_RESULT:-unknown}"
+          if [[ "$_LOCK_RC" -eq 2 ]]; then
+            _audit_log "deny" "route.subrun.count_exceeded"
+            printf -- '[leadv2-routing-guard] DENIED nested spawn: task "%s" reached max_nested_per_task=%s (prior=%s) — return blocker to lead.\n' "$SAFE_TASK_ID" "$_MAX_SUBRUNS" "$_PRIOR_COUNT" >&2
+          else
+            _audit_log "deny" "route.subrun.count_log_unavailable"
+            printf -- '[leadv2-routing-guard] DENIED nested spawn: task audit lock failed — return blocker to lead.\n' >&2
+          fi
+          exit 2
+        fi
+        # Do not call _audit_log here: it would append a second task record.
+        _GLOBAL_LOG="${_REPO_ROOT}/docs/leadv2/nested-spawns.log"
+        if ! mkdir -p "$(dirname "$_GLOBAL_LOG")" 2>/dev/null || ! printf -- '%s\n' "$_ALLOW_LINE" >> "$_GLOBAL_LOG" 2>/dev/null; then
+          printf -- '[leadv2-routing-guard] DENIED nested spawn: global audit log unavailable — return blocker to lead.\n' >&2
+          exit 2
+        fi
+        exit 0
       fi
     fi
 
+    # No task id: record forensics, but never read the cross-task history as a cap.
     _audit_log "allow" "policy_base"
     exit 0  # allowed nested discovery probe
   fi

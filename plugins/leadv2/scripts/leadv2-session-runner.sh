@@ -109,6 +109,9 @@ CLAUDE_BIN="${LEADV2_FANOUT_CLAUDE_BIN:-claude}"
 CLAUDE_MAX_TURNS="${LEADV2_CLAUDE_MAX_TURNS:-30}"
 CLAUDE_MAX_BUDGET_USD="${LEADV2_CLAUDE_MAX_BUDGET_USD:-}"
 CLAUDE_PERMISSION_MODE="${LEADV2_CLAUDE_PERMISSION_MODE:-acceptEdits}"
+# These are the only interactive-side-effect commands that may be pre-approved
+# after the registry has entered Deploy or Verify. Keep this list script-only.
+LEADV2_PHASE67_ALLOWED_TOOLS="${LEADV2_PHASE67_ALLOWED_TOOLS:-Bash(plugins/leadv2/scripts/leadv2-deploy-merge.sh:*),Bash(.claude/leadv2-overrides/deploy.sh:*),Bash(.claude/leadv2-overrides/verify.sh:*)}"
 
 TASK_DIR="${PROJECT_ROOT}/docs/handoff/${TASK_ID}"
 mkdir -p "$TASK_DIR"
@@ -188,6 +191,26 @@ raise SystemExit(0 if valid else 1)
 PYEOF
 }
 
+phase67_active() {
+  local active phase
+  [[ "${LEADV2_PHASE:-}" == "deploy" || "${LEADV2_PHASE:-}" == "verify" ]] && return 0
+  active="$(PROJECT_ROOT="$PROJECT_ROOT" "$SCRIPT_DIR/leadv2-state-path.sh" --no-link active.yaml 2>/dev/null)" || return 1
+  phase="$(python3 - "$active" "$TASK_ID" <<'PYEOF' 2>/dev/null
+import sys
+try:
+    import yaml
+    data = yaml.safe_load(open(sys.argv[1], encoding='utf-8')) or {}
+    for row in data.get('sessions', []):
+        if row.get('task_id') == sys.argv[2]:
+            print(row.get('phase', ''))
+            break
+except Exception:
+    pass
+PYEOF
+)"
+  [[ "$phase" == "deploy" || "$phase" == "verify" ]]
+}
+
 if sentinel_present; then
   log "Phase-8 completion proof already present for ${TASK_ID} — nothing to do"
   exit 0
@@ -234,6 +257,15 @@ while (( attempt < MAX_ATTEMPTS )); do
     --verbose
   )
   [[ -n "$CLAUDE_MAX_BUDGET_USD" ]] && claude_args+=(--max-budget-usd "$CLAUDE_MAX_BUDGET_USD")
+  # acceptEdits does not cover Bash/network deploy and live-probe operations.
+  # Grant only the fixed Phase 6/7 script allowlist, and only once the shared
+  # registry says this task is in Deploy or Verify.
+  if phase67_active; then
+    IFS=',' read -r -a phase67_tools <<< "$LEADV2_PHASE67_ALLOWED_TOOLS"
+    for phase67_tool in "${phase67_tools[@]}"; do
+      claude_args+=(--allowedTools "$phase67_tool")
+    done
+  fi
   [[ -n "${LEADV2_SPAWN_MCP_CONFIG:-}" ]] && claude_args+=(--mcp-config "$LEADV2_SPAWN_MCP_CONFIG")
   [[ -n "${LEADV2_SPAWN_SETTINGS:-}" ]] && claude_args+=(--settings "$LEADV2_SPAWN_SETTINGS")
   claude_args+=("$prompt")

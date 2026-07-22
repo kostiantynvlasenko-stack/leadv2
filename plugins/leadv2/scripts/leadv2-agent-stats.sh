@@ -45,7 +45,7 @@ mkdir -p "$(dirname "$OUT_FILE")"
 
 # Build combined input: current state + history (if present)
 COMBINED_INPUT=$(lv2_mktemp_file "leadv2-agent-stats-input" "md")
-trap 'rm -f "$COMBINED_INPUT"' EXIT
+trap 'lv2_rmtemp_file "$COMBINED_INPUT"' EXIT
 
 {
   [[ -f "$STATE_FILE" ]]   && cat "$STATE_FILE"
@@ -69,7 +69,7 @@ fi
 # We extract per-task records and accumulate per (agent, change_kind) buckets.
 # ---------------------------------------------------------------------------
 PY_HELPER=$(lv2_mktemp_file "leadv2-agent-stats" "py")
-trap 'rm -f "$COMBINED_INPUT" "$PY_HELPER"' EXIT
+trap 'lv2_rmtemp_file "$COMBINED_INPUT"; lv2_rmtemp_file "$PY_HELPER"' EXIT
 
 python3 -c "import sys; print(open(sys.argv[1]).read())" /dev/stdin > "$PY_HELPER" <<'PYEOF'
 import sys

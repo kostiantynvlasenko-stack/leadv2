@@ -8,9 +8,10 @@ source "${SCRIPT_DIR}/../leadv2-temp.sh"
 ROOT="$(lv2_mktemp_dir temp-stress)"
 trap 'rm -rf "$ROOT"' EXIT
 export -f lv2_mktemp_file
+export -f lv2_rmtemp_file
 
 for _ in $(seq 1 100); do
-  bash -c 'lv2_mktemp_file stress json' >> "${ROOT}/paths" &
+  bash -c 'path="$(lv2_mktemp_file stress json)"; printf "%s\\n" "$path"; lv2_rmtemp_file "$path"' >> "${ROOT}/paths" &
 done
 wait
 

@@ -34,6 +34,26 @@ export LEADV2_FANOUT="${LEADV2_FANOUT:-1}"
 export LEADV2_SESSION_PROVIDER="codex"
 export LEADV2_TASK_ID="$TASK_ID"
 
+phase67_active() {
+  local active phase
+  [[ "${LEADV2_PHASE:-}" == "deploy" || "${LEADV2_PHASE:-}" == "verify" ]] && return 0
+  active="$(PROJECT_ROOT="$PROJECT_ROOT" "$SCRIPT_DIR/leadv2-state-path.sh" --no-link active.yaml 2>/dev/null)" || return 1
+  phase="$(python3 - "$active" "$TASK_ID" <<'PYEOF' 2>/dev/null
+import sys
+try:
+    import yaml
+    data = yaml.safe_load(open(sys.argv[1], encoding='utf-8')) or {}
+    for row in data.get('sessions', []):
+        if row.get('task_id') == sys.argv[2]:
+            print(row.get('phase', ''))
+            break
+except Exception:
+    pass
+PYEOF
+)"
+  [[ "$phase" == "deploy" || "$phase" == "verify" ]]
+}
+
 TASK_DIR="$PROJECT_ROOT/docs/handoff/$TASK_ID"
 mkdir -p "$TASK_DIR"
 SENTINEL="${LEADV2_COMPLETION_SENTINEL:-$TASK_DIR/phase8-passed.flag}"
@@ -155,6 +175,12 @@ while (( attempt < MAX_ATTEMPTS )); do
       cmd+=(--dangerously-bypass-approvals-and-sandbox)
     else
       cmd+=(--sandbox workspace-write)
+      # Phase 6/7 is the sole escalation point. It keeps workspace-write (no
+      # sandbox bypass) while allowing the fixed deploy/verify script calls to
+      # use their required network operations without an unattended prompt.
+      if phase67_active; then
+        cmd+=( -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true' )
+      fi
     fi
     [[ "${LEADV2_CODEX_BYPASS_HOOK_TRUST:-0}" == "1" ]] && cmd+=(--dangerously-bypass-hook-trust)
     cmd+=("$prompt")
@@ -167,6 +193,9 @@ while (( attempt < MAX_ATTEMPTS )); do
       cmd+=(--dangerously-bypass-approvals-and-sandbox)
     else
       cmd+=(--sandbox workspace-write)
+      if phase67_active; then
+        cmd+=( -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true' )
+      fi
     fi
     [[ "${LEADV2_CODEX_BYPASS_HOOK_TRUST:-0}" == "1" ]] && cmd+=(--dangerously-bypass-hook-trust)
     cmd+=("$THREAD_ID" "$prompt")
