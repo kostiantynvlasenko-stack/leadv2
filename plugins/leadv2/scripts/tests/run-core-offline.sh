@@ -43,6 +43,7 @@ run_check "portable temp helper stress" bash "$TEST_DIR/test-leadv2-temp-stress.
 run_check "Claude plugin manifest/components" validate_plugin
 run_check "provider/model router" bash "$TEST_DIR/test-session-route.sh"
 run_check "Codex full-cycle runner" bash "$TEST_DIR/test-codex-session-runner.sh"
+run_check "Codex child-session recursion boundary" bash "$TEST_DIR/test-codex-child-session-boundary.sh"
 run_check "autonomous session spawner" bash "$TEST_DIR/test-session-spawner.sh"
 run_check "hook token + mode isolation" bash "$TEST_DIR/test-hook-token-mode-isolation.sh"
 run_check "main model/live quota" bash "$TEST_DIR/test-main-model-check.sh"

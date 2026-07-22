@@ -30,6 +30,9 @@ if [[ "${STUB_MODE:-complete}" != "no-thread" && "${1:-}" == "exec" && "${2:-}" 
   printf -- '{"type":"thread.started","thread_id":"codex-thread-test"}\n'
 fi
 printf -- '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}\n'
+if [[ "${STUB_MODE:-complete}" == "recursion" ]]; then
+  printf -- '{"type":"response_item","item":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"env LEADV2_TASK_ID=CODEX-SMOKE-RECURSION bash .claude/scripts/leadv2-supervise.sh\\"}"}}\n'
+fi
 if [[ "${STUB_MODE:-complete}" == "complete" && "${1:-}" == "exec" && "${2:-}" == "resume" ]]; then
   mkdir -p "$STUB_PROJECT_ROOT/docs/handoff/$STUB_TASK_ID"
   : > "$STUB_PROJECT_ROOT/docs/handoff/$STUB_TASK_ID/phase8-passed.flag"
@@ -149,10 +152,25 @@ stall_rc=$?
 set -e
 stall_calls="$(grep -c '^exec' "$project/codex.args" || true)"
 if [[ "$stall_rc" -eq 4 && "$stall_calls" -eq 2 \
-   && "$stall_out" == *"stopping to prevent token-burning resumes"* ]]; then
+   && "$stall_out" == *"CODEX-LEAD RECURSION suspected"* \
+   && "$stall_out" == *"stopping early to prevent token-burning resumes"* ]]; then
   pass "two turns without phase/git/handoff progress stop before the six-attempt budget"
 else
   fail "stall cap case rc=$stall_rc calls=$stall_calls out=$stall_out"
+fi
+
+task_id="CODEX-SMOKE-RECURSION"
+project="$(new_case recursion "$task_id")"
+set +e
+recursion_out="$(run_case "$project" "$task_id" recursion 6 2>&1)"
+recursion_rc=$?
+set -e
+recursion_calls="$(grep -c '^exec' "$project/codex.args" || true)"
+if [[ "$recursion_rc" -eq 5 && "$recursion_calls" -eq 1 \
+   && "$recursion_out" == *"CODEX-LEAD RECURSION"* ]]; then
+  pass "launcher self-invocation fails immediately before retrying"
+else
+  fail "recursion case rc=$recursion_rc calls=$recursion_calls out=$recursion_out"
 fi
 
 printf -- '[TEST] Results: PASS=%d FAIL=%d\n' "$PASS" "$FAIL"

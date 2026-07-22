@@ -161,6 +161,52 @@ PYEOF
   leadv2_active_append_provider_receipt "$TASK_ID" "$receipt" >/dev/null 2>&1 || true
 }
 
+# A Codex turn is already inside this runner's flock.  A command that starts a
+# session runner, fanout, supervise, or another launcher/dispatcher is not
+# useful work: it is the Codex-lead recursion failure mode.  Inspect only this
+# turn's appended JSONL/text so previous diagnostic output cannot trip it.
+_launcher_spawn_detected() {
+  local offset="$1"
+  python3 - "$LOGF" "$offset" <<'PYEOF'
+import json, re, sys
+
+path, offset = sys.argv[1], int(sys.argv[2])
+launcher = re.compile(r"leadv2-(?:codex-)?session-runner|leadv2-(?:fanout|supervise)|leadv2-[^\s/]*?(?:launcher|dispatcher)", re.I)
+shell = re.compile(r"(?:^|[;&|\n]\s*)(?:(?:env\s+[^\n]*?\s+)?(?:bash|sh)\s+|\S*/)", re.I)
+
+try:
+    with open(path, "rb") as fh:
+        fh.seek(offset)
+        raw = fh.read().decode("utf-8", "replace")
+except FileNotFoundError:
+    raise SystemExit(1)
+
+def strings(value):
+    if isinstance(value, str):
+        yield value
+        try:
+            yield from strings(json.loads(value))
+        except (ValueError, TypeError):
+            pass
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings(item)
+
+for line in raw.splitlines():
+    try:
+        values = strings(json.loads(line))
+    except ValueError:
+        values = (line,)
+    for value in values:
+        if launcher.search(value) and shell.search(value):
+            raise SystemExit(0)
+raise SystemExit(1)
+PYEOF
+}
+
 log "task=$TASK_ID provider=codex model=$MODEL effort=$EFFORT log=$LOGF resume=${THREAD_ID:-fresh}"
 
 attempt=0
@@ -168,7 +214,7 @@ noop_streak=0
 stall_streak=0
 while (( attempt < MAX_ATTEMPTS )); do
   if [[ -z "$THREAD_ID" ]]; then
-    prompt="Use the available leadv2 skill (source-command-leadv2 or plugin leadv2) and run task ${TASK_ID} as a headless child. Drive the full lifecycle through plan, build, adversarial review, deploy gate, live verification, and close. Reuse the existing leadv2 scripts and guards; never bypass a safety, merge, deploy, or phase gate. All founder questions must use .claude/scripts/leadv2-ask.sh because LEADV2_ASYNC_QUESTIONS=1. Stop only after docs/handoff/${TASK_ID}/phase8-passed.flag or its validated shared completion receipt exists, or a circuit breaker requires the supervising founder."
+    prompt="You ARE ALREADY the leadv2 headless child session for task ${TASK_ID}; execute its Phase 0..8 lifecycle yourself (plan, build, adversarial review, deploy gate, live verification, close). NEVER invoke leadv2-codex-session-runner.sh, leadv2-session-runner.sh, leadv2-fanout.sh, leadv2-supervise.sh, or any launcher/dispatcher: that is self-recursion and will fail on this session's flock. Reuse only per-phase helper scripts and guards (such as leadv2-gate1-prompt.sh and leadv2-phase8-{assert,e2e-gate,close}.sh), never a session launcher. Never bypass a safety, merge, deploy, or phase gate. All founder questions must use .claude/scripts/leadv2-ask.sh because LEADV2_ASYNC_QUESTIONS=1. Stop only after docs/handoff/${TASK_ID}/phase8-passed.flag or its validated shared completion receipt exists, or a circuit breaker requires the supervising founder."
     cmd=("$CODEX_BIN" exec --json --model "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"" -C "$PROJECT_ROOT")
     if [[ "${LEADV2_UNSAFE_AUTOPILOT:-0}" == "1" ]]; then
       log "UNSAFE_AUTOPILOT receipt: full Codex approval and sandbox bypass enabled"
@@ -186,7 +232,7 @@ while (( attempt < MAX_ATTEMPTS )); do
     cmd+=("$prompt")
     _mode="fresh"
   else
-    prompt="Continue leadv2 task ${TASK_ID} from its current phase. Re-check every sentinel and provider receipt before repeating any side effect. Drive it to canonical Phase-8 completion proof; route any founder decision through leadv2-ask.sh."
+    prompt="Continue task ${TASK_ID} as the ALREADY-RUNNING leadv2 child session: execute the current Phase 0..8 work yourself. NEVER invoke leadv2-codex-session-runner.sh, leadv2-session-runner.sh, leadv2-fanout.sh, leadv2-supervise.sh, or any launcher/dispatcher; doing so is self-recursion under your own flock. Use only per-phase helper scripts, never session launchers. Re-check every sentinel and provider receipt before repeating any side effect. Drive it to canonical Phase-8 completion proof; route any founder decision through leadv2-ask.sh."
     cmd=("$CODEX_BIN" exec resume --json --model "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"")
     if [[ "${LEADV2_UNSAFE_AUTOPILOT:-0}" == "1" ]]; then
       log "UNSAFE_AUTOPILOT receipt: full Codex approval and sandbox bypass enabled"
@@ -219,6 +265,11 @@ while (( attempt < MAX_ATTEMPTS )); do
   fi
 
   progress_after="$("$PROGRESS_TOOL" "$TASK_ID" 2>/dev/null || printf -- 'unknown-after')"
+  if _launcher_spawn_detected "$log_size_before"; then
+    _append_receipt "recursion_detected" "$rc" "$attempt"
+    log_error "CODEX-LEAD RECURSION: Codex tried to spawn a leadv2 launcher/dispatcher from its already-running child session; stopping immediately"
+    exit 5
+  fi
   if [[ "$progress_before" == "$progress_after" ]]; then
     stall_streak=$((stall_streak + 1))
     log "attempt $attempt changed no phase/git/handoff evidence (stall_streak=${stall_streak}/${STALL_MAX})"
@@ -255,7 +306,7 @@ while (( attempt < MAX_ATTEMPTS )); do
     break
   fi
   if (( stall_streak >= STALL_MAX )); then
-    log_error "$stall_streak consecutive turns changed no phase/git/handoff evidence — stopping to prevent token-burning resumes"
+    log_error "CODEX-LEAD RECURSION suspected: $stall_streak consecutive turns changed no phase/git/handoff evidence while this runner owns the flock — stopping early to prevent token-burning resumes"
     break
   fi
   if (( attempt < MAX_ATTEMPTS )); then
