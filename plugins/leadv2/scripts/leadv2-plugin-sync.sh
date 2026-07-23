@@ -4,7 +4,7 @@
 #
 # Syncs to:
 #   (a) ~/.claude/plugins/cache/leadv2-local/leadv2/0.1.0/  (full plugin cache)
-#   (b) ~/.claude/leadv2-shared/                            (scripts + contracts only)
+#   (b) ~/.claude/leadv2-shared/                            (scripts + contracts + hooks)
 #   (c) <project>/.claude/scripts/                          (per-repo runtimes from cross-repo-paths.yaml)
 #   (d) <project>/.claude/contracts/                        (schema files per-repo)
 #   (e) ~/.claude/scripts/                                  (user-global leadv2-* scripts; ADDITIVE, no --delete)
@@ -367,9 +367,15 @@ for subdir in scripts contracts workflows hooks config skills commands agents do
   fi
 done
 
-# ── (b) leadv2-shared (scripts + contracts only) ─────────────────────────────
+# ── (b) leadv2-shared (scripts + contracts + hooks) ──────────────────────────
+# hooks added COMPACT-DEDUP-01 FU1 (2026-07-23): leadv2-shared/hooks/ held a
+# manually-copied mirror of the plugin's hooks/ that this loop never touched
+# -- it drifted (missing fixes landed only in canonical/cache). Global
+# ~/.claude/settings.json points PreCompact directly at this shared copy
+# (the repo-agnostic bootstrap, works without the plugin loaded), so it must
+# be kept byte-identical to canonical the same way scripts/contracts already are.
 log "Syncing -> leadv2-shared (b): ${SHARED_TARGET}"
-for subdir in scripts contracts; do
+for subdir in scripts contracts hooks; do
   src="${PLUGIN_ROOT}/${subdir}/"
   dst="${SHARED_TARGET}/${subdir}"
   if [[ -d "${src}" ]]; then

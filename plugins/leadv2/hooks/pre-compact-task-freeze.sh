@@ -159,6 +159,28 @@ def latest_journal_tail(root, leadv2_dir, n=15):
         return None, []
 
 
+def role_and_tail(lines, tail_n=40):
+    """COMPACT-DEDUP-01 FU2: open-threads.md was embedded VERBATIM (broke the
+    120-line CAP -- 643 ln / 105KB observed live). Bound it instead to the two
+    things with actual resume value, per the SESSION-HANDOFF-01 design panel's
+    Carry table (role sacrosanct, tail truncates first):
+      - ROLE block: open-threads.md's own head (WHO YOU ARE + founder
+        standing rules) -- structurally the span up to the 3rd "# N."
+        heading (keeps sections 1+2, drops volatile section 3+). Falls back
+        to the first 28 lines if the file has fewer than 3 numbered headings.
+      - FRESHEST tail: last `tail_n` lines -- open-threads.md is an
+        append-only log, so the tail is always the newest entries.
+    Short files (role + tail would overlap) are returned whole -- nothing to
+    save by truncating. Returns (role_lines, tail_lines, dropped_count).
+    """
+    heading_idxs = [i for i, l in enumerate(lines) if re.match(r"^#\s*\d+\.", l)]
+    role_end = heading_idxs[2] if len(heading_idxs) >= 3 else min(28, len(lines))
+    tail_start = max(role_end, len(lines) - tail_n)
+    if tail_start <= role_end:
+        return lines, [], 0
+    return lines[:role_end], lines[tail_start:], tail_start - role_end
+
+
 def main():
     with open(sys.argv[1], encoding="utf-8") as f:
         try:
@@ -181,7 +203,7 @@ def main():
     # Cap the dumped task list to the top-N by priority (P0<P1<P2<P3<unranked).
     # The FULL backlog always stays in docs/tasks.yaml; this only bounds the
     # per-compact context injection (LEADV2_FREEZE_TASK_CAP overrides; default 40).
-    task_dump_cap = int(os.environ.get("LEADV2_FREEZE_TASK_CAP", "40"))
+    task_dump_cap = int(os.environ.get("LEADV2_FREEZE_TASK_CAP", "10"))
     def _prank(pr):
         m = re.match(r"[Pp](\d)", pr or "")
         return int(m.group(1)) if m else 9
@@ -203,10 +225,19 @@ def main():
         )
 
     ot_lines = read_file(os.path.join(leadv2_abs, "open-threads.md"))
-    ot_section = (
-        ["## OPEN THREADS (verbatim, docs/leadv2/open-threads.md)"] + ot_lines
-        if ot_lines else []
-    )
+    ot_section = []
+    if ot_lines:
+        threads_tail_n = int(os.environ.get("LEADV2_FREEZE_THREADS_TAIL", "40"))
+        role_lines, tail_lines, dropped = role_and_tail(ot_lines, tail_n=threads_tail_n)
+        ot_section = [
+            "## OPEN THREADS \u2014 role block + freshest tail (docs/leadv2/open-threads.md; capped, not verbatim)"
+        ]
+        ot_section += role_lines
+        if dropped:
+            ot_section.append(
+                f"\u2026 {dropped} stale middle lines dropped (full history in docs/leadv2/open-threads.md) \u2026"
+            )
+        ot_section += tail_lines
 
     sd_rows = due_rows(os.path.join(leadv2_abs, "scheduled-decisions.md"))
     sd_section = ["## SCHEDULED DECISIONS — DUE/OVERDUE"] + sd_rows if sd_rows else []
