@@ -33,26 +33,7 @@ caused_by: unknown (architect to determine from diff)
 
 ### 0b. Validate probe result contract (PO-058)
 
-Before classifying failure, validate the probe result file against the contract
-(`docs/specs/leadv2-verify-contract.md`):
-
-```bash
-source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)"
-PROBE_RESULT="docs/handoff/${TASK_ID}/verify-probe-result.yaml"
-if [[ -f "$PROBE_RESULT" ]]; then
-  _validate_probe_result "$PROBE_RESULT" || {
-    printf '[recovery] WARN: probe result file invalid — treating outcome as probe_timeout\n' >&2
-  }
-  outcome=$(python3 -c "
-import yaml, sys
-d = yaml.safe_load(open(sys.argv[1])) or {}
-print(d.get('outcome', 'probe_timeout'))
-" "$PROBE_RESULT" 2>/dev/null || echo "probe_timeout")
-else
-  # Fallback: derive outcome from verify-probe exit code passed in context
-  outcome="${PROBE_OUTCOME:-probe_timeout}"
-fi
-```
+Before classifying failure, validate the probe result file against the contract (`docs/specs/leadv2-verify-contract.md`) and derive `outcome`. Full validation script (source helpers, run `_validate_probe_result`, parse `PROBE_RESULT="docs/handoff/${TASK_ID}/verify-probe-result.yaml"`, fallback to `${PROBE_OUTCOME:-probe_timeout}`): see [REFERENCE.md](./REFERENCE.md#0b-validate-probe-result-contract).
 
 Use `outcome` (not the raw exit code) for all downstream classification logic.
 
@@ -82,19 +63,7 @@ If `docs/leadv2-negative-memory.yaml` missing → skip, proceed normally.
 
 ### 1c. Compress previous-phase outputs before reading
 
-Before reading any prior-phase handoff files (architect.md, developer.md, diff.md), compress them if large to reduce recovery-brief token cost:
-
-```bash
-source "$(bash .claude/scripts/lv2 --path leadv2-helpers.sh)"
-for f in \
-  "docs/handoff/${TASK_ID}/architect.md" \
-  "docs/handoff/${TASK_ID}/developer.md" \
-  "docs/handoff/${TASK_ID}/diff.md"; do
-  [[ -f "$f" ]] && leadv2_compress_handoff "$f"
-done
-# Read via helper — compressed twin is preferred when it exists
-architect_out=$(leadv2_read_handoff "docs/handoff/${TASK_ID}/architect.md")
-```
+Before reading any prior-phase handoff files (architect.md, developer.md, diff.md), compress them if large to reduce recovery-brief token cost. Full compression script (loops `architect.md`/`developer.md`/`diff.md` through `leadv2_compress_handoff`, reads via `leadv2_read_handoff`): see [REFERENCE.md](./REFERENCE.md#1c-compress-previous-phase-outputs).
 
 This prevents the full incident log (potentially hundreds of KB) from being ingested raw into the recovery architect brief.
 
@@ -117,72 +86,13 @@ leadv2_tasks_add "RECOVERY-${TASK_ID}" recovery critical \
 
 Quick hotfix (catch-and-swallow exception, magic-number patch) is always `fix_quality: band-aid`. Automatically flagged; requires explicit founder override via `leadv2-decide.sh` to apply. Do NOT include as `recommended` in decision yaml.
 
-Spawn architect(opus) via Agent tool with full state (NOT claude-subsession — we need skills active):
-
-```
-# Write recovery brief first:
-Write /tmp/recovery-<task-id>-<N>.md:
-  Task: <id>
-  Mission: <original>
-  Deployed: commit <hash> at <ts>
-  Probe failure: <type> (<timeout|negative> — <detail>)
-  Context.yaml decisions: <cite>
-  Context.yaml off_limits: <cite>
-  Diff summary (from docs/handoff/<id>/diff.md): <condensed>
-  Previous recovery attempts: <none | list of N-1>
-
-# Then spawn architect via Agent tool:
-Agent(
-  subagent_type: architect,
-  model: opus,
-  prompt: "
-Recovery context: read /tmp/recovery-<task-id>-<N>.md in full.
-
-Question: What do we do?
-Options to consider (pick one, justify):
-  A. ROLLBACK: git revert + redeploy. When: new code broke existing behavior.
-  B. HOTFIX: code patch + redeploy. When: missing small piece, code mostly right.
-  C. CONFIG FIX: change env var / feature flag. When: code right, config off.
-  D. ABANDON: task scope wrong, rollback + re-plan. When: approach fundamentally flawed.
-  E. EXTEND TIMEOUT: probe too short. When: log shows activity, just slow.
-
-Write to docs/handoff/<id>/architect.md (OVERWRITE with recovery output), format:
-  decision: <A|B|C|D|E>
-  rationale: <one paragraph>
-  plan: <concrete steps>
-  new_probe: <if probe spec needs change, describe>
-  risk_of_recovery: <what this recovery itself might break>
-Max 400 words. Last line: DELIVERABLE_COMPLETE.
-
-Skills active: plan-review, devils-advocate, systematic-debugging, leadv2-subagent-protocol.
-Codebase graph project: ${LEADV2_CODEBASE_PROJECT}
-"
-)
-```
+Spawn architect(opus) via Agent tool with full state (NOT claude-subsession — we need skills active). Write the recovery brief to `/tmp/recovery-<task-id>-<N>.md` first, then spawn with the standard options (ROLLBACK/HOTFIX/CONFIG FIX/ABANDON/EXTEND TIMEOUT) and output contract (`decision`, `rationale`, `plan`, `new_probe`, `risk_of_recovery`, max 400 words, `DELIVERABLE_COMPLETE`). Full brief template + exact Agent() spawn prompt: see [EXAMPLES.md](./EXAMPLES.md#step-2-recovery-brief--architect-spawn).
 
 Read `docs/handoff/<id>/architect.md` (overwritten with recovery output).
 
 ### 2b. Diff-only recovery-context (attempt 2+)
 
-When recovery attempt 2 spawns (after attempt 1 fails), **do NOT replay full incident log**.
-
-**Protocol:**
-1. Call `bash .claude/scripts/lv2 leadv2-recovery-context.sh --task-id <id> --attempt 2`
-2. The script emits the compact RECOVERY-CONTEXT format and archives the full log:
-   ```
-   RECOVERY-CONTEXT (compact)
-   Original task: <id>
-   Classification: Heavy
-   Regression: <one-paragraph>
-   Attempt 1 approach: <two-sentences>
-   Attempt 1 failure: <one-sentence>
-   Diff between original-broken and attempt-1: <git diff>
-   Next approach requested: <one-sentence>
-   ```
-3. Inject compact context into attempt-2 architect brief in place of full incident log
-4. Full incident log archived at `docs/handoff/<id>/recovery-full.md` — available for audit but NOT loaded into architect context
-
-**Fallback:** if diff unavailable, script falls back to `[diff unavailable — check git log manually]`. Proceed with compact context regardless.
+When recovery attempt 2 spawns (after attempt 1 fails), **do NOT replay full incident log** — call `bash .claude/scripts/lv2 leadv2-recovery-context.sh --task-id <id> --attempt 2` and inject its compact RECOVERY-CONTEXT output into the attempt-2 architect brief instead. Full incident log archived at `docs/handoff/<id>/recovery-full.md` (audit only, not loaded into context). Compact-format spec + fallback behavior: see [REFERENCE.md](./REFERENCE.md#2b-diff-only-recovery-context).
 
 ### 3. Execute architect decision
 
@@ -213,44 +123,11 @@ Run leadv2-verify skill again with probe spec from context.yaml (possibly update
 
 ### 6. Circuit break
 
-After 2 recoveries failed OR architect answers D ABANDON on attempt 2:
-
-```
-PushNotification: "leadv2 circuit break on <task-id>: 2 recoveries failed. rolled back. needs founder."
-
-AskUserQuestion:
-  question: "Task <id> failed verify 2x after recovery attempts. Production is at <rolled-back-state | last-hotfix>. What next?"
-  options:
-    - label: "Abandon task, open tracker item"
-      description: "Roll back if not yet, file in docs/ops/RECOVERY_TRACKER.md with full history"
-    - label: "Manual takeover"
-      description: "Lead freezes state, founder debugs live. Provide log paths + commit range."
-    - label: "Retry with new scope"
-      description: "Kill this task-id, re-open Gate 1 with founder's revised mission"
-```
-
-Write LEAD_V2_STATE:
-```
-status: paused
-phase: recovery
-step: circuit_break
-note: "2 recoveries failed, founder decision pending. last probe: <result>"
-```
+After 2 recoveries failed OR architect answers D ABANDON on attempt 2: send a `PushNotification` that recovery failed 2x and needs founder, then `AskUserQuestion` with options Abandon/Manual takeover/Retry with new scope, and write `LEAD_V2_STATE` with `status: paused`, `phase: recovery`, `step: circuit_break`. Exact notification text, question wording, and options: see [REFERENCE.md](./REFERENCE.md#6-circuit-break).
 
 ### 7. Learning capture
 
-On ANY recovery outcome (success or circuit break) — append to LEAD_V2_STATE.history:
-
-```yaml
-history:
-  - task: <id>
-    closed_at: <ts>
-    reflect:
-      recovery_used: true
-      recovery_attempts: <N>
-      recovery_decision: <A|B|C|D|E>
-      pattern_for_immune: "when <probe-type> fails with <signature>, <decision> worked"
-```
+On ANY recovery outcome (success or circuit break) — append an entry to `LEAD_V2_STATE.history` recording `recovery_used`, `recovery_attempts`, `recovery_decision`, and a `pattern_for_immune` string. Exact yaml shape: see [EXAMPLES.md](./EXAMPLES.md#step-7-learning-capture).
 
 This feeds immune memory for future pattern avoidance.
 

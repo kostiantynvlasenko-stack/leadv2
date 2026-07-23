@@ -50,32 +50,20 @@ From `context.yaml` (or intake signal if plan not yet synthesized):
 
 ### 3. Match filter
 
-For each active entry in negative memory:
+For each active entry in negative memory, **match if ALL of:**
 
 ```
-MATCH if ALL of:
-  A. entry.signature.phase == current_phase
-     OR entry.signature.phase is null (matches any phase)
-  B. entry.signature.change_kind == current change_kind
-     OR entry.signature.change_kind is null
-     OR current change_kind is null (unknown footprint — still check approach)
-  C. keyword_overlap(entry.signature.approach, approach_description) >= 0.55
-     (count shared significant words / total unique words in entry.signature.approach)
-     # Threshold is tunable via LEADV2_NM_THRESHOLD env var (default 0.55).
-     # Lower = more sensitive (more blocks); 0.4 was over-blocking unrelated tasks.
-     # Raise to 0.65+ for large diverse codebases; lower to 0.45 if misses are observed.
-     OR fused-top-3(approach_description) includes this entry with cosine >= tau_sem (0.35)
-     # MEM-SEMANTIC-RECALL-01: additive OR-path. Only active when
-     # LEADV2_SEMANTIC_RECALL_ENABLED=1 and LEADV2_RECALL_HELPER is set — call
-     # scripts/leadv2-semantic-recall.sh negmem "<approach_description>" and
-     # RRF-fuse (k=60) with the keyword_overlap ranking, same rule as
-     # leadv2-immune-lookup.sh §2. Flag off, or helper missing/Qdrant down
-     # (fail-open empty semantic list) => this OR-term is never true; the
-     # keyword_overlap>=0.55 check above is unaffected either way (semantic
-     # only ADDS a match, never suppresses one).
+A. entry.signature.phase == current_phase
+   OR entry.signature.phase is null (matches any phase)
+B. entry.signature.change_kind == current change_kind
+   OR entry.signature.change_kind is null
+   OR current change_kind is null (unknown footprint — still check approach)
+C. keyword_overlap(entry.signature.approach, approach_description) >= threshold (default 0.55)
+   OR semantic similarity via optional helper >= 0.35
+   [See REFERENCE.md for threshold tuning & semantic recall details]
 ```
 
-Keyword overlap is approximate. At 0.55 the balance is: occasional unrelated block (ask founder) vs missed block (causes rollback). Tune if false-positive rate is high. Semantic OR-path catches the differently-phrased case (e.g. "PGRST102 partial-index upsert" vs "upsert conflict target could not be resolved on a partial unique index") that keyword_overlap alone misses.
+Keyword overlap counts shared significant words / total unique words. Semantic match uses cosine similarity when enabled. **Either match fires a block.**
 
 ### 4. For each match — enforce or allow
 

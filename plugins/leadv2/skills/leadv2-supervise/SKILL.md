@@ -140,17 +140,5 @@ given lane's protocol version uses. Do not add a third store.
 
 ## Verification
 
-- `plugins/leadv2/scripts/tests/test-supervise-failclosed.sh` — B1
-  fail-closed root/registry/state-write unit tests.
-- `plugins/leadv2/tests/test-supervise-v2.sh` (SUPERVISE-V2-01 item 6) —
-  loop cadence/ceiling, pick-script ranking schema, tmux triple-proof
-  adoption matrix, tombstone-before-prune, observe_only visibility
-  (would_adopt/would_prune never drop an eligible candidate), truth-probe
-  timeout->unavailable.
-- `plugins/leadv2/scripts/tests/test-session-route.sh` — deterministic
-  provider/model decisions, quota fallback, and high-risk fail-closed cases.
-- `plugins/leadv2/scripts/tests/test-codex-session-runner.sh` — fake Codex
-  fresh/resume smoke test proving the runner requires the common Phase-8
-  sentinel and persists provider receipts.
-
-Run both before relying on the watch loop in a real session.
+For detailed test coverage and pre-deployment validation, see [VERIFICATION.md](./VERIFICATION.md).
+Run the referenced test suites before relying on the watch loop in a real session.

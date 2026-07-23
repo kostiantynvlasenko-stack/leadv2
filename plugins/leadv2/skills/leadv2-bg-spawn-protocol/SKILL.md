@@ -30,14 +30,10 @@ Background agents die silently (spend limit, crash, lost ping). Without a Monito
 
 `leadv2-bg-stop-warn.sh` (Stop hook) remains as a backstop, now firing every stop (WARN_EVERY=1).
 
-## Anti-pattern
+## Pattern
 
 ```
-# WRONG: spawn with no Monitor
-Agent(subagent_type="developer", run_in_background=true, ...)
-# ... next tool call without Monitor -> watchdog gate fires and blocks
-
-# CORRECT
+# CORRECT: spawn + Monitor
 Agent(subagent_type="developer", run_in_background=true, ...)
 Monitor(path="docs/handoff/TASK-01/developer.full.md")
 ```

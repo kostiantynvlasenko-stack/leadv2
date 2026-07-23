@@ -24,8 +24,7 @@ cd ~/.claude/plugins/local/leadv2/plugins/leadv2/scripts && \
   npx playwright install chromium
 ```
 
-If `chromium-headless-shell` already exists in `~/Library/Caches/ms-playwright/`,
-`npx playwright install chromium` is a no-op.
+If `chromium-headless-shell` exists in `~/Library/Caches/ms-playwright/`, the install is a no-op.
 
 ## Usage
 
@@ -62,29 +61,24 @@ Output is JSON to stdout:
 
 Edit `~/.claude/plugins/local/leadv2/plugins/leadv2/scripts/leadv2-browser-check.mjs`,
 add a new branch in the `if (interaction === '...')` block. Use Playwright
-locators (`page.getByRole`, `page.getByLabel`, `page.getByTestId`) — never CSS
-selectors.
+locators (`page.getByRole`, `page.getByLabel`, `page.getByTestId`) — never CSS selectors.
 
 ## Cost discipline
 
-- ~1-3K tokens per call (JSON output is ~30-100 lines).
-- Founder screenshot is ~0 tokens — prefer it when feasible.
-- Use this skill only when network/console inspection is essential.
-- DO NOT loop or poll with this script — single call per investigation.
+~1-3K tokens per call. Founder screenshot is free — prefer it for layout/visual issues.
+Use only when network/console inspection is essential. **Do not loop or poll** — single call per investigation.
 
 ## Auth-gated pages
 
-Default mode is headless + no cookies. If the page requires Privy auth, the
-script will show a 401/403 in console errors. For auth-required investigation,
-either:
+Default is headless + no cookies. Auth-required pages show 401/403 in console.
 
-1. Test the API directly with `curl` + an auth cookie from `~/.envrc`
-2. Or extend the script to load a saved storage state (Playwright `storageState`
-   parameter on `newContext`). Not done by default — add only if needed.
+**Options:**
+1. Test API directly with `curl` + auth cookie from `~/.envrc`
+2. Extend the script to load saved Playwright `storageState` (not default — add only if needed)
 
 ## When NOT to use
 
 - Visual issues — founder screenshot is more informative
-- Quick API checks — `curl` against the endpoint is faster
-- Anything that requires logging in
-- Mid-deploy verification — wait for deploy to finish first
+- Quick API checks — `curl` is faster
+- Pages requiring login
+- Verification during an active deploy — wait for deploy to finish

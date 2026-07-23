@@ -20,15 +20,9 @@ Parse only `+` lines (additions) from the diff — do not flag deletions or cont
 
 ## Signal catalog
 
-| Pattern | Type | Severity | Detection |
-|---|---|---|---|
-| `# TODO` / `# FIXME` / `# HACK` / `# XXX` without a linked ticket or justification | `todo-no-ticket` | warn |
-| Magic number: bare integer/float literal not assigned to a named constant, in a context that implies policy (e.g. `sleep(17)`, `retry_count = 3`, `timeout = 30`) | `magic-number` | warn |
-| Broad `except Exception:` or `except:` with body that is `pass` or only a `log` call — no re-raise | `broad-except` | warn |
-| `@pytest.mark.skip` without a `reason=` argument, OR `test_*.py` file deleted with no replacement | `disabled-test` | **block** |
-| Persona/entity-specific hardcoded branch: `if <id_var> == "<specific_value>":` where value looks like an ID/name rather than a config key | `special-case` | warn |
-| Block of consecutive commented-out code lines (≥3 `# ` lines that look like code, not prose) | `commented-code` | warn |
-| Hardcoded credential, URL, token, or API key pattern in new code (distinct from security-auditor scope — here as quality signal) | `hardcoded` | warn |
+Detect patterns: `todo-no-ticket`, `magic-number`, `broad-except`, `disabled-test`, `special-case`, `commented-code`, `hardcoded`.
+
+For full pattern definitions and detection heuristics, see [SIGNALS.md](./SIGNALS.md).
 
 ## Severity rules
 
@@ -70,59 +64,6 @@ Also write a one-line summary to `docs/handoff/<task-id>/hack-detection.summary.
 Hack-detection: <N> block, <N> warn findings. [block: <type list>] Full: hack-findings.yaml
 ```
 
-## Implementation approach
-
-Use Python stdlib only (no third-party imports).
-
-```python
-import re
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
-# Patterns applied to + lines only (stripped of leading +)
-PATTERNS = {
-    "todo-no-ticket": re.compile(
-        r'#\s*(TODO|FIXME|HACK|XXX)\b(?!.*(?:https?://|\w+-\d+|ticket|issue))',
-        re.IGNORECASE
-    ),
-    "broad-except": re.compile(
-        r'except\s*(Exception\s*)?:\s*$'  # matched with next-line check for pass/log only
-    ),
-    "disabled-test": re.compile(
-        r'@pytest\.mark\.skip(?!\s*\(.*reason\s*=)'
-    ),
-    "special-case": re.compile(
-        r'if\s+\w+\s*==\s*["\'][a-zA-Z][\w\-]{3,}["\']'  # heuristic: id-looking value
-    ),
-    "hardcoded": re.compile(
-        r'(?:api_key|secret|password|token|credential)\s*=\s*["\'][A-Za-z0-9+/]{16,}["\']',
-        re.IGNORECASE
-    ),
-}
-
-MAGIC_NUMBER = re.compile(
-    r'(?:sleep|timeout|retry_count|limit|max_attempts|interval)\s*[=(]\s*(\d{2,})'
-)
-COMMENTED_CODE = re.compile(r'^#\s+(?:def |class |import |return |if |for |while )')
-```
-
-Parse the diff file:
-1. Track current file from `diff --git a/<file> b/<file>` lines
-2. Track line numbers from `@@` hunk headers  
-3. Apply patterns to each `+` line (strip leading `+` before matching)
-4. Accumulate 3+ consecutive commented-code lines as one finding
-5. For `broad-except`: look ahead 1-2 lines for `pass` or bare logging with no re-raise
-
-## Integration with lead-reflect
-
-After reading hack findings, lead-reflect uses `hack_findings` to compute `fix_quality`:
-- `block` findings present → `band-aid`
-- `warn` > 3 → `band-aid`
-- `warn` 1-3 → `reasonable`
-- 0 findings AND test-synthesis coverage ≥ 80% → `durable`
-- default (no data) → `reasonable`
-
 ## Rules
 
 - Only scan `+` lines — never flag existing code that wasn't changed in this diff.
@@ -131,9 +72,10 @@ After reading hack findings, lead-reflect uses `hack_findings` to compute `fix_q
 - Empty findings list is valid — emit `findings: []` and `summary.block_count: 0`.
 - Do NOT read full files unless the diff line is ambiguous about surrounding context (e.g., to confirm broad-except has no re-raise on next line).
 
-## Anti-patterns
+## Implementation
 
-- Flagging deleted lines (lines starting with `-`) — only additions are in scope.
-- Inventing new `block`-severity cases beyond the hard-wired `disabled-test` rule.
-- Running full AST parsing on source files — diff-only, stdlib regex, fast.
-- Emitting opinion-based findings ("this function is too long") — pattern catalog only.
+Use Python stdlib only (no third-party imports). For regex patterns, Python code examples, parsing instructions, and anti-patterns, see [IMPLEMENTATION.md](./IMPLEMENTATION.md).
+
+## Integration with lead-reflect
+
+After reading hack findings, lead-reflect uses `hack_findings` to compute `fix_quality`. See [IMPLEMENTATION.md §Integration](./IMPLEMENTATION.md#integration-with-lead-reflect) for the quality-mapping rules.

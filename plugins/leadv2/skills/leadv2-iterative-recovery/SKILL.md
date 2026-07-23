@@ -26,7 +26,7 @@ allowed-tools:
 ```
 Iteration N:
   1. Name the blocker precisely (one sentence, root cause not symptom)
-  1b. Codex second-hypothesis check (see below) — reconcile before scoping the fix
+  1b. Codex second-hypothesis check (optional, see below)
   2. Scope the fix to ONLY this blocker — touch nothing else
   3. Syntax-check: bash -n (sh) / python3 -m py_compile (py)
   4. Deploy both VPS via deploy-latest.sh
@@ -36,11 +36,9 @@ Iteration N:
   8. Pulse: "iter-N: <blocker-name> → <GREEN|next-blocker>"
 ```
 
-### 1b. Codex second-hypothesis check (added 2026-06-30, SONNET5-ADAPT-01)
+### Step 1b: Codex second-hypothesis check
 
-The exact failure mode this targets: a whole session burned on 2 wrong root-cause theories before the real cause (a swallowed NOT-NULL error, sitting in the log the whole time) was found — see persona-engine's CLAUDE.md "Diagnosis protocol" section. A second, independent reader catches this cheaply.
-
-If `bash ~/.claude/scripts/codex-task.sh status >/dev/null 2>&1` succeeds, fire Codex as an independent hypothesis generator in background, in parallel with the lead's own log read for step 1:
+If `bash ~/.claude/scripts/codex-task.sh status >/dev/null 2>&1` succeeds, fire Codex in parallel with the lead's log read:
 
 ```bash
 bash .claude/scripts/lv2 leadv2-codex-planner.sh \
@@ -49,7 +47,7 @@ bash .claude/scripts/lv2 leadv2-codex-planner.sh \
   --out "docs/handoff/<task-id>/codex-iter-${N}-hypothesis.md" &
 ```
 
-Monitor for completion, then reconcile: if Codex's hypothesis matches the lead's, proceed with high confidence. If they diverge, do NOT pick one blind — re-check the actual error log/runtime evidence (per the Diagnosis protocol: read the error first, never ship on a code-read hypothesis alone) before naming the blocker in step 1. Skip silently if `codex-task.sh status` fails (no ChatGPT login) — lead's own read is sufficient, this is advisory only and never blocks the iteration.
+Reconcile outputs: if both match, proceed with high confidence. If they diverge, re-check actual error logs before naming the blocker in step 1 (per persona-engine CLAUDE.md diagnosis protocol: never ship on code-read hypothesis alone). Skip silently if `codex-task.sh status` fails.
 
 ## Traceability — mandatory log
 
@@ -72,18 +70,16 @@ Lead writes this file — not subagent. It becomes the canonical chain.
 
 **No-progress stall check (mandatory after each entry write):**
 
-After writing each entry to `iterative-blockers.yaml`, call the helper with the `root_cause` slug:
-
 ```bash
 bash scripts/leadv2-noprogress-check.sh \
   docs/handoff/<task-id>/recovery-sig.jsonl \
   "<root_cause_slug>"
 ```
 
-- Exit 0 (`PROGRESS`) → continue to next iteration normally.
-- Exit 1 (`STALLED`) → stop layer-peel immediately; escalate to founder via `ask-lead.sh <task-id> "iterative-recovery stalled: same root_cause <slug> repeated <N> times with no progress. Recommend: escalate to Skill(leadv2-judge) mode=recovery or abort."`. Do NOT attempt another fix iteration.
+- Exit 0 (`PROGRESS`) → continue to next iteration.
+- Exit 1 (`STALLED`) → escalate immediately to founder via `ask-lead.sh <task-id> "iterative-recovery stalled: same root_cause <slug> repeated. Escalate to Skill(leadv2-judge) mode=recovery or abort."`. Do NOT attempt another fix.
 
-> **Signature independence:** the `root_cause` slug passed here is distinct from the `dimension:severity` signature used by the review workflow's stall-check. Always use separate JSONL paths per tracker: `recovery-sig.jsonl` for this recovery loop, and a different file for the review workflow — mixing them produces false STALLED/PROGRESS signals.
+**Note:** Use `recovery-sig.jsonl` for this loop only. Do not share stall-check files with other recovery workflows (mixing produces false STALLED signals).
 
 ## Probe discipline — batch signals
 - ONE SQL query per iteration covering all key metrics — not 5 sequential probes.

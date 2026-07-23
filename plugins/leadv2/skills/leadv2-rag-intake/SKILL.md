@@ -87,50 +87,16 @@ WARN: Similar task <task_id> failed recently (outcome: <outcome>) — review key
 
 ### 7. Output to lead (chat)
 
-One line, ≤25 words, Russian preferred:
+One line, ≤25 words, Russian preferred.
 
-Examples:
-- Top match ≥ 0.75, outcome success: "Похоже на <task_id> (sim 0.87, успех). Подход: <1-word strategy from key_lessons>."
-- Top match ≥ 0.60, outcome rolled_back: "⚠ Похоже на <task_id> (sim 0.73, откат). Разобрать уроки перед планом."
-- Top match 0.40–0.59, any outcome: "Слабое совпадение с <task_id> (sim 0.52). Ориентировочно."
-- No match or < 0.40: "Новая территория — нет похожих задач."
-
----
-
-## Thresholds
-
-| Similarity | Treatment |
-|---|---|
-| ≥ 0.75 | Strong prior art — surface lessons prominently in Plan phase |
-| 0.60–0.74 | Moderate — note in prior-art.yaml, mention in Plan |
-| 0.40–0.59 | Weak — include in file but label "weak signal" |
-| < 0.40 | Cold territory — prior-art.yaml written as `[]` |
-
----
-
-## Feed into Plan phase
-
-When spawning architect / Codex planner mission files, include prior-art.yaml
-content as a top-level section:
-
-```yaml
-# In /tmp/mission-<id>.md or docs/handoff/<id>/context.yaml
-prior_art:
-  - task_id: ...
-    similarity: 0.87
-    outcome: completed_success
-    key_lessons:
-      - "when Gate 1 plan bundles commit+deploy into final build step → split explicitly"
-```
-
-Only include entries with similarity >= 0.60. If none qualify, omit the section.
+Examples and guidance: see [REFERENCE.md](./REFERENCE.md) §Output examples.
 
 ---
 
 ## Rules
 
 - **Never block intake on failure.** Wrap the bash call in `|| true`; log to stderr.
-- **Similarity threshold for "no prior art":** top match < 0.60 → cold territory.
+- **Similarity threshold for "no prior art":** top match < 0.60 → cold territory. See [REFERENCE.md](./REFERENCE.md) §Thresholds for full mapping.
 - **Rolled_back / paused_recovery warn rule:** append WARN to state note.
 - **Cold start (history empty):** output `[]`, exit 0, no warning needed.
 - **History < 5 entries:** script warns to stderr — that's fine, proceed with what's available.
@@ -138,8 +104,8 @@ Only include entries with similarity >= 0.60. If none qualify, omit the section.
 
 ---
 
-## Anti-patterns
+## Next: Feed into Plan phase
 
-- Blocking intake if fastembed is slow on first run (model download). The script exits 0 regardless.
-- Reading all of LEAD_V2_STATE.md inline during this step — the script handles parsing.
-- Including prior-art entries with similarity < 0.60 in Plan phase mission files.
+When spawning architect / Codex planner mission files, include prior-art.yaml content at top level (details: [REFERENCE.md](./REFERENCE.md) §Feed into Plan).
+
+Only include entries with similarity >= 0.60; omit the section if none qualify.

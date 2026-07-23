@@ -159,42 +159,12 @@ Lead reports compactly between phases:
 
 ## Lessons codified (LOCAL-9 retro, 2026-05-23)
 
-These are MANDATORY checks that fold into the existing phases. Don't skip.
+These are MANDATORY checks that fold into the phases above — don't skip. Full rationale + the historical trap each one fixes: see [LESSONS.md](./LESSONS.md).
 
-### 1. Baseline-for-comparisons check (Phase A — audit prompt addition)
-
-Any UI column / badge / value that shows a **delta, percentage, ratio, or comparison** (Floor Δ, % change, vs market, since last…) MUST specify in the audit:
-- **Baseline** — what value are we comparing against? `current_floor` vs `floor_at_time_of_event`? `7d_high` vs `all_time_high`?
-- **Time semantics** — is the baseline live OR snapshotted at event-time?
-- **API contract** — does the API expose a per-row snapshot field, or only the live aggregate?
-
-If the audit produces a delta column without answering all 3 — that's a P0 finding, not a P2. Reason: LOCAL-9 shipped a `Floor Δ` column in Recent Sales using *current* floor against *historical* sale price — semantically wrong, founder caught visually, required Round 2 fix-and-revert. Add this question to `templates/po-audit-mission.md`.
-
-### 2. Playwright PASS ≠ visual OK for numeric/format UI
-
-Playwright "PASS" is necessary but not sufficient for:
-- Number formatting (axis labels, currency, percentages)
-- Truncation / ellipsis behavior
-- Color-coding by value sign
-- Y-axis dual-axis layouts
-
-Reason: LOCAL-9 verify reported "Y-axis fix PASS" while UI actually showed `$0/$1/$1/$1` (bars used wrong data key). Selector existed → PASS, but render was wrong.
-
-**Rule for Phase C:** if the verify scenario covers a numeric/format/visual concern, the agent MUST save a `/tmp/v-<n>.png` screenshot for that scenario and reference it in the report. Lead then offers founder visual signoff ("see /tmp/v-3.png") before declaring done. Don't merge on Playwright PASS alone for format-class fixes.
-
-### 3. Lead-direct-verify rule (≤5-line single-file)
-
-When a verify reports a FAIL that requires checking a SINGLE line in a SINGLE file (e.g. "is `hidden sm:inline-flex` on the BETA span?"), lead reads the file directly with `Read offset=N limit=5`. Do NOT spawn a developer agent.
-
-Reason: LOCAL-9 spent 80s on an A1-was-actually-correct re-check of `Header.tsx` line 35 because the QA report's FAIL was a stale Vercel cache, not a real bug. One `Read` call would have closed it instantly.
-
-**Threshold:** if the fix candidate is ≤5 lines AND in 1 file AND clearly localized — lead reads, then either confirms no fix needed OR writes the patch instruction inline into a single agent prompt. Skip a dedicated agent.
-
-### 4. Don't skip Phase 3 (Plan triad) for "obviously well-defined" UI work
-
-LOCAL-9 went audit→build without architect+critic, betting the audit IS the spec. It worked, but the FloorΔ semantic miss is exactly what a critic-Opus pass would have flagged BEFORE writing code. Rule: even if work feels "well-defined P2 polish", run a 30-line `critic-mission.md` over the audit findings, async, parallel with Build. Cost: one Opus call. Saves one round of revert-and-fix.
-
----
+1. **Baseline-for-comparisons check** (Phase A) — any delta/%/ratio/comparison column must specify baseline, time semantics, and API contract in the audit, or it's a P0 finding, not P2.
+2. **Playwright PASS ≠ visual OK for numeric/format UI** (Phase C) — numeric/format/visual verify scenarios MUST save a screenshot; don't merge on Playwright PASS alone for format-class fixes.
+3. **Lead-direct-verify rule** (≤5-line single-file) — a FAIL localized to ≤5 lines in 1 file: lead reads it directly (`Read offset=N limit=5`); no dedicated agent.
+4. **Don't skip Phase 3 (Plan triad)** for "obviously well-defined" UI work — run a 30-line `critic-mission.md` over the audit findings, async with Build.
 
 ## Per-repo overrides
 
@@ -206,8 +176,4 @@ If `<repo>/.claude/leadv2-overrides/po-audit-policy.yaml` exists, lead reads it 
 
 ## Reference implementation
 
-See `~/MythicalGames/m3-market/.claude/leadv2-tasks/LOCAL-9-collections-sidebar/` for:
-- `po-audit.md` — collections grid audit (first proof of concept)
-- `po-audit-detail.md` — detail page audit
-- `po-audit-tabs.md` — Recent Sales + Price & Volume audit
-- Commits `90d3a7a9`, `078ff5d5`, `bc670694` — 27 fixes across 3 commits
+Worked example of this loop end-to-end, with commit SHAs: see [REFERENCE.md](./REFERENCE.md).

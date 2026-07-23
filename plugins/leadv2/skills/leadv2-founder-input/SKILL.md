@@ -87,57 +87,9 @@ Run the tier classifier above. Then:
 
 ### Step 1 — Compose the decision file
 
-Create `docs/leadv2-decisions/<YYYY-MM-DDThh-mm-ssZ>-<task-id>.yaml`:
+Create `docs/leadv2-decisions/<YYYY-MM-DDThh-mm-ssZ>-<task-id>.yaml`.
 
-```yaml
-id: <YYYY-MM-DDThh-mm-ssZ>-<task-id>
-created_at: <iso>
-task_id: <task-id>
-tier: <A|B|C>
-phase: <current-phase>
-trigger: circuit-break | recovery-failed | verify-timeout | off-limits-warning | coverage-low | other
-status: pending
-question: "<clear plain-English question for the founder; include what failed, how many times, last error>"
-options:
-  - id: A
-    label: "<action label>"
-    action: retry_task | skip_task | pause_indefinite | rollback_and_investigate
-    fix_quality: band-aid | reasonable | durable
-  - id: B
-    label: "<action label>"
-    action: ...
-    fix_quality: band-aid | reasonable | durable
-  - id: C
-    label: "Pause daemon, investigate manually, resume when ready"
-    action: pause_indefinite
-    fix_quality: reasonable
-  - id: D
-    label: "Roll back last commit and open RECOVERY- task"
-    action: rollback_and_investigate
-    fix_quality: reasonable
-recommended: <id of fix_quality:durable option; if none → highest reasonable; see rules below>
-reasoning: "<why recommended is best; prefix with WARN: no durable option available if none exists>"
-context:
-  task_class: <Light|Standard|Heavy|Strategic>
-  files_touched: [<list of files changed in this task>]
-  last_fail_reason: "<one-line summary>"
-  last_n_history: []  # last 3 history entries from docs/LEAD_V2_STATE.md
-answer:
-  selected: null
-  selected_at: null
-  notes: null
-escalation:
-  re_ping_at: <iso + 2h>
-  re_ping_count: 0
-  auto_apply_at: null  # set for Tier B only: now+10min ISO
-```
-
-**`fix_quality` semantics:**
-- `band-aid` — patches symptom, does not fix root cause (e.g. retry same failing approach)
-- `reasonable` — safe, defers root-cause work (e.g. rollback + file tracker item)
-- `durable` — addresses root cause permanently (e.g. redesign via architect)
-
-**`recommended` field is REQUIRED.** Always select the `fix_quality: durable` option if one exists. If no durable option → select `fix_quality: reasonable` and prepend `WARN: no durable option available, escalating option set to founder` to `reasoning`. Missing `fix_quality` on any option → treat as `band-aid` (conservative).
+For the full YAML schema (all fields, all option entries) and the `fix_quality` semantics, see [SCHEMAS.md](./SCHEMAS.md).
 
 Write atomically: write to `<file>.tmp` then `os.replace()` / `mv`.
 
@@ -159,20 +111,7 @@ Send a `PushNotification` with:
 4. Once answered: read `answer.selected` and `answer.action`, apply inline, continue task
 5. **No auto-apply for Tier C.** Wait indefinitely; no timeout fallback.
 
-```bash
-# Poll loop (bash inside skill)
-DEADLINE=$(( $(date +%s) + 1800 ))
-REMINDED=0
-while [[ $(date +%s) -lt $DEADLINE ]]; do
-  STATUS=$(python3 -c "import yaml; d=yaml.safe_load(open('$DEC_FILE')); print(d.get('status',''))")
-  if [[ "$STATUS" == "answered" ]]; then break; fi
-  if [[ $(date +%s) -gt $((DEADLINE - 900)) && "$REMINDED" -eq 0 ]]; then
-    push_notify "[/leadv2] Reminder: decision still pending for $TASK_ID"
-    REMINDED=1
-  fi
-  sleep 10
-done
-```
+For the poll-loop bash implementation, see [EXAMPLES.md](./EXAMPLES.md).
 
 **Daemon mode** (`LEADV2_DAEMON=1`):
 
@@ -180,6 +119,8 @@ done
 2. Send `PushNotification` (Step 2)
 3. Return immediately — daemon's `check_answered_decisions` function will pick it up on next poll
 4. **No auto-apply.** Wait indefinitely for founder.
+
+For the daemon's escalation re-ping cadence while paused, see [REFERENCE.md](./REFERENCE.md).
 
 ### Step 3b — Tier B: default-timeout (10 min auto-apply)
 
@@ -205,15 +146,6 @@ done
 | `rollback_and_investigate` | Call `leadv2-rollback.sh --yes`, open recovery task via lib (replaces former QUEUE.md append):<br>`source "$(bash .claude/scripts/lv2 --path leadv2-tasks-lib.sh)" && leadv2_tasks_add "RECOVERY-<id>" recovery high --title "investigate rollback: <id>" --origin founder`, then resume |
 
 After applying: move the decision file to `docs/leadv2-decisions/_resolved/<YYYYMMDD>/<id>.yaml`.
-
----
-
-## Escalation re-ping (daemon only)
-
-The daemon re-pings every 60 min while paused with pending decisions older than `re_ping_at`. Each re-ping:
-- Sends PushNotification with escalation text and re_ping_count
-- Increments `re_ping_count`
-- Sets `re_ping_at = now + min(2h * 2^count, 12h)`
 
 ---
 

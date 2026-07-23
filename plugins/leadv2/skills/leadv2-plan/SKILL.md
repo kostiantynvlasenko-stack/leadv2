@@ -484,6 +484,10 @@ pm_rc=$?
 
 Record `premortem_build_verdict` in `LEAD_V2_STATE.md` step note.
 
+### 7.5. Founder-alignment check (before Gate 1)
+
+If `class==Heavy` AND `LEADV2_DAEMON!=1`: invoke the `grilling` skill to align requirements with the founder before Gate 1.
+
 ### 8. State update
 
 ```

@@ -57,15 +57,9 @@ Result auto-saved to `docs/handoff/<task-id>/trajectory.yaml`.
 ### 1. Determine reviewers
 
 Codex availability check: `bash ~/.claude/scripts/codex-task.sh status` (exit 0 = OK, requires active
-ChatGPT login). **Do NOT route this through `.claude/scripts/lv2`** — `codex-task.sh` is a global
-personal tool (`~/.claude/scripts/codex-task.sh`), not a leadv2-plugin script; the `lv2` dispatcher
-only resolves plugin scripts (`<plugin>/scripts/`) and repo overrides
-(`.claude/leadv2-overrides/scripts/`), so `bash .claude/scripts/lv2 codex-task.sh status` always
-fails with "cannot resolve script" (exit 127) regardless of real Codex availability — this
-previously forced every review straight to Case C (critic fallback) even when Codex was healthy
-(FIX-FANOUT-MODEL-ROUTING-01, 2026-07-15). `leadv2_codex_ready()` in `leadv2-helpers.sh` and the
-`leadv2-review.js` Workflow already call the correct absolute path — this was the one stale
-call site.
+ChatGPT login). **Do NOT route this through `.claude/scripts/lv2`** — it always fails with
+"cannot resolve script" (exit 127) regardless of real Codex availability. Full history/rationale
+(FIX-FANOUT-MODEL-ROUTING-01): **`REFERENCE.md`**.
 
 **Always fire (primary, one of):** Codex adversarial-review (background) if OK; else `Agent(critic, sonnet, run_in_background=true)` as fallback primary — equally valid.
 
@@ -92,9 +86,6 @@ Full commands: **`ref/reviewer-setup-steps.md`**.
 
 Reviewers spawn via **Agent tool** (shared session) — their `.claude/agents/<role>.md` frontmatter activates skills (code-review-patterns, devils-advocate, codex-review, leadv2-subagent-protocol). claude-subsession loses these in headless mode. Hack-detection always runs in parallel with Codex/critic (see `leadv2-hack-detection` skill).
 
-**Workflow fan-out toggle:** `LEADV2_WORKFLOW_ENABLED=1` enables the dynamic-Workflow path (requires Max/Team plan `Workflow` tool). Default (unset) uses the manual Cases A/B/C below.
-> **Self-enable (orchestrator-judged):** you MAY set `LEADV2_WORKFLOW_ENABLED=1` for the session yourself — without a founder prompt — when Review meets the fan-out test (multi-dimension review / adversarial verify). See `docs/goal-workflow-autonomy.md`.
-
 **Codex invocation discipline (hard rule):** `codex-task.sh adversarial-review` MUST be passed
 `--wait` and run as a `run_in_background=true` Bash tool call. `--wait` makes codex-companion run
 synchronously; the Bash tool's background flag is the only async layer. Never use a bare
@@ -109,27 +100,8 @@ and pass the result as `args.models`. Skipping this step freezes arm posteriors 
 never learns from this task. Flag-off → skip entirely (byte-identical to pre-BANDIT-WIRE-01).
 Full command + Workflow args wiring: **`ref/route-bandit-step0.md`**.
 
-**If `LEADV2_WORKFLOW_ENABLED=1` and the `Workflow` tool is available — PREFERRED path**
-(ships at `~/.claude/workflows/leadv2-review.js`, all repos):
-```
-Workflow({ name: "leadv2-review", args: { taskId: "<id>", base: "main",
-           safetyTouched: <bool>, codexEnabled: <bool>, missionPath: "docs/handoff/<id>/review-mission.md" } })
-```
-Returns ONE synthesized verdict `{verdict, blocking_count, blocking[], followups[]}` — lead context
-stays clean. `blocking_count==0` → ACCEPT → Phase 6. `blocking_count>=1` → developer fix → re-run
-(max 2 rounds) → judge. The workflow is **model-pinned** (critic sonnet / opus-on-safety, hack+codex
-haiku, verify sonnet) — never Opus-by-inheritance. `m3-market`: set `codexEnabled:false` if managed
-settings disable Codex/workflows; fall back to manual Cases A/B/C.
-
-The reference JS shape for that workflow is at **`ref/workflow-review-reference.md`** — illustrative
-only (the saved `.js` is canonical); do NOT hand-inline a fresh script from it. The Workflow returns
-structured JSON findings directly — no Monitor polling, no manual deliverable-file reads. Write the
-JSON results to `docs/handoff/<id>/reviews/round1-findings.json` and proceed to §3 using the
-structured output. Codex review stays orthogonal: fire it as an optional background Bash call
-outside the Workflow if available.
-
-**Note:** `Workflow` requires Max or Team plan. If the tool is not available in the current session,
-fall through to the manual path below.
+**Opt-in Workflow-based path** (preferred when `LEADV2_WORKFLOW_ENABLED=1` and the `Workflow`
+tool is available): full invocation, args, and fallback rules → **`WORKFLOW-PATH.md`**.
 
 **Manual path (Cases A/B/C, default when `LEADV2_WORKFLOW_ENABLED` unset or ≠ 1)** — exact spawn
 commands + critic mission file: **`ref/manual-dispatch-cases.md`**.
@@ -270,10 +242,5 @@ fi
 
 ## Anti-patterns
 
-- Running Codex Round 2 after 0 Critical — burns tokens for nothing (CX-01).
-- Spawning critic(opus) on every task regardless of safety touch — Opus is for risk-heavy only.
-- Merging "just style nits" after Round 1 clean — don't over-engineer; skip to deploy.
-- Calling architect(opus) for alt approach on Round 1 failures — that's Round 2's job first.
-- Passing full file paths to reviewers without the diff — diff-first saves >50% reviewer tokens.
-- Skipping hack-detection — it runs in parallel and is always cheap.
-- Skipping the low-risk pre-check — Light+low-risk tasks should never hit review overhead.
+Common mistakes to avoid (CX-01 token burn, over-escalating to opus, skipping gates, etc.):
+see **`EXAMPLES.md`**.

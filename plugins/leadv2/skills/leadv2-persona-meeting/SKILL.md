@@ -38,64 +38,14 @@ allowed-tools:
 
 ### 2. Compose mission file
 
-Write `/tmp/meeting-<persona>-<date>.md`:
+Write `/tmp/meeting-<persona>-<date>.md` with four deliverables:
 
-```
-Persona meeting: <persona>
-Purpose: refresh STATE.md, append DIALOGUE.md, [update docs/tasks.yaml for PO via lib]
+1. **docs/agents/<persona>/STATE.md** — fully rewritten, ≤100 lines
+2. **docs/agents/<persona>/DIALOGUE.md** — APPEND a new entry
+3. **docs/agents/<persona>/LAST_MEETING.md** — overwrite with timestamp + metadata
+4. **(PO only)** Add/update tasks in docs/tasks.yaml via leadv2-tasks-lib.sh (≤15 new tasks per meeting)
 
-Current STATE:
-<paste docs/agents/<persona>/STATE.md>
-
-Last 5 DIALOGUE entries:
-<paste>
-
-Context inputs:
-<paste BOARD HEAD, RECOVERY open, relevant metrics>
-
-Your deliverable — write ALL of these:
-
-1. docs/agents/<persona>/STATE.md — fully rewritten. Keep it ≤100 lines. Sections:
-   - Current view: 1-2 paragraphs, what's true right now
-   - Priorities: top 3-5 items with rationale
-   - Off-limits / decisions made: locked choices (numbered Dn)
-   - Open questions for next meeting
-   - Last updated: <ISO timestamp>
-
-2. docs/agents/<persona>/DIALOGUE.md — APPEND a new entry:
-   ## <ISO timestamp> — Meeting
-   - Triggered by: <staleness | user force | recovery | ...>
-   - Decided: <3-5 bullet points>
-   - Changed in STATE: <what shifted vs last meeting>
-   - Follow-ups for lead: <if any>
-
-3. docs/agents/<persona>/LAST_MEETING.md — overwrite with just:
-   timestamp: <ISO>
-   sessions_since: 0
-   triggered_by: <reason>
-
-4. (PO only) Add/update tasks in docs/tasks.yaml via lib — do NOT rewrite QUEUE.md (it is frozen with a redirect banner).
-   For each new PO task identified during the meeting:
-   ```bash
-   source "$(bash .claude/scripts/lv2 --path leadv2-tasks-lib.sh)"
-   leadv2_tasks_add "<task-id>" action <priority> \
-     --title "<one-sentence mission>" \
-     --origin po
-   ```
-   For tasks that should be blocked-on-human:
-   ```bash
-   leadv2_tasks_add "<task-id>" human-needed high \
-     --title "<what's blocking>" \
-     --origin po
-   ```
-   Keep total new tasks ≤15 per meeting. Anything deferred → note in DIALOGUE.md only.
-
-Constraints:
-- No UUIDs, no internal jargon in dialogue (founder-readable).
-- Every "decision" must have rationale.
-- If you (persona) disagree with prior DIALOGUE entry — note the shift explicitly.
-DELIVERABLE_COMPLETE
-```
+For the full mission file template with inline instructions and all constraints, see [MISSION_TEMPLATE.md](./MISSION_TEMPLATE.md).
 
 ### 3. Spawn claude-subsession
 

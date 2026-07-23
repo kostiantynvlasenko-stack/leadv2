@@ -50,50 +50,21 @@ Implementation note: in Claude Code context, the session transcript is not direc
 
 ---
 
-## §3. Classification prompt (haiku)
+## §3. Classify via LLM (haiku)
 
 Send the messages array to `claude-haiku-4-5` (or `LEADV2_DETECT_MODEL` env override).
 
-### System prompt
-
-```
-You are a message classifier for an AI orchestration system. Classify each user message into one of four categories based on what the user is communicating to the AI assistant.
-
-Categories:
-- correction: User is correcting a mistake the AI made (factual error, wrong behavior, wrong output). Signals: "не так", "не делай X", "это неправильно", "stop doing X", "wrong", "incorrect", "you should not", "не нужно", "перестань".
-- reinforcement: User is confirming the AI is on the right track. Signals: "да, именно", "продолжай", "отлично", "exactly", "yes", "good", "keep going", "правильно", "верно".
-- preference: User is expressing a style/format/workflow preference, not correcting an error. Signals: "мне нравится когда", "prefer", "лучше если", "I like", "always do X instead of Y".
-- context: User is providing context, background, or information — not feedback on AI behavior.
-
-Rules:
-1. Handle bilingual Russian/English mixed messages naturally.
-2. If a message could be correction OR reinforcement depending on interpretation, assign the one with higher evidence, but set confidence lower (≤ 0.7).
-3. Low confidence on ambiguous messages — do not force a category.
-4. Short acknowledgments ("ok", "хорошо", "понял") are context, confidence ≤ 0.5.
-5. "не так" alone = correction with confidence 0.85; "не так, как ты думаешь" = context, confidence 0.5.
-
-Output: a JSON array, one object per message, in input order.
-Schema per object:
+Output: a JSON array, one object per message, in input order. Schema per object:
+```json
 {
   "category": "correction|reinforcement|preference|context",
-  "confidence": 0.00,       // 0.00-1.00, two decimal places
-  "source_error": "regex",  // optional: pattern that identifies the error being corrected; null if not applicable
-  "fact": "text"            // ≤40 words: the actionable fact or rule being communicated
+  "confidence": 0.00,
+  "source_error": "regex",
+  "fact": "text"
 }
 ```
 
-### User prompt
-
-```
-Classify these {N} user messages (oldest first):
-
-{message_1}
----
-{message_2}
----
-...
-{message_N}
-```
+For the full classification system prompt (all four categories, disambiguation rules, worked examples) and the user-prompt template, see [PROMPT.md](./PROMPT.md).
 
 ---
 
@@ -121,13 +92,7 @@ Write ALL candidates (confidence ≥ 0.8) to candidates file. Never write immune
 CANDIDATES_FILE="${LEADV2_CANDIDATES_FILE:-$(git rev-parse --show-toplevel)/docs/leadv2/correction-detect-candidates.jsonl}"
 ```
 
-Each line is a JSON object (JSONL format):
-
-```json
-{"task_id": "<task_id>", "ts": "<ISO8601>", "mode": "shadow", "category": "correction", "confidence": 0.91, "source_error": null, "fact": "Never use TaskOutput on background codex/glm jobs.", "message_text": "<original message text>"}
-```
-
-Append (do not overwrite). File is rotated when it exceeds 500 lines (keep last 500).
+Append (do not overwrite). File is rotated when it exceeds 500 lines (keep last 500). Line format (JSONL): see [SCHEMAS.md](./SCHEMAS.md#candidates-jsonl-line).
 
 ### Live mode (`LEADV2_CORRECTION_DETECT=1`)
 
@@ -149,21 +114,7 @@ Auto-promote only when ALL of:
 - `category == "correction"`
 - `confidence >= 0.95`
 
-Entry schema (matches `scripts/leadv2-immune-aggregate.py`):
-
-```yaml
-- id: <sha1[:12] of normalised fact text>
-  task_origin: <task_id>
-  keywords: [correction, ...]   # auto-tagged from fact text
-  summary: <first sentence of fact, ≤100 chars>
-  action: <second sentence or "Check: <summary>", ≤200 chars>
-  created: <YYYY-MM-DD>
-  seen_count: 1
-  source: correction            # marks auto-promoted corrections
-  confidence: 0.95              # classifier confidence
-```
-
-Idempotency: stable `id` (sha1 of normalised fact) — if already present, increment `seen_count` only. No duplicates.
+Entry schema (matches `scripts/leadv2-immune-aggregate.py`) and idempotency rule (stable `id` = sha1 of normalised fact — duplicate → increment `seen_count` only): see [SCHEMAS.md](./SCHEMAS.md#immune-store-entry).
 
 Override store path: `LEADV2_IMMUNE_STORE` env var.
 Override candidates path: `LEADV2_CANDIDATES_FILE` env var.
@@ -172,17 +123,7 @@ Override candidates path: `LEADV2_CANDIDATES_FILE` env var.
 
 ## §7. Return value
 
-Output a JSON summary to stdout (consumed by lead-reflect §6.5 caller):
-
-```json
-{
-  "messages_read": 6,
-  "candidates_found": 2,
-  "written_shadow": 2,
-  "auto_promoted": 0,
-  "skipped_low_confidence": 4
-}
-```
+Output a JSON summary to stdout (consumed by lead-reflect §6.5 caller). Fields: `messages_read`, `candidates_found`, `written_shadow`, `auto_promoted`, `skipped_low_confidence`. Full example: see [SCHEMAS.md](./SCHEMAS.md#return-value).
 
 Exit 0 always — detection errors must not block Phase 8 Close.
 
@@ -190,20 +131,13 @@ Exit 0 always — detection errors must not block Phase 8 Close.
 
 ## §8. Error handling
 
-- LLM call fails (timeout, rate limit): log WARN, return `{"messages_read": N, "candidates_found": 0, "error": "llm_call_failed"}`, exit 0.
-- CANDIDATES_FILE directory missing: `mkdir -p` before write.
-- JSON parse error from LLM: log raw response to stderr, return empty candidates, exit 0.
-- MEMORY.md missing: skip auto-promote, log WARN in return JSON.
+Every failure mode (LLM call fails, CANDIDATES_FILE dir missing, JSON parse error, MEMORY.md missing) degrades to a WARN + exit 0 — never blocks Phase 8 Close. Full per-case table: see [REFERENCE.md](./REFERENCE.md#error-handling).
 
 ---
 
 ## §9. Environment variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `LEADV2_CORRECTION_DETECT` | `0` | `0`=off, `shadow`=candidates-only, `1`=live |
-| `LEADV2_CORRECTION_WINDOW` | `6` | Number of last user messages to classify |
-| `LEADV2_DETECT_MODEL` | `claude-haiku-4-5` | LLM model for classification |
+`LEADV2_CORRECTION_DETECT` (default `0`) is the main gate. Full table of all five vars (defaults + descriptions): see [REFERENCE.md](./REFERENCE.md#environment-variables).
 
 ---
 

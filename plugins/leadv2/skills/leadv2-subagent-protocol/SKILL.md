@@ -30,7 +30,7 @@ Rules for operating as a subagent inside a /leadv2 run. These apply whether you'
 
 ## 1. Handoff discipline — contract, graph context, question proxy
 
-Three things to internalize before your first tool call: the task's immutable handoff contract (1a), the graph context lead already injected for you (1b), and the escape hatch when you need more (1c — `ask-lead.sh`). Read all three once; don't re-derive them mid-task.
+Three things to internalize before your first tool call: the task's immutable handoff contract (1a), the graph context lead already injected for you (1b), and the escape hatch when you need more (1c — `ask-lead.sh`). Read all three once; don't re-derive them mid-task. If the repo root has a `CONTEXT.md`, read it; use its canonical terms and honor the _Avoid_ list.
 
 ### 1a. Handoff file contract — IMMUTABLE per task
 
@@ -77,67 +77,9 @@ Use `graph:` queries freely — they cost Claude tokens on lead side only, and t
 
 Use regular (non-graph) questions sparingly — each one interrupts founder. Batch where possible.
 
-## 2.5. Nested spawns (v2.1.172+) — 5-LEVEL HARD CAP
+## 2.5-2.6. Nested spawns & escalation tokens
 
-**5-LEVEL NESTING HARD CAP (2.1.172):** Claude Code enforces a maximum of 5 nesting levels across the entire spawn chain. The current leadv2 architecture (lead → workflow → developer → subagent) consumes 3 levels. Subagents in that chain may spawn one more level (level 4), but NEVER level 5 — that is the platform ceiling. Any spawn that would exceed level 5 is silently dropped by the runtime with no error. Design nested workflows to stay within levels 1–4.
-
-Claude Code v2.1.172+ allows subagents to spawn sub-subagents (up to 5 levels deep). This capability is **gated** — only cheap discovery probes are permitted.
-
-**Allowed nested spawns:**
-```
-Agent(subagent_type="Explore",          model="claude-haiku-4-5",   ...)  # graph/file discovery
-Agent(subagent_type="general-purpose",  model="claude-sonnet-5",  ...)  # light synthesis
-```
-
-**Rules:**
-- Max **1 nesting level** — your nested spawn must not itself spawn further agents.
-- Max **3 nested spawns per task** across your entire run.
-- `model=` is **mandatory and explicit** — never omit it (inherit-guard DENIES unrouted agents).
-- Allowed models: any `*haiku*` or `*sonnet*` variant. Never `*opus*`.
-- Allowed subagent_type: `Explore` or `general-purpose` only.
-- **Never spawn** `developer`, `critic`, `architect`, `security-auditor`, or any build/review role.
-- `run_in_background=true` recommended for non-blocking probes.
-- If you need deeper graph queries, prefer the **ask-lead.sh graph proxy** (§1c) — it costs lead tokens only and does not count against your nested-spawn budget.
-
-**Hook enforcement:** `leadv2-routing-guard.sh` (PreToolUse:Agent) enforces this allow-list and denies any nested spawn that violates these constraints with an actionable error message.
-
-**Example — allowed:**
-```
-Agent(subagent_type="Explore", model="claude-haiku-4-5",
-      prompt="Find all callers of upsert_snapshot in platform/. Return file paths only.",
-      run_in_background=true)
-```
-
-**Example — denied:**
-```
-Agent(subagent_type="developer", model="claude-sonnet-5", ...)  # build role not allowed nested
-Agent(subagent_type="Explore",   ...)                              # model= omitted → DENIED
-```
-
-## 2.6. Escalation token — when and how
-
-An escalation token allows a single nested spawn of a type/model outside the base allowlist (e.g. `critic+opus` for a deadlock decision). Lead issues the token by writing `docs/handoff/<task-id>/escalation-budget.yaml` at Phase 4 spawn time; it is NOT a right subagents can self-grant.
-
-**Spend the token ONLY when ALL of the following hold:**
-1. You have made **2 failed attempts** at the same blocker (concrete evidence: loop counter, logged attempts).
-2. Mission requirements and observed code/contracts are **directly contradictory** with no resolution path in your authority.
-3. The decision needed is on an **irreversible operation** (schema drop, prod write, security bypass) you are explicitly not authorized to make.
-
-**Never escalate for:**
-- Uncertainty or preference ("I'm not sure which approach is better").
-- Discovery tasks — use ask-lead.sh graph proxy (§1c) instead.
-- Any situation reachable by returning a blocker to lead via your deliverable.
-
-**How to escalate:**
-```
-Agent(subagent_type="<type in budget allowed_types>",
-      model="<model in budget allowed_models>",
-      prompt="...",
-      run_in_background=true)
-```
-The hook checks `escalation-budget.yaml`, increments `used` atomically, and allows the spawn. If `used >= max_escalations` the hook denies and you MUST return the blocker to lead instead — never retry.
-
-**Never recursive:** an escalated agent receives no budget and cannot itself escalate.
+For nested sub-spawn rules (5-level hard cap, allowed models/subagent_types, the escalation-token procedure for a supervised out-of-allowlist spawn, and the background-spawn watchdog requirement) — see [NESTED-SPAWNS.md](./NESTED-SPAWNS.md). Read it before your first `Agent(...)` call from within this subagent; most subagent runs never need it.
 
 ## 4. Chat output discipline — SILENT by default
 
@@ -199,17 +141,7 @@ If the entity does not exist → STOP. Report `decision conflict` to lead or wri
 
 ## 6.6. Minimalism — write the least code that works
 
-(build/dev roles: developer, frontend-developer, postgres-pro — review roles use this lens adversarially)
-
-Before writing code, walk this ladder in order and STOP at the first rung that solves the task:
-1. **Skip it** — does this need to exist at all? (YAGNI: no speculative config, abstraction, flag, or "future-proofing" no caller asked for.)
-2. **Language stdlib** — does the standard library already do it? (Python `itertools`/`pathlib`/`functools`; Go stdlib; Swift `Foundation`; JS/TS built-ins.)
-3. **Native platform / existing dep / existing primitive** — does the framework, the OS/browser, a dependency already installed, or an existing component cover it? Don't add a new dependency for a few lines.
-4. **One-liner / minimal impl** — the smallest correct version, no extra layers.
-
-**Never simplify these away** (they are NOT over-engineering): input validation at trust boundaries, error handling that prevents data loss, security/authz/RLS, accessibility, idempotency where re-runs are real, and anything the mission/spec explicitly requested.
-
-**`# lean:` markers.** When you deliberately ship a simplified version, mark it inline with the language's comment syntax (`# lean:` Python/bash, `// lean:` TS/Go/Swift): `lean: <what was skipped> — upgrade when <trigger>`. A marker WITHOUT an `upgrade when <trigger>` clause is a smell. Lead may harvest at close: `grep -rn "lean:" <src> | grep -v "upgrade when"`.
+For build/dev roles (developer, frontend-developer, postgres-pro): the "skip it → stdlib → existing dep → minimal impl" ladder, what NEVER to simplify away, and the `# lean:` marker convention — see [MINIMALISM.md](./MINIMALISM.md). Review roles apply the same ladder adversarially when judging a diff.
 
 ## 7. Off-limits as hard stop
 
@@ -235,51 +167,12 @@ If you find yourself about to modify a path listed in `context.yaml.off_limits`:
 - Any persona STATE.md unless you ARE that persona (e.g., PO writes its own STATE.md, but architect doesn't)
 - `.claude/skills/*/SKILL.md` — only `leadv2-skill-synthesize` creates these, not raw subagents
 
-## 10. Lead reading discipline — context-hygiene rules for the orchestrator
+## 10. Lead reading discipline
 
-These rules apply to the **lead** (Sonnet/Opus orchestrator chat), not the subagent. They exist because each turn re-sends the entire lead history; any KB read into chat compounds per turn until compaction kicks in.
-
-**Hard rules for lead when consuming subagent output:**
-
-1. **Default = read `.summary.md` only, with `Read offset=0 limit=30`.** Never read full deliverables in chat unless the summary flagged a conflict, ambiguity, or block.
-2. **`.full.md` reads are bounded.** If you must inspect the full deliverable, use `Read offset=0 limit=30` first (header + DELIVERABLE_COMPLETE check). Read the body only if the header doesn't answer your question.
-3. **Mission/prompt files: write to disk via Write, never inline-paste in chat.** Templates live at `~/.claude/prompts/leadv2-<role>.md`. Spawn scripts read them by path. The body never enters lead transcript.
-4. **SSH / journal / log output: filter at source.** Never `journalctl ...` raw — always pipe through `grep -E '<signal>'` and `tail -50` or `head -50` on the remote side. Use `~/.claude/scripts/ssh-grep.sh <host> <unit> <pattern>` (see helper).
-5. **Bash output that exceeds 100 lines: pre-truncate at the source command.** Never `cmd | head -50` from lead — always `cmd --limit 50` or remote `head/tail/grep` flags.
-6. **No polling.** Never re-check `git status` between edits, never `wc -c` background output files, never `codex-task.sh status`. Wait for `<task-notification>` and read the deliverable.
-7. **Effort routing:** spawn `--effort max` only when classification is Heavy or Strategic. Standard/Light → `--effort high`. Trivial → no subsession (use Agent tool).
-8. **Pre-compute heavy data outside subagents.** If a subagent needs aggregates (action_log fingerprint, follower deltas, action counts), compute in bash via `sb_get` + `jq` and embed the *result* in the mission file. Don't make Opus burn 30k tokens reading 200 raw rows.
-9. **Don't re-paraphrase deliverables to founder.** If founder asks "what did architect say?", quote the `.summary.md` (≤50 words) directly — don't re-narrate.
-
-**Failure modes this prevents:** see `ref/lead-reading-failure-modes.md` for the 3 concrete
-token-burn examples (30k-token full reads, raw journalctl dumps, inline mission writes).
-
-When you violate one of these, save a `feedback` memory the same turn so the next session learns. Don't just apologize — document.
-
-## 3-tier read protocol (jcode-inspired)
-
-Lead reads subagent output at three explicit tiers — never the full file by default. This is mandatory; deliverable-format below MUST support all three.
-
-| Tier | What | When | How |
-|---|---|---|---|
-| **Status snapshot** | Lifecycle event only — task-notification | Always | Auto: spawn returns `task-notification` with output path; lead does NOT Read yet |
-| **Summary read** | Verdict + summary_for_lead + severity counts | Default after notification | `bash .claude/scripts/critic-tail.sh <file>` OR `Read limit=10` |
-| **Full context read** | Whole deliverable | ONLY when summary signals REVISE / no-ship / NEEDS-INFO | `Read offset=X limit=Y` — never unbounded |
-
-**Subagent obligations:**
-- First line: `Verdict: APPROVE | REVISE | NEEDS-INFO | BLOCK`
-- Second line: `summary_for_lead: <≤30 words>`
-- Severity-tagged findings use predictable labels (`critical:`, `c1:`, `severity: critical`, etc.) so `critic-tail.sh` can count them.
-- Last line literally: `DELIVERABLE_COMPLETE`
-
-**Lead obligations:**
-- After task-notification: `bash .claude/scripts/critic-tail.sh <file>` for review-class deliverables, `Read limit=10` for build-class.
-- Full read ONLY when tier-2 signals action required.
-- Never `TaskOutput` a subsession stream file — overflow risk.
-
-## Handoff-file compression (M5)
-
-Subagent produces `<role>.summary.md` (≤50 words for chat) + `<role>.full.md` (full content, ends with `DELIVERABLE_COMPLETE`). Lead may automatically emit `<role>.compressed.md` after detecting `DELIVERABLE_COMPLETE` — **do not generate the compressed file yourself**. The compression runs on the lead side via `leadv2_compress_handoff` and is transparent to the subagent.
+The lead orchestrator (not the subagent) follows a separate set of context-hygiene rules when
+consuming your deliverable — default to `.summary.md`, bounded `.full.md` reads, the 3-tier
+read protocol, and handoff-file compression. Full detail: [LEAD-READING.md](./LEAD-READING.md).
+Not subagent-facing, but useful if you need to predict what the lead will do with your output.
 
 ## Writable scope — $WRITE_ROOT
 
@@ -298,10 +191,6 @@ Subagent produces `<role>.summary.md` (≤50 words for chat) + `<role>.full.md` 
 - **Finish with the marker.** Without `DELIVERABLE_COMPLETE`, you're not done.
 - **Keep chat empty.** Final message = ONE LINE pointer. Lead reads files; multi-KB final summaries cost parent ~5-58KB context per spawn.
 - **Lead obeys §10.** Reading discipline is part of the protocol, not optional.
-
-## Background spawn watchdog — default-on (ANTI-AMNESIA-01)
-
-Every `Agent(run_in_background=true)` call MUST be immediately followed by `Monitor(path=<deliverable-file>)`. The `leadv2-bg-watchdog-gate.sh` PostToolUse:Agent hook enforces this inline: if no Monitor follows the spawn before the next tool call, it injects a blocking `additionalContext` reminder. There is no opt-out. Both `<role>.md` and `<role>.full.md` paths should be covered where the two-file deliverable split applies. Background agents die silently on spend-limit or crash — without a Monitor, the session stalls indefinitely with no recoverable signal.
 
 ## Anti-patterns
 
