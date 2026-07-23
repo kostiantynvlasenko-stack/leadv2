@@ -30,6 +30,17 @@
 # Fail-open: ANY error -> exit 0, empty stdout. A broken hook must never
 # block a compact.
 #
+# COMPACT-DEDUP-02: run-once guard. When PreCompact fires this script more
+# than once for the SAME compact event (observed live: this script is
+# registered both directly in a user settings.json AND via at least one
+# plugin-installed hooks.json copy), every registration independently prints
+# the ~11KB freeze block -> it lands TWICE in the compact summarizer's
+# context. The freeze computation + .compact-freeze.md write below always
+# run unconditionally (that file is the load-bearing artifact the PostCompact
+# reground hook reads); only the final STDOUT emission is gated by a
+# session-keyed, TTL-reclaimed lock near the bottom of this file. See that
+# block for the mechanism.
+#
 # stdlib-only (bash + python3, +PyYAML if present — degrades to a regex
 # line-parser without it), zero network, target <400ms.
 
@@ -272,5 +283,56 @@ if __name__ == "__main__":
 PYEOF
 )" || exit 0
 
-[[ -n "$OUT" ]] && printf -- '%s\n' "$OUT"
+# ── COMPACT-DEDUP-02: run-once guard — gates STDOUT emission only ──────────
+# The freeze block was already computed and written to .compact-freeze.md
+# above, unconditionally, regardless of what happens next. This guard only
+# decides whether THIS invocation is the one whose stdout actually reaches
+# PreCompact (and therefore the compact summarizer). Keyed by session_id
+# (from the captured payload) so two DIFFERENT sessions compacting at the
+# same time never suppress each other; a short TTL reclaims a lock left
+# behind by a crashed prior run so a genuinely fresh compact is never
+# silently swallowed. Any failure in this block fails OPEN (EMIT=1) — a rare
+# double-print is far cheaper than losing the freeze entirely.
+set +e
+EMIT=1
+LOCK_TTL_S=60
+LOCK_ROOT="${TMPDIR:-/tmp}/leadv2-precompact-freeze-locks"
+mkdir -p "$LOCK_ROOT" 2>/dev/null
+SESSION_KEY="$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as f:
+        d = json.load(f)
+    print(str(d.get('session_id') or '').strip())
+except Exception:
+    print('')
+" "$TMPFILE" 2>/dev/null)"
+SESSION_KEY="$(printf '%s' "${SESSION_KEY:-}" | tr -c 'A-Za-z0-9_-' '_')"
+[[ -z "$SESSION_KEY" ]] && SESSION_KEY="nosession"
+LOCK_DIR="$LOCK_ROOT/${SESSION_KEY}.lock"
+
+if mkdir "$LOCK_DIR" 2>/dev/null; then
+  date +%s >"$LOCK_DIR/ts" 2>/dev/null
+  EMIT=1
+else
+  LOCK_TS="$(cat "$LOCK_DIR/ts" 2>/dev/null)"
+  [[ "$LOCK_TS" =~ ^[0-9]+$ ]] || LOCK_TS=0
+  NOW="$(date +%s)"
+  AGE=$(( NOW - LOCK_TS ))
+  if [[ "$AGE" -gt "$LOCK_TTL_S" ]]; then
+    # Stale lock from a crashed / long-finished prior compact — reclaim.
+    rm -rf "$LOCK_DIR" 2>/dev/null
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      date +%s >"$LOCK_DIR/ts" 2>/dev/null
+      EMIT=1
+    else
+      EMIT=1  # reclaim race — fail open
+    fi
+  else
+    EMIT=0  # duplicate registration firing within the same compact — suppress
+  fi
+fi
+set -e
+
+[[ -n "$OUT" && "$EMIT" == "1" ]] && printf -- '%s\n' "$OUT"
 exit 0
