@@ -93,7 +93,7 @@ Append the `skill_hints` value to the developer mission's `Skills:` line, e.g.:
 Skills: codebase-memory, supabase-ops, database-patterns
 ```
 
-**Override rule:** lead may override `agent_hint` by writing `agent_hint_override: <type>` in the per-step mission file. Include a one-line justification comment. Never silently ignore hint — either use it or document the override.
+**Override rule:** lead may override `agent_hint` by writing `agent_hint_override: <type>` in the per-step mission file. Include a one-line justification comment. Always either use the hint or document the override explicitly — it must never be silently ignored.
 
 ### 1d. Prompt-cache discipline for parallel developer spawns
 
@@ -148,46 +148,7 @@ Embed output into the mission file under `## Graph context (pre-loaded — do NO
 
 Haiku is ~15× cheaper than Opus and 3-5× cheaper than Sonnet. Use liberally for trivial steps. Sonnet stays default for anything with real logic.
 
-```
-# Example: parallel_groups: [[1, 2], [3]]
-# Group [1, 2] → parallel; group [3] runs after both complete.
-
-# Trivial step → haiku, no isolation needed (single file, no collisions)
-Agent(
-  subagent_type: general-purpose,
-  model: haiku,
-  prompt="Mission: <plan.steps[2].mission — mechanical, ≤30 LOC>
-  Reads: <...>
-  Writes: <single file>"
-)
-
-# Normal step → sonnet, isolation:worktree if group has ≥2 spawns OR step touches >1 file
-Agent(
-  developer, sonnet,
-  isolation: "worktree",   # ← parallel-safe checkout, see §2b
-  prompt="Codebase graph project: ${LEADV2_CODEBASE_PROJECT}
-
-  ## Graph context (pre-loaded — do NOT re-discover)
-  <embed search_graph + trace_path output from §1e here>
-
-  Mission: <plan.steps[1].mission>
-  Read docs/handoff/<id>/context.yaml FIRST. Respect decisions and off_limits.
-  Reads: <plan.steps[1].reads>
-  **Reads budget: ≤5 files. No exploratory reads beyond the list above.**
-  **Bash budget: ≤3 Bash calls for discovery. Use Graph context above instead of grep.**
-  Writes: <plan.steps[1].writes>
-  Skills: codebase-memory, <domain skills from /lead Skill injection table>
-
-  Deliverable: <plan.steps[1].deliverable>
-  **Output:** write full detail to docs/handoff/<id>/developer.md. Chat reply: ≤50 words + file pointer."
-)
-
-Agent(
-  postgres-pro, sonnet,
-  isolation: "worktree",
-  prompt=... for step 2 ...
-)
-```
+For the exact `Agent(...)` call shapes (trivial-haiku, developer-sonnet with embedded graph context, postgres-pro) — see [EXAMPLES.md](./EXAMPLES.md). Spawn every item in a parallel group in ONE message; the group `[3]` that depends on group `[1, 2]` runs only after both of those complete.
 
 ### 2b. Worktree isolation — when and how
 
@@ -203,61 +164,7 @@ Agent(
 
 **Why:** Parallel agents in shared workdir collide on git index, half-written files cause readback corruption (CR-08 in `lead-patterns.md`). Worktrees give each agent its own checkout + branch; cleanup automatic when agent makes no changes.
 
-**After all isolated agents in a group complete — merge protocol:**
-
-```bash
-# Record the base SHA the lead session started from (do this ONCE before spawning agents,
-# NOT mid-merge). The worktree's branch was forked off this commit, so it's the right diff base
-# for any branch — even if `main` has moved or the lead is working off a feature branch.
-TASK_START_SHA="${TASK_START_SHA:?must be set in Phase 0 intake}"   # e.g. $(git rev-parse HEAD)
-
-# Each agent returns its worktree path + branch in the Agent result.
-MERGED=()
-CONFLICTED=()
-for entry in "${WORKTREE_ENTRIES[@]}"; do
-  branch="${entry%%::*}"
-  worktree_path="${entry#*::}"
-  patch_file="/tmp/leadv2-${TASK_ID}-$(echo "$branch" | tr '/' '_').patch"
-
-  if git merge --no-ff --no-edit "$branch"; then
-    MERGED+=("$entry")
-    continue
-  fi
-
-  # Conflict → fall back to 3-way patch from the recorded base SHA, NOT `main..HEAD`
-  (cd "$worktree_path" && git diff "$TASK_START_SHA"..HEAD) > "$patch_file"
-  if git apply --3way --reject "$patch_file"; then
-    MERGED+=("$entry")
-    _leadv2_log "[build] soft 3-way merge ok for $branch"
-  else
-    # Reject files present — DO NOT touch worktree or branch yet, lead needs them for inspection
-    CONFLICTED+=("$entry::$patch_file")
-    _leadv2_log "[build] manual merge needed for $branch — patch=$patch_file, see *.rej"
-  fi
-done
-
-# Cleanup ONLY for cleanly-merged branches. Conflicted ones stay on disk for recovery.
-for entry in "${MERGED[@]}"; do
-  branch="${entry%%::*}"
-  worktree_path="${entry#*::}"
-  git worktree remove "$worktree_path" --force 2>/dev/null
-  git branch -D "$branch" 2>/dev/null
-done
-
-# Conflicted branches are passed to recovery as a structured list:
-if (( ${#CONFLICTED[@]} > 0 )); then
-  printf '%s\n' "${CONFLICTED[@]}" > "docs/handoff/${TASK_ID}/merge-rejects.md"
-  # Recovery decides whether to keep worktrees, drop them, or hand-merge.
-  # DO NOT auto-cleanup conflicted worktrees here.
-fi
-```
-
-**Conflict policy:**
-- Clean `git merge` → MERGED, cleanup worktree + branch
-- `git apply --3way` succeeds (no `.rej`) → MERGED, cleanup, log soft conflict
-- `.rej` files present → CONFLICTED, **keep worktree + branch on disk**, write `docs/handoff/<task-id>/merge-rejects.md` listing branch::patch_file pairs, escalate to recovery (do NOT re-spawn the same agent, do NOT cleanup until human or recovery decides)
-
-**Token cost:** worktree creation is git-only, no LLM tokens. Agents in worktrees see exactly the same repo state — no extra context cost.
+**After all isolated agents in a group complete**, run the merge protocol — the exact commands, the 3-way-patch fallback, and the conflict policy (clean merge vs soft 3-way vs `.rej`-present escalation) are in [WORKTREE-MERGE.md](./WORKTREE-MERGE.md). Conflicted branches stay on disk for recovery; never auto-cleanup or re-spawn on a conflict.
 
 ### 2c. Handoff-file compression before reading plan inputs
 
@@ -296,38 +203,16 @@ done
 
 Invalid YAML → re-spawn the subagent with explicit "output must be valid YAML" constraint.
 
-For the three typed handoff files, use the stricter semantic validator after generic YAML check passes:
-
-```bash
-source .claude/scripts/lv2 leadv2-helpers.sh
-# Validate context.yaml schema before spawning build agents
-if ! leadv2_validate_handoff "docs/handoff/<task-id>/context.yaml" context 2>/tmp/hv-err.txt; then
-  err=$(</tmp/hv-err.txt)
-  # Call back to the producing agent (Plan phase) ONCE with the error:
-  .claude/scripts/ask-lead.sh "<task-id>" "context.yaml schema invalid: $err — please fix and re-write"
-  # Re-validate; if still failing, escalate to Tier B via ask-lead.sh
-  leadv2_validate_handoff "docs/handoff/<task-id>/context.yaml" context \
-    || { .claude/scripts/ask-lead.sh "<task-id>" "context.yaml still invalid after fix attempt: $err"; exit 1; }
-fi
-```
+For the three typed handoff files, run the stricter semantic validator after
+the generic check passes, including the callback-to-producer and Tier-B
+escalation path if it's still invalid after one fix attempt — see
+[RECOVERY.md](./RECOVERY.md) §3b.
 
 ### 3c. Diff-only build-feedback (failed round re-prompt)
 
-When a build round fails and next round needs re-prompt, **do NOT re-send full context**.
-
-**Protocol:**
-1. Call `bash .claude/scripts/lv2 leadv2-build-feedback.sh --task-id <id> --previous-attempt <n>`
-2. The script emits a compact prompt: `<previous-summary ≤80w>\n<diff-only>\n<failure reason>\n<fix request>`
-3. Inject that output as the ONLY context in the next developer mission (not the full plan)
-4. Target: 70-90% reduction vs full context replay
-
-**Fallback:** if diff generation fails, the script falls back to the tail of the previous full deliverable. Never silently skip — compact tail context is better than no context.
-
-**Save explicit diff file for later rounds:**
-```bash
-git diff "${TASK_START_SHA}..HEAD" > "docs/handoff/${TASK_ID}/build-attempt-${N}.diff"
-```
-This lets attempt N+1 diff precisely against what attempt N actually committed.
+When a build round fails and the next round needs a re-prompt, use the
+compact diff-based re-prompt protocol (script call, target compression ratio,
+fallback behavior) in [RECOVERY.md](./RECOVERY.md) §3c — do not replay full context.
 
 ### 3d. Pre-review lint gate (before Codex)
 
@@ -392,26 +277,12 @@ Reviewer must flag each uncovered function as a finding (severity: medium unless
 
 **When to inject:** always include this block in the Codex / critic mission file when `coverage.yaml` exists and `synthesis_attempted: false`. If `coverage.yaml` is absent (gate skipped — no Python changes), omit the block entirely.
 
-### 3f. Codex micro-verify on sensitive paths (added 2026-06-30, SONNET5-ADAPT-01)
+### 3f. Codex micro-verify on sensitive paths
 
-Two trigger conditions, same underlying call — background, non-blocking, advisory only. Does not gate Phase 5 Review, which still runs its own full Codex pass for Standard+.
-
-1. **Light-class tasks** (skip Phase 2 Plan entirely — see `leadv2-plan/SKILL.md` "When NOT") that touch `supabase/migrations/`, RLS policy files, or `platform/eval/safety*`: fire one background Codex pass here, since Light never reaches Plan where this check normally lives.
-2. **Any class**, per `parallel_group` step whose files touch `supabase/migrations/` or `contracts/`: fire a quick per-step verify right after that group's spawn completes, in parallel with the next group — catches a broken migration/contract one step earlier than waiting for the full Phase 5 batch review.
-
-```bash
-_SENSITIVE=$(git diff --name-only "${TASK_START_SHA}..HEAD" 2>/dev/null \
-  | grep -E '^(supabase/migrations/|.*rls.*\.sql$|platform/eval/safety)' || true)
-
-if [[ -n "$_SENSITIVE" ]] && bash ~/.claude/scripts/codex-task.sh status >/dev/null 2>&1; then
-  bash .claude/scripts/lv2 leadv2-codex-planner.sh \
-    --task-id "${TASK_ID}" --mode quick-verify --effort low --tier standard \
-    --diff-paths "$_SENSITIVE" \
-    --out "docs/handoff/${TASK_ID}/codex-step-${STEP_N:-0}-result.md" &   # background, own path — does not race codex-plan-result.md from Phase 2
-fi
-```
-
-Findings (if any) surface as extra context for Phase 5 Review (read `codex-step-*-result.md` if present); never block Build directly. Skip silently if `codex-task.sh status` fails (no ChatGPT login) or no sensitive paths touched.
+Advisory, background, non-blocking check for migration/RLS/safety-eval file
+changes — fires for Light-class tasks that skip Plan, and per-step for any
+class touching `supabase/migrations/` or `contracts/`. Full trigger
+conditions + the bash call: [REFERENCE.md](./REFERENCE.md) §3f.
 
 ### 4. Mission-drift check (MD-XX from lead-patterns)
 
@@ -460,42 +331,9 @@ source .claude/scripts/lv2 leadv2-helpers.sh && leadv2_active_update_phase revie
 
 ## Phase 4.5 — PO Feedback Loop (auto-trigger for UI features)
 
-**Before proceeding to Phase 5 Review**, check if the diff is UI-heavy. If yes, invoke `leadv2-po-feedback-loop` skill (4-phase Audit → Build → Verify → Iterate orchestration).
+**Before proceeding to Phase 5 Review**, check if the diff is UI-heavy (grep for changed `.tsx` files under `apps/*/page.tsx`, `apps/*/components/`, `packages/features/`, `packages/ui/`). If `ui_diff ≥ 2` AND `CLASS` is Standard/Heavy/Strategic AND not emergency mode → invoke `leadv2-po-feedback-loop` skill (4-phase Audit → Build → Verify → Iterate orchestration). Full detection script, trigger/anti-trigger conditions, and the 4-phase breakdown: [PO-FEEDBACK-LOOP.md](./PO-FEEDBACK-LOOP.md).
 
-Detection:
-```bash
-ui_diff=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -E "\.tsx?$" | grep -E "(apps/.*/page\.tsx|apps/.*/components/.*\.tsx|packages/features/.*\.tsx|packages/ui/.*\.tsx)" | wc -l | tr -d ' ')
-
-if [ "$ui_diff" -ge 2 ] && [ "$CLASS" != "Trivial" ] && [ "$CLASS" != "Light" ] && [ "$EMERGENCY_MODE" != "true" ]; then
-  echo "FE-UI feature shipped → invoking leadv2-po-feedback-loop"
-  # Lead invokes Skill(skill="leadv2-po-feedback-loop") with task-id + preprod URL
-fi
-```
-
-Trigger conditions (ALL must hold):
-- `ui_diff ≥ 2` — at least 2 UI files changed
-- `CLASS in [Standard, Heavy, Strategic]` — not Trivial / Light
-- `EMERGENCY_MODE != true` — skip during hotfixes
-- Vercel preview is reachable (no 503/deployment-pending)
-
-Anti-triggers (skip if any):
-- `context.yaml` has `skip_po_audit: true`
-- Diff touches only `.test.tsx` / `.spec.tsx` / story files
-- Refactor commits (preserve UI identical — no UX delta)
-
-When invoked, `leadv2-po-feedback-loop` orchestrates:
-1. **Audit** — `Agent(07-architect, opus)` + Playwright + benchmarks → `po-audit-<feature>.md`
-2. **Build** — parallel `Agent(09-nextjs-pro, sonnet)` per file-ownership group → fixes
-3. **Verify** — `Agent(09-nextjs-pro, sonnet)` + Playwright → PASS/FAIL table
-4. **Iterate** — fix-round if FAILs, max 2 rounds, then log to `po-followups.md`
-
-Skill returns: `passed`, `partial`, or `escalate`. On `passed` / `partial` → proceed to Phase 5. On `escalate` → invoke `Skill(leadv2-judge) mode=review`.
-
-Founder is informed of audit P0 count + verify PASS/FAIL summary between phases. No narration mid-phase (silence protocol).
-
-Reference implementation: `~/MythicalGames/m3-market/.claude/leadv2-tasks/LOCAL-9-collections-sidebar/` (commits `90d3a7a9`, `078ff5d5`, `bc670694` — 27 UX improvements via this exact loop on 2026-05-23).
-
-Proceed to Phase 5 Review (after PO loop completes, if invoked).
+Skill returns `passed` / `partial` (proceed to Phase 5) or `escalate` (invoke `Skill(leadv2-judge) mode=review`). Proceed to Phase 5 Review either way once the check (and loop, if triggered) completes.
 
 ## Rules
 

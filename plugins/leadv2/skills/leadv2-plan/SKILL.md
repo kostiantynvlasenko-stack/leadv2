@@ -105,19 +105,9 @@ Pack results into `/tmp/mission-<id>.md` under `## Graph context` section.
 Load `docs/leadv2-priors.yaml` → `agent_priors[<agent>]` for each agent you intend to spawn.
 Use `best_on` / `avoid_on` to confirm agent assignment; use `model_recommendation[change_kind]`
 to set the `--model` flag in the mission (priors inform defaults, founder decisions override).
-
-```python
-# Quick read — extract relevant slice only
-import yaml
-from pathlib import Path
-priors = yaml.safe_load(Path("docs/leadv2-priors.yaml").read_text()) if Path("docs/leadv2-priors.yaml").is_file() else {}
-for agent in planned_agents:
-    ap = priors.get("agent_priors", {}).get(agent, {})
-    model = ap.get("model_recommendation", {}).get(change_kind) or ap.get("model_recommendation", {}).get("default", "sonnet")
-    # log: f"{agent}: model={model} best_on={ap.get('best_on',[])} avoid_on={ap.get('avoid_on',[])}"
-```
-
-Skip silently if `priors.yaml` is missing — fall back to class-based model selection.
+When `priors.yaml` is present, extract just the relevant agent slice; when it's absent, fall back
+to class-based model selection (silent, no error). Full read snippet: see
+[REFERENCE.md](./REFERENCE.md) § Agent Priors Read Snippet.
 
 ### 1a-3. Persona-config audit (multi-persona only)
 
@@ -126,24 +116,8 @@ Fire when ANY of:
 - planned `touched_paths` include `agent/**` or `personas/_shared/**`
 - task brief mentions ≥2 persona ids (`nik`, `respiro`, `marco`, `cascina`)
 
-Run inline before writing mission file:
-
-```bash
-PERSONAS=$(ls -1 personas/ 2>/dev/null | grep -v '^_')
-# 1. Hardcoded persona-id references
-> /tmp/persona-hardcodes.$$.txt
-for p in $PERSONAS; do
-  grep -rnE "\b${p}\b" agent/ personas/_shared/ \
-    --include='*.sh' --include='*.py' --include='*.md' 2>/dev/null \
-    | grep -v "${p}/" \
-    | grep -vE '^[^:]+:(\s*#|\s*//|\s*\*)' \
-    | head -5 >> /tmp/persona-hardcodes.$$.txt
-done
-# 2. Magic-number safety thresholds
-grep -rnE '(voice_floor|pillar_min|sim_cap|image_ratio|safety_threshold)\s*=\s*0?\.[0-9]+' \
-  agent/ personas/_shared/ --include='*.sh' --include='*.py' 2>/dev/null \
-  | head -20 >> /tmp/persona-hardcodes.$$.txt
-```
+Run the hardcode + magic-number-threshold detection scan (full bash script): see
+[REFERENCE.md](./REFERENCE.md) § Persona Config Audit Scan.
 
 If hits → write `docs/handoff/${LEADV2_TASK_ID}/persona-config-candidates.yaml` (list `file/line/pattern/proposed_key`) and inject one decision into context.yaml.decisions:
 
@@ -154,7 +128,7 @@ If hits → write `docs/handoff/${LEADV2_TASK_ID}/persona-config-candidates.yaml
   rule: 'If diff touches a flagged line, propose per-persona override path. critic blocks if hardcode survives.'
 ```
 
-No hits → silent, no file. Never blocks Plan progression. Pattern reference: `skills/leadv2-persona-config-audit/SKILL.md`.
+When there are no hits, proceed silently — no file written, and this never blocks Plan progression. Pattern reference: `skills/leadv2-persona-config-audit/SKILL.md`.
 
 ### 1c. Divergence intake (if Phase 1.5 ran)
 
@@ -174,7 +148,7 @@ divergence output:
 - The architect reads the full `divergence.md` (path in the block) on demand;
   the mission carries only the compact block.
 
-If no `divergence:` block exists, proceed normally — divergence is optional.
+Proceed normally whether or not a `divergence:` block exists — divergence is optional.
 
 ### 1b. Write mission file
 
@@ -223,24 +197,8 @@ Deliverable format: see subagent role file.
 
 **Rule of thumb:** if the architect needs a *number*, *count*, *delta*, or *fingerprint* — compute it in lead (cheap) and pass it as a literal. If it needs *examples* or *structural reasoning* — pass IDs and let it pull a single row when needed.
 
-**Recipe — action_log fingerprint per persona:**
-
-```bash
-# Lead-side, before spawning architect.
-for persona in nik respiro; do
-  count=$(.claude/scripts/sb_get.py action_log \
-    --filter "persona_id=eq.${persona}" \
-    --filter "created_at=gte.now()-interval'7 days'" \
-    --select "action_type" \
-    --limit 500 | jq 'length')
-  by_type=$(.claude/scripts/sb_get.py action_log \
-    --filter "persona_id=eq.${persona}" \
-    --filter "created_at=gte.now()-interval'7 days'" \
-    --select "action_type" \
-    --limit 500 | jq -r 'group_by(.action_type) | map({(.[0].action_type): length}) | add')
-  echo "  ${persona}: total=${count} by_type=${by_type}"
-done > /tmp/action-log-fp-<id>.txt
-```
+Worked recipe (action_log fingerprint per persona, full bash script): see
+[EXAMPLES.md](./EXAMPLES.md) § Precomputed Aggregate Recipe.
 
 Then in the mission file, embed the *output* under `## Pre-computed aggregates`, NOT the raw rows. Architect sees one block of text, not 200 JSON rows.
 
@@ -281,69 +239,16 @@ On any QUESTION_PENDING notification → run `leadv2-question-proxy` skill.
 
 **Stage 1 — ONE message, parallel spawns:**
 
-> **If `LEADV2_WORKFLOW_ENABLED=1` (and `Workflow` tool is available):**
->
-> Issue ONE `Workflow` call instead of manual parallel `Agent` spawns + `Monitor`. Script shape:
->
-> ```js
-> // Workflow script — planning fan-out
-> const results = await parallel([
->   agent("architect", {
->     model: "claude-sonnet-5",   // CODEX-56-ROUTING: always sonnet, never opus — cross-check on Codex's plan
->     prompt: `<architect mission — cross-check Codex's plan, full mission context + graph context from /tmp/mission-<id>.md>`,
->     outputSchema: {
->       type: "object",
->       properties: {
->         recommendation: { type: "string" },
->         decisions: { type: "array", items: { type: "object" } },
->         off_limits: { type: "array", items: { type: "string" } },
->         deliverable_path: { type: "string" }
->       },
->       required: ["recommendation", "decisions", "off_limits"]
->     }
->   }),
->   agent("critic", {
->     model: "claude-sonnet-5",
->     prompt: `<initial framing review — review mission scope, highlight structural risks, do NOT review a plan (none exists yet)>`,
->     outputSchema: {
->       type: "object",
->       properties: {
->         concerns: { type: "array", items: { type: "string" } },
->         severity_max: { type: "string", enum: ["critical", "high", "medium", "low", "none"] }
->       },
->       required: ["concerns", "severity_max"]
->     }
->   })
-> ]);
->
-> // Synthesis stage (pipeline after parallel)
-> const synthesis = await pipeline(results, {
->   agent: "lead",
->   prompt: `Synthesize architect + critic outputs into context.yaml decisions/off_limits/plan.steps`,
-> });
->
-> // Adversarial-verify stage — class >= Standard only
-> // For Heavy/Strategic: 2-of-3 refute kills a finding (majority vote)
-> if (taskClass >= "Standard") {
->   const verified = await pipeline(synthesis, {
->     agent: "critic",
->     prompt: `Adversarial verify: for each proposed decision, refute or confirm.
->              A decision is killed if ≥2 of 3 review dimensions (correctness, risk, feasibility) refute it.`,
->     outputSchema: {
->       type: "object",
->       properties: {
->         verified_decisions: { type: "array" },
->         killed_decisions: { type: "array" },
->         kill_reasons: { type: "object" }
->       }
->     }
->   });
-> }
-> ```
->
-> The Workflow returns structured JSON results directly — no Monitor polling, no manual deliverable-file reads. Codex (`leadv2-codex-planner.sh`) stays orthogonal: fire it as an optional background Bash call outside the Workflow if available.
->
-> **Note:** `Workflow` requires Max or Team plan. If the tool is not available in the current session, fall through to the manual path below.
+> **If `LEADV2_WORKFLOW_ENABLED=1` (and `Workflow` tool is available):** issue ONE `Workflow` call
+> — parallel architect(sonnet, cross-check) + critic(initial framing review), piped into a lead
+> synthesis stage, then (class ≥ Standard) an adversarial-verify stage where critic refutes/confirms
+> each decision (2-of-3 dimensions kill a finding) — instead of manual parallel `Agent` spawns +
+> `Monitor`. Full script (agent configs, outputSchemas, all four pipeline stages): see
+> [EXAMPLES.md](./EXAMPLES.md) § Workflow Enabled Fan Out. The Workflow returns structured JSON
+> results directly — no Monitor polling, no manual deliverable-file reads. Codex
+> (`leadv2-codex-planner.sh`) stays orthogonal: fire it as an optional background Bash call outside
+> the Workflow if available. Requires Max or Team plan — when the tool is not available in the
+> current session, fall through to the manual path below (the default).
 
 ```
 # Manual path (default — LEADV2_WORKFLOW_ENABLED unset or ≠ 1):
@@ -475,37 +380,16 @@ Run `leadv2-negative-memory` skill before writing `plan.steps`:
    - Or, if an obvious alternative exists, swap the approach and log `negative-memory-redesign: <NM-id>` in `decisions`.
 6. For any step with `disposition: unblocked` → proceed, log `negative-memory-unblock(<NM-id>)` in context.yaml under `reviews.negative_memory`.
 
-If `docs/leadv2-negative-memory.yaml` missing → skip with empty matches, no error.
+When `docs/leadv2-negative-memory.yaml` exists, run the filter as above; when it's absent, proceed with empty matches (no error).
 
 ### 2.5 F4 tool hints — read override before writing context.yaml
 
-Before writing `context.yaml`, check for per-repo toolset overrides:
-
-```python
-import yaml
-from pathlib import Path
-
-# Load override file if present (project worktree-relative path)
-override_path = Path(".claude/leadv2-overrides/toolsets.yaml")
-overrides = yaml.safe_load(override_path.read_text()) if override_path.is_file() else {}
-phase_overrides = overrides.get("phase_overrides") or {}
-
-# Phase defaults (F4 advisory hints)
-DEFAULT_TOOLS = {
-    "intake":   ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "codebase-memory-mcp-*"],
-    "classify": ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "codebase-memory-mcp-*"],
-    "plan":     ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "codebase-memory-mcp-*"],
-    "build":    ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "codebase-memory-mcp-*",
-                 "Edit", "Write", "Bash"],
-    "review":   ["Read", "Grep", "Bash", "codebase-memory-mcp-*"],
-    "deploy":   ["Bash", "Read"],
-    "close":    ["Read", "Write"],
-}
-
-allowed_tools = {phase: phase_overrides.get(phase, defaults)
-                 for phase, defaults in DEFAULT_TOOLS.items()}
-# Emit as context.yaml field: allowed_tools: {intake: [...], build: [...], ...}
-```
+Before writing `context.yaml`, check `.claude/leadv2-overrides/toolsets.yaml` for per-repo
+toolset overrides; where a phase has no override, fall back to that phase's default tool list
+(intake/classify/plan are read-only incl. codebase-memory-mcp; build and review additionally
+get Edit/Write/Bash or Bash; deploy is Bash+Read; close is Read+Write). Emit the merged result as
+`context.yaml.allowed_tools`. Full python read snippet + the complete phase-default table: see
+[REFERENCE.md](./REFERENCE.md) § F4 Tool Hints.
 
 These hints are advisory only — subagents see them in context.yaml and use them as
 preferences, not hard constraints. See subagent-preamble.md §1.1.
@@ -526,85 +410,18 @@ leadv2_validate_handoff docs/handoff/<task-id>/context.yaml context || {
 }
 ```
 
-Schema from /lead Inter-agent coordination section:
+Top-level keys required in the synthesized file: `task` (id/class/mission/started_at),
+`decisions` (union of all three sources, each with `id`/`topic`/`choice`/`rejected`/`source`,
+plus a mandatory `capability-search` entry per step 2b — reuse-vs-build check before custom
+code), `off_limits` (union of all three sources), `research` (one pointer per source —
+architect/critic/codex — each with a `summary` + `file` anchor into their deliverable),
+`plan.steps` + `plan.parallel_groups`, `reviews` (empty, filled in Phase 5), `allowed_tools`
+(from step 2.5), and `verification` (`live_signal`, `probe`, `timeout`, plus an optional
+additive `criteria[]` of programmatic/judge/human checks — schema at
+`contracts/context.verification.schema.json`).
 
-```yaml
-task:
-  id: <id>
-  class: <class>
-  mission: <text>
-  started_at: <ISO>
-
-decisions:        # combine locked-in picks from all three
-  - id: D1
-    topic: ...
-    choice: ...
-    rejected: [...]
-    source: architect(sonnet)
-  - id: D2
-    ...
-    source: codex
-  - decision: capability-search   # mandatory per plan (see step 2b) — reuse-vs-build check,
-    considered: [libX, cliY, mcpZ]  # before committing to custom code
-    chosen: "reuse <x>" | "custom (no fit)"
-    why: "<one line>"
-
-off_limits:       # union of all off-limits from three sources
-  - ...
-
-research:         # pointers to each deliverable
-  - source: architect(sonnet)
-    summary: "<one sentence from their output>"
-    file: docs/handoff/<id>/architect.md#<anchor>
-  - source: critic(opus)
-    summary: ...
-  - source: codex
-    summary: ...
-
-plan:
-  steps:
-    - n: 1
-      agent: developer(sonnet)
-      mission: ...
-      reads: [context.yaml, architect.md#<anchor>]
-      writes: [diff.md#step_1]
-      deliverable: "diff + 200-word summary"
-  parallel_groups:
-    - [step_1, step_2]
-
-reviews: {}       # filled during Phase 5
-
-# F4 advisory tool hints — read from .claude/leadv2-overrides/toolsets.yaml if present;
-# fall back to phase defaults. Subagents treat this as preference, not enforcement.
-allowed_tools:
-  intake:   [Read, Glob, Grep, WebFetch, WebSearch, "codebase-memory-mcp-*"]
-  classify: [Read, Glob, Grep, WebFetch, WebSearch, "codebase-memory-mcp-*"]
-  plan:     [Read, Glob, Grep, WebFetch, WebSearch, "codebase-memory-mcp-*"]
-  build:    [Read, Glob, Grep, WebFetch, WebSearch, "codebase-memory-mcp-*", Edit, Write, Bash]
-  review:   [Read, Grep, Bash, "codebase-memory-mcp-*"]
-  deploy:   [Bash, Read]
-  close:    [Read, Write]
-
-verification:
-  live_signal: "<from architect recommendation or codex rollback plan>"
-  probe: {type: signal-file|log-grep|http-check|supabase-check, args: ...}
-  timeout: 1800
-  # criteria[] is OPTIONAL and ADDITIVE — omit when no concrete checkable criteria exist.
-  # When present, ALL items must pass before Phase 7 verify succeeds.
-  # See contracts/context.verification.schema.json for full field definitions.
-  criteria:
-    - id: "<short-slug>"
-      type: programmatic        # or: judge | human
-      expect: exit_zero         # or: exit_nonzero | stdout_contains
-      check: ["<cmd>", "<arg>"]  # argv; required when type==programmatic
-      # contains: "<substr>"   # required when expect==stdout_contains
-    - id: "<rubric-slug>"
-      type: judge
-      rubric: "<natural-language pass/fail criterion for LLM or founder>"
-    - id: "<human-gate-slug>"
-      type: human
-      prompt: "<instruction shown to founder at the manual gate>"
-```
+Full field-by-field YAML template with inline comments for every key above: see
+[SCHEMAS.md](./SCHEMAS.md) § context.yaml Schema.
 
 ### Plan schema (mandatory for every step)
 

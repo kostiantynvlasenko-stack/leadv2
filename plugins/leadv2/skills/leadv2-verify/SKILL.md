@@ -34,7 +34,7 @@ If `verification.probe` missing → circuit break: "verification spec missing, a
 ### 1b. Evaluate typed criteria (pre-probe gate — optional)
 
 If `verification.criteria[]` is present in context.yaml, evaluate each item IN ORDER before running the probe.
-When `criteria[]` is absent, skip this step entirely — behavior is byte-identical to the existing path.
+When `criteria[]` is present, evaluate it first; when absent, proceed directly to the probe step — behavior is byte-identical to the existing path.
 
 **programmatic** (`type: programmatic`):
 Run the `check` argv as a subprocess.
@@ -50,7 +50,7 @@ On `revise` → stop, emit the rubric + LLM/founder response to the deliverable,
 
 **human** (`type: human`):
 Show the `prompt` string to founder and wait for explicit confirmation.
-Use `ask-lead.sh` with the prompt text. If founder responds anything other than a clear `yes/pass/ok` → treat as not-confirmed → PROBE_NEG.
+Use `ask-lead.sh` with the prompt text. Accept only an explicit `yes/pass/ok` as confirmation; any other response → treat as not-confirmed → PROBE_NEG.
 
 **Failure mode:** if ANY criterion fails → write `verify-probe-result.yaml` with `outcome: probe_neg` and the failing criterion id+reason. Do NOT proceed to the probe step. Return PROBE_NEG.
 
@@ -76,27 +76,7 @@ Write a YAML config file, then invoke:
 verify-probe.sh --timeout 180 --corroborate /tmp/verify-<task-id>.yaml
 ```
 
-Config format:
-```yaml
-positive:
-  type: log-grep          # signal-file | log-grep | http-check
-  host: <user>@<host>
-  path: <your-app-log-path>
-  pattern: "<expected-success-signal>"
-  window_min: 5
-no_regression:
-  - type: no-5xx-spike    # checks nginx access log for 5xx spike vs prior window
-    host: <user>@<host>
-    path: /var/log/nginx/access.log
-    window_min: 10
-    threshold_multiplier: 2.0
-  - type: error-log-quiet # checks app log error count recent vs baseline
-    host: <user>@<host>
-    path: <your-app-log-path>
-    window_min: 10
-    threshold_multiplier: 2.0
-    error_pattern: "(ERROR|CRITICAL|Traceback|Exception)"  # optional, shown is default
-```
+For the full corroborate config schema (positive/no_regression fields, thresholds), see [SCHEMAS.md](./SCHEMAS.md).
 
 Behaviour: positive probe runs first (60s timeout). If it fails → PROBE_NEG, stop.
 If it passes, each no-regression probe runs in sequence (60s each, 180s total budget).
@@ -187,34 +167,7 @@ If no override exists: escalate via `leadv2-founder-input` with message:
 
 ### 5b. Verify-probe types — generic (used when no override)
 
-**Publish cycle log grep:**
-```
-log-grep on host:
-  path: <your-app-log-path>     # example — fill from .claude/leadv2-overrides/stack.yaml
-  pattern: "cycle_complete|action_published"
-  timeout: 3600
-```
-
-**Web / dashboard change**:
-```
-http-check:
-  url: <stack.yaml web.domain>/<page>
-  expected: 200
-  timeout: 300
-```
-
-**Schema / migration**:
-```
-supabase-check:
-  description: "manual: verify <column> exists in <table>, RLS policy updated"
-```
-
-**Cron / scheduler change**:
-```
-log-grep with longer timeout:
-  pattern: "<new cron job name> executed"
-  timeout: <cron_interval_seconds + 300>
-```
+For probe templates by change type (publish-cycle log-grep, web/dashboard http-check, schema/migration supabase-check, cron/scheduler log-grep), see [EXAMPLES.md](./EXAMPLES.md).
 
 ### 6. State update on success
 
@@ -283,91 +236,11 @@ Invoke `leadv2-recovery` skill.
 - `git diff --name-only HEAD~1 HEAD` contains a path matching any configured frontend root
 - `context.yaml.affected_paths` contains an entry matching any configured frontend root
 
-For all other tasks this step is a **no-op** — skip entirely, no delay, no output file.
+Other tasks bypass this step automatically — no delay, no output file.
 
-### Loading frontend roots
+When triggered, run the frontend smoke-check sequence (load frontend roots config, find preview URL, HTTP smoke check, optional Playwright check, write `verify-browser.md`) — full steps and bash: [BROWSER-QA.md](./BROWSER-QA.md).
 
-```bash
-frontend_roots_file=".claude/leadv2-overrides/frontend-paths.txt"
-if [[ -f "$frontend_roots_file" ]]; then
-  mapfile -t frontend_roots < <(grep -vE '^\s*(#|$)' "$frontend_roots_file")
-else
-  frontend_roots=("web/")
-fi
-```
-
-### When triggered
-
-**1. Find preview URL**
-
-```bash
-# Option A: from recent vercel output recorded in context.yaml or LEAD_V2_STATE.md
-preview_url=$(python3 -c "
-import yaml, sys
-ctx = yaml.safe_load(open('docs/leadv2/tasks/${TASK_ID}/context.yaml')) or {}
-print(ctx.get('deploy_gate', {}).get('vercel_preview_url', '') or '')
-" 2>/dev/null)
-
-# Option B: from vercel meta output if present
-if [[ -z "$preview_url" && -f "web/.vercel/output/meta.json" ]]; then
-  preview_url=$(python3 -c "
-import json, sys
-d = json.load(open('web/.vercel/output/meta.json'))
-print(d.get('url','') or d.get('previewUrl','') or '')
-" 2>/dev/null || true)
-fi
-```
-
-**2. HTTP smoke check (if preview URL found)**
-
-```bash
-if [[ -n "$preview_url" ]]; then
-  http_status=$(curl -sIL --max-time 15 -w '%{http_code}' -o /dev/null "$preview_url" 2>/dev/null || echo "000")
-  if [[ "$http_status" -ge 400 ]] || [[ "$http_status" == "000" ]]; then
-    echo "[verify-browser] WARN: preview URL returned HTTP $http_status — $preview_url" >&2
-    browser_qa_verdict="http_warn:${http_status}"
-  else
-    echo "[verify-browser] HTTP check OK: $http_status — $preview_url" >&2
-    browser_qa_verdict="http_ok:${http_status}"
-  fi
-else
-  echo "[verify-browser] NOTE: no preview URL found — skipping HTTP check" >&2
-  browser_qa_verdict="no_url"
-fi
-```
-
-**3. Playwright smoke check (optional, if available)**
-
-```bash
-# Check whether browser-qa skill or Playwright MCP is available for this project.
-BROWSER_QA_OVERRIDE="${CLAUDE_PROJECT_ROOT:-$PWD}/.claude/leadv2-overrides/browser-qa.sh"
-if [[ -x "$BROWSER_QA_OVERRIDE" && -n "$preview_url" ]]; then
-  # Delegate one quick smoke check (load route, screenshot, no console errors).
-  LEAD_V2_TASK_ID="$TASK_ID" \
-  LEAD_V2_PREVIEW_URL="$preview_url" \
-    bash "$BROWSER_QA_OVERRIDE" \
-    && browser_qa_verdict="playwright_ok" \
-    || browser_qa_verdict="playwright_warn"
-else
-  echo "[verify-browser] NOTE: no browser-qa.sh override — Playwright check skipped" >&2
-fi
-```
-
-**4. Write result to handoff**
-
-```bash
-mkdir -p "docs/handoff/${TASK_ID}"
-cat > "docs/handoff/${TASK_ID}/verify-browser.md" <<EOF
-# Browser QA — ${TASK_ID}
-
-- preview_url: ${preview_url:-none}
-- http_status: ${http_status:-n/a}
-- verdict: ${browser_qa_verdict:-skipped}
-- timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
-EOF
-```
-
-A `http_warn` or `playwright_warn` result is **advisory** — it does not block Phase 8 Close unless the main positive probe also failed. Log the warning in `LEAD_V2_STATE.md` and continue.
+A `http_warn` or `playwright_warn` result is **advisory** — Phase 8 Close proceeds regardless, unless the main positive probe also failed. Log the warning in `LEAD_V2_STATE.md` and continue.
 
 A `http_ok` or `playwright_ok` result counts as an **additional corroboration** probe — record in `context.yaml.verification.browser_qa`.
 
@@ -377,7 +250,7 @@ A `http_ok` or `playwright_ok` result counts as an **additional corroboration** 
 - **Timeout must be realistic.** Publish cycle = 30-60 min. HTTP = seconds. Don't set 5-min for cron task.
 - **Supabase-check is last resort.** Prefer log-grep or http-check. Manual prompt defeats autonomy.
 - **Negative signal > timeout.** Error in log → immediate rollback, don't wait for timeout.
-- **Heavy task = corroborate required.** Single positive probe is not enough when runtime paths are touched — a green log line with a concurrent 5xx spike is a false green. Use `--corroborate` with ≥1 no-regression probe.
+- **Heavy task = corroborate required.** When runtime paths are touched, corroboration is required — a green log line with a concurrent 5xx spike is a false green. Use `--corroborate` with ≥1 no-regression probe.
 - **Light task = single-probe acceptable.** Docs, web UI, schema-only changes don't need no-regression probes.
 
 ## Anti-patterns
