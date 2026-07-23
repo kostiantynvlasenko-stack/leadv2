@@ -214,7 +214,13 @@ if declare -f leadv2_validate_yaml >/dev/null 2>&1; then
     exit 1
   fi
   _content=$(cat "$OUTPUT_FILE")
-  _tmp="$(mktemp "$(dirname "$OUTPUT_FILE")/.parse_XXXXXX.yaml")"
+  # P0 portable-temp fix: drop the literal suffix after XXXXXX (BSD mktemp does
+  # not randomize past the X-run; extension is not load-bearing on a scratch
+  # file that gets renamed immediately).
+  _tmp="$(mktemp "$(dirname "$OUTPUT_FILE")/.parse_XXXXXX")" || {
+    log_error "mktemp failed while writing $OUTPUT_FILE"
+    exit 1
+  }
   printf -- '%s\n' "$_content" > "$_tmp"
   sync "$_tmp" 2>/dev/null || true
   mv -f "$_tmp" "$OUTPUT_FILE"

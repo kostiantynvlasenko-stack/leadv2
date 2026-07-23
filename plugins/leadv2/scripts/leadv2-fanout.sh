@@ -235,7 +235,12 @@ active_task_ids = {str(s.get("task_id")) for s in sessions}
 # active.yaml meta is the ONLY source for caps — read fresh every run, no
 # overrides file, no hardcoded ceiling. Fallback defaults below only apply
 # when a key is truly absent from meta (fresh/incomplete active.yaml).
-hard_limit           = int(meta.get("hard_limit", 20))
+# P0 concurrency fix (leadv2 0.2 audit): default hard_limit dropped 20 -> 2 —
+# each child is an independent full-context session, so a high default
+# multiplies token spend. Still fully overridable: any founder edit to
+# active.yaml meta.hard_limit wins (this default only applies when the key is
+# absent), preserving the LEAD-FANOUT-01 single-source-of-truth decision above.
+hard_limit           = int(meta.get("hard_limit", 2))
 heavy_strategic_solo = bool(meta.get("heavy_strategic_solo", True))
 light_max            = int(meta.get("light_max", 3))
 standard_max         = int(meta.get("standard_max", 2))
@@ -640,7 +645,12 @@ try:
         with open(yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
     else:
-        data = {"meta": {"schema_version": 2, "hard_limit": 20,
+        # P0 concurrency fix (leadv2 0.2 audit): bootstrap default hard_limit
+        # dropped 20 -> 2, same rationale as the read-path fallback above.
+        # Overridable: a founder edit to the resulting active.yaml meta wins
+        # on every subsequent run (this literal only fires once, at first
+        # bootstrap of a missing active.yaml).
+        data = {"meta": {"schema_version": 2, "hard_limit": 2,
                           "heavy_strategic_solo": True, "light_max": 3,
                           "standard_max": 2, "rendered_at": ""},
                 "sessions": []}

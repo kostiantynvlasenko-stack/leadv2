@@ -80,7 +80,14 @@ _judge_atomic_flush() {
     fi
     local _content _tmp
     _content=$(cat "$file")
-    _tmp="$(mktemp "$(dirname "$file")/.judge_XXXXXX.yaml")"
+    # P0 portable-temp fix: BSD mktemp only randomizes a trailing XXXXXX run;
+    # a literal ".yaml" suffix after it is not randomized -> deterministic
+    # collision risk. Scratch name is renamed away immediately, extension
+    # is not load-bearing, so drop it.
+    _tmp="$(mktemp "$(dirname "$file")/.judge_XXXXXX")" || {
+      log_error "mktemp failed while writing $file"
+      return 1
+    }
     printf -- '%s\n' "$_content" > "$_tmp"
     sync "$_tmp" 2>/dev/null || true
     mv -f "$_tmp" "$file"

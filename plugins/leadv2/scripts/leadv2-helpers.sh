@@ -1012,8 +1012,14 @@ _atomic_write_yaml() {
   mkdir -p "$dir"
 
   # Write to a tmp sibling so mv is atomic on the same filesystem.
+  # P0 portable-temp fix: BSD mktemp only randomizes a trailing XXXXXX run; a
+  # literal ".yaml" suffix after it is not randomized -> deterministic
+  # collision. Extension is not load-bearing on this scratch file.
   local tmp
-  tmp="$(mktemp "${dir}/.atomic_write_XXXXXX.yaml")"
+  tmp="$(mktemp "${dir}/.atomic_write_XXXXXX")" || {
+    printf '[helpers] _atomic_write_yaml: mktemp failed in %s\n' "$dir" >&2
+    return 1
+  }
 
   # Trap to clean up tmp on unexpected exit.
   local _aw_cleanup_tmp="$tmp"

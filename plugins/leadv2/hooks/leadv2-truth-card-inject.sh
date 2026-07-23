@@ -86,7 +86,16 @@ RAW_RESPONSE="$(curl --silent --max-time 5 \
 
 # ---- Format and emit additionalContext -------------------------------------
 # M3: pass RAW_RESPONSE via a temp file, not as argv (avoids ARG_MAX + quote injection).
-DATA_FILE="$(mktemp /tmp/lv2-tc-data.XXXXXX.json)"
+# P0 portable-temp fix (leadv2 0.2): BSD/macOS mktemp requires the XXXXXX run to
+# be the trailing component of the template — a literal ".json" suffix after it
+# is NOT randomized on BSD, causing deterministic collisions. Drop the suffix
+# (this is a throwaway scratch file consumed by path, not by extension) and log
+# loudly on failure instead of letting the ERR trap above fail-open silently.
+DATA_FILE="$(mktemp "${TMPDIR:-/tmp}/lv2-tc-data.XXXXXX")" || {
+  printf '%s|card-emit-error|mktemp failed, aborting truth-card inject\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/leadv2-truth-card-inject.log 2>/dev/null || true
+  exit 0
+}
 trap 'rm -f "$DATA_FILE"' EXIT
 printf -- '%s' "$RAW_RESPONSE" > "$DATA_FILE"
 
