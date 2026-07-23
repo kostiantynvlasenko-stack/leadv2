@@ -32,7 +32,17 @@
 #     BEFORE the prune under a separate lock.
 #
 # Usage:
-#   leadv2-supervise.sh [--json] [--since <ISO>]
+#   leadv2-supervise.sh [--json] [--since <ISO>] [--print]
+#
+# SESSION-HANDOFF-01: a full (non-delta) --json call also carries a bounded
+# "resume" key — a live-composed <supervisor-handoff> restore block (role +
+# founder rules, live lanes, focus/next-action, freshest open-threads tail,
+# tasks.yaml P0/P1 top-10). Computed by scripts/leadv2-supervise-resume.sh
+# from the same canonical on-disk sources this script already reads/
+# reconciles — no new state file. `--print` execs straight into that
+# composer (skipping every mutation path below: sentinel write, tmux
+# adopt/prune, phase-backfill, truth-probe) as a lightweight fallback entry
+# point for the leadv2-supervise skill.
 #
 # Exit codes: 0 = reconciled snapshot rendered (table may legitimately be
 # empty). Non-zero = fail-closed (B1, SUPERVISE-V2-01): unresolvable project
@@ -55,13 +65,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # know whether to render as JSON or plain stderr) ──────────────────────────
 JSON_MODE=0
 SINCE=""
+PRINT_MODE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --json)  JSON_MODE=1; shift ;;
     --since) SINCE="${2:-}"; shift 2 ;;
+    --print) PRINT_MODE=1; shift ;;
     -h|--help)
-      printf -- 'Usage: leadv2-supervise.sh [--json] [--since <ISO>]\n'
+      printf -- 'Usage: leadv2-supervise.sh [--json] [--since <ISO>] [--print]\n'
       exit 0
       ;;
     *)
@@ -94,6 +106,25 @@ if [[ -z "$PROJECT_ROOT" ]]; then
     printf -- '[supervise] %s\n' "$_lv2_err_msg" >&2
   fi
   exit 1
+fi
+
+# SESSION-HANDOFF-01: --print is a lightweight fallback entry point for the
+# leadv2-supervise skill — composes the SAME bounded <supervisor-handoff>
+# resume block as the "resume" key below, via the shared composer script,
+# but skips every mutation/reconciliation path in this script (sentinel
+# write, tmux adoption/prune, phase-backfill, truth-probe). Read-only,
+# fast, safe to call whenever the mandatory --json call is unavailable.
+if [[ "$PRINT_MODE" -eq 1 ]]; then
+  RESUME_SH="${SCRIPT_DIR}/leadv2-supervise-resume.sh"
+  if [[ -x "$RESUME_SH" || -f "$RESUME_SH" ]]; then
+    if [[ "$JSON_MODE" -eq 1 ]]; then
+      exec bash "$RESUME_SH" --json --project-root "$PROJECT_ROOT"
+    else
+      exec bash "$RESUME_SH" --project-root "$PROJECT_ROOT"
+    fi
+  fi
+  printf -- '<supervisor-handoff>\nHANDOFF DEGRADED — resume composer script missing at %s\n</supervisor-handoff>\n' "$RESUME_SH"
+  exit 0
 fi
 
 # LEAD-CONTROL-PLANE-01: active.yaml lives in the control plane (outside any
@@ -349,14 +380,14 @@ print(json.dumps(d))
   fi
 fi
 
-python3 - "$ACTIVE_YAML" "$HANDOFF_DIR" "$SNAPSHOT" "$JSON_MODE" "$SINCE" "$CP_QUESTIONS_DIR" "${BUS_JSONL:-}" "${BUS_OFFSET_FILE:-}" "$TRUTH_BREACHES_JSON" "$TMUX_WINDOWS_TSV" "$TMUX_PANES_TSV" "$TASKS_YAML_PATH" "$ACTIVE_LOCKFILE" "$TOMBSTONES_FILE" "$OBSERVE_ONLY" "$SCRIPT_DIR" <<'PY'
+python3 - "$ACTIVE_YAML" "$HANDOFF_DIR" "$SNAPSHOT" "$JSON_MODE" "$SINCE" "$CP_QUESTIONS_DIR" "${BUS_JSONL:-}" "${BUS_OFFSET_FILE:-}" "$TRUTH_BREACHES_JSON" "$TMUX_WINDOWS_TSV" "$TMUX_PANES_TSV" "$TASKS_YAML_PATH" "$ACTIVE_LOCKFILE" "$TOMBSTONES_FILE" "$OBSERVE_ONLY" "$SCRIPT_DIR" "$PROJECT_ROOT" <<'PY'
 import sys, os, json, glob, datetime, subprocess
 from collections import deque
 
 (active_yaml, handoff_dir, snapshot_path, json_mode, since, cp_questions_dir,
  bus_jsonl, bus_offset_file, truth_breaches_json, tmux_windows_tsv,
  tmux_panes_tsv, tasks_yaml_path, active_lockfile, tombstones_file,
- observe_only_env, script_dir) = sys.argv[1:17]
+ observe_only_env, script_dir, project_root) = sys.argv[1:18]
 json_mode = json_mode == "1"
 delta_mode = bool(since)
 
@@ -1038,6 +1069,28 @@ out_closed = [tid for tid in closed_now if f"closed:{tid}" in new_events] if del
 # reports a dead_now entry whose event_key is NEW since the last snapshot.
 out_dead = [d for d in dead_now if event_key_dead(d) in new_events] if delta_mode else dead_now
 
+# ── SESSION-HANDOFF-01: bounded resume object (full calls only) ────────────
+# Rides this mandatory first --json call the leadv2-supervise skill already
+# makes — no new hook, no new state file. Computed only on a full (non-delta)
+# call, same gating as truth_probe/orphans/adopted above; a delta poll never
+# needs to re-render the whole restore block. Best-effort: any failure here
+# degrades to a typed stub, never crashes the parent snapshot call (this
+# script's contract is "exit 0 always" for a status probe).
+resume_obj = {"status": "skipped_delta"} if delta_mode else {"status": "degraded", "degraded": ["resume composer unavailable"]}
+if not delta_mode:
+    resume_script = os.path.join(script_dir, "leadv2-supervise-resume.sh")
+    if os.path.isfile(resume_script):
+        try:
+            _rr = subprocess.run(
+                ["bash", resume_script, "--json", "--project-root", project_root],
+                capture_output=True, text=True, timeout=8,
+            )
+            resume_obj = json.loads(_rr.stdout) if _rr.returncode == 0 and _rr.stdout.strip() else {
+                "status": "degraded", "degraded": [f"resume composer exit {_rr.returncode}"]
+            }
+        except Exception as e:
+            resume_obj = {"status": "degraded", "degraded": [f"resume composer error: {e.__class__.__name__}: {e}"]}
+
 # ── Render ────────────────────────────────────────────────────────────────
 if json_mode:
     result = {
@@ -1085,6 +1138,11 @@ if json_mode:
         "dead": out_dead,
         "observe_only": observe_only,
         "reconcile_cycle": reconcile_cycle,
+        # SESSION-HANDOFF-01: bounded <supervisor-handoff> restore block —
+        # "skipped_delta" on a --since call (never recomputed), a typed
+        # {"status":"degraded",...} stub if the composer failed/timed out,
+        # never a fabricated block. See leadv2-supervise-resume.sh.
+        "resume": resume_obj,
     }
     print(json.dumps(result, indent=2))
     sys.exit(0)

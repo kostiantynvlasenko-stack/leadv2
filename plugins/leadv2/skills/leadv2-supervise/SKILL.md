@@ -26,9 +26,10 @@ Only things that need the founder reach chat.
 
 ## Flow (5 steps, in order)
 
-1. **Reconcile + adopt existing work.** Call `scripts/leadv2-supervise.sh
-   --json` (a full, non-delta call). This single call already does everything
-   needed: renders the live table AND runs the D-d tmux reconciliation —
+1. **Reconcile + adopt existing work, then render the resume block.** Call
+   `scripts/leadv2-supervise.sh --json` (a full, non-delta call). This single
+   call already does everything needed: renders the live table AND runs the
+   D-d tmux reconciliation —
    triple-proof adoption of orphan tmux windows (window name matches a known
    task id AND a live `claude` PID descends from the pane), corroborated
    (twice-polled) death detection with tombstone-before-prune, and the F2
@@ -38,6 +39,38 @@ Only things that need the founder reach chat.
    D-e rollout window) is still ALWAYS present in `would_adopt`/`would_prune`,
    never silently dropped. Report those to the founder as "seen but not
    applied yet", not as absent.
+
+   **SESSION-HANDOFF-01 — render the resume block BEFORE the picker.** The
+   same `--json` payload carries a `resume` key: a bounded (~60-80 line,
+   <=6KB) `<supervisor-handoff>` block live-composed from canonical on-disk
+   sources — role + founder standing rules (open-threads.md head, verbatim,
+   sacrosanct/never truncated), live lanes reconciled from `active.yaml`
+   (id/phase/pid/provider/blocker), one focus + next-action line, the
+   freshest open-threads.md tail entries, and `tasks.yaml` P0/P1 top-10. Print
+   `resume.block` to the founder VERBATIM as your first output this session
+   — before step 2's picker, before any dispatch. This is restore, not
+   narration: do not re-summarize it in your own words. Two degraded cases,
+   never silently skip either:
+   - `resume.status == "skipped_delta"` should never occur on this mandatory
+     first (non-delta) call — if it does, something upstream forced delta
+     mode; treat as `degraded` and fall back to `--print` below.
+   - `resume.status == "degraded"` (missing/malformed source, composer
+     timeout/crash) — print the block's own "HANDOFF DEGRADED" section and
+     its pointers line as-is; never fabricate the missing continuity.
+
+   **Fallback entry point.** If the mandatory `--json` call itself fails, or
+   its `resume` key is entirely absent (stale plugin copy), run
+   `scripts/leadv2-supervise.sh --print` directly — this execs straight into
+   the same composer (`leadv2-supervise-resume.sh`), skipping every
+   reconciliation/mutation path (sentinel write, tmux adopt/prune,
+   phase-backfill, truth-probe), and renders the identical bounded block.
+   Never invent a substitute summary when both paths degrade — surface the
+   degraded block and its pointers to the founder honestly.
+
+   This step is `--print`/`resume`-only: it never touches the compact-path
+   freeze/reground files, and it drops the DUE scheduled-decisions ledger
+   entirely (already injected once at `SessionStart` by
+   `scheduled-decisions-inject.sh` — this would be a duplicate).
 2. **Pick <=5.** Call `scripts/leadv2-supervise-pick.sh [N<=10]` — a
    read-only ranked picker over `docs/tasks.yaml` top candidates plus any
    cached truth-probe breach (a RED breach's linked work item is pre-ranked
@@ -110,12 +143,19 @@ given lane's protocol version uses. Do not add a third store.
 
 ## Snapshot / loop / pick script contracts
 
-- `scripts/leadv2-supervise.sh [--json] [--since <ISO>]` — the core
+- `scripts/leadv2-supervise.sh [--json] [--since <ISO>] [--print]` — the core
   reconciliation snapshot.
   - No `--since`: full call — compact table + `orphans`/`adopted`/
     `would_adopt`/`would_prune`/`dead` (D-d) + `truth_probe`/`truth_breaches`
     (F2, only computed on full calls) + `requires_founder`/`stuck`/
-    `closed_since_last`.
+    `closed_since_last` + `resume` (SESSION-HANDOFF-01, full calls only — a
+    bounded `<supervisor-handoff>` restore block; `"skipped_delta"`/
+    `"degraded"` status never fabricates continuity).
+  - `--print`: bypasses reconciliation/mutation entirely and execs into
+    `scripts/leadv2-supervise-resume.sh`, printing the same bounded resume
+    block (text by default, `--json` for the structured object) — the
+    lightweight fallback entry point when the mandatory first call is
+    unavailable.
   - `--since <ISO>`: delta mode — only events not already reported in the
     previous snapshot; silence if nothing changed. Death corroboration still
     advances on delta calls (a candidate needs two CONSECUTIVE calls, delta
