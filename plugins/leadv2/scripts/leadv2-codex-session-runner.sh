@@ -167,18 +167,36 @@ PYEOF
   leadv2_active_append_provider_receipt "$TASK_ID" "$receipt" >/dev/null 2>&1 || true
 }
 
-# A Codex turn is already inside this runner's flock.  A command that starts a
-# session runner, fanout, supervise, or another launcher/dispatcher is not
-# useful work: it is the Codex-lead recursion failure mode.  Inspect only this
-# turn's appended JSONL/text so previous diagnostic output cannot trip it.
+# A Codex turn is already inside this runner's flock.  Only an actual
+# EXECUTION of a session launcher/dispatcher (session-runner, fanout,
+# supervise, *launcher, *dispatcher) is the Codex-lead recursion footgun —
+# never a per-phase helper (leadv2-phase8-*, leadv2-gate1-prompt.sh,
+# leadv2-verify*).  CODEX-LEAD-RECURSION-FALSEKILL-01: the prior guard matched
+# the launcher NAME anywhere in any JSON string value, so a child that merely
+# read/listed/grepped a launcher (or echoed the briefing that names one) was
+# falsely killed.  Now scan ONLY command_execution.command fields, and within
+# each, flag the launcher only at EXECUTION position (invoked directly, or as
+# the operand of an interpreter such as bash/sh/source) — never a bare mention
+# or an operand to grep/git-ls-files/sed/cat.  Inspect only this turn's
+# appended bytes (offset) so previous diagnostic output cannot trip it.
 _launcher_spawn_detected() {
   local offset="$1"
   python3 - "$LOGF" "$offset" <<'PYEOF'
-import json, re, sys
+import json, os, re, shlex, sys
 
 path, offset = sys.argv[1], int(sys.argv[2])
-launcher = re.compile(r"leadv2-(?:codex-)?session-runner|leadv2-(?:fanout|supervise)|leadv2-[^\s/]*?(?:launcher|dispatcher)", re.I)
-shell = re.compile(r"(?:^|[;&|\n]\s*)(?:(?:env\s+[^\n]*?\s+)?(?:bash|sh)\s+|\S*/)", re.I)
+
+# A launcher invocation is a single filesystem-path token (no whitespace) whose
+# basename is a session launcher/dispatcher.  The path prefix may not span
+# spaces, so a multi-word operand that merely ends in a launcher name cannot
+# match (e.g. "sed -n 1,5p .../leadv2-codex-session-runner.sh").
+LAUNCHER_RE = re.compile(
+    r"^(?:[^\s/]*/)*(?:LEADV2_)?leadv2-(?:codex-)?session-runner(?:\.sh)?$"
+    r"|^(?:[^\s/]*/)*(?:LEADV2_)?leadv2-(?:fanout|supervise)(?:\.sh)?$"
+    r"|^(?:[^\s/]*/)*(?:LEADV2_)?leadv2-[^\s/]*?(?:launcher|dispatcher)(?:\.sh)?$",
+    re.I,
+)
+INTERPRETERS = {"bash", "sh", "zsh", "dash", "ksh", "source", "."}
 
 try:
     with open(path, "rb") as fh:
@@ -187,28 +205,144 @@ try:
 except FileNotFoundError:
     raise SystemExit(1)
 
-def strings(value):
-    if isinstance(value, str):
-        yield value
-        try:
-            yield from strings(json.loads(value))
-        except (ValueError, TypeError):
-            pass
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from strings(item)
+def is_launcher(tok):
+    return bool(tok) and not any(c.isspace() for c in tok) and bool(LAUNCHER_RE.match(tok))
+
+def split_unquoted(text):
+    # Split on shell command separators (; & | newline parens) OUTSIDE quotes,
+    # so a launcher inside a quoted -lc/-c body is still reachable.
+    subs, cur, quote = [], [], None
+    for c in text:
+        if quote:
+            cur.append(c)
+            if c == quote:
+                quote = None
+        elif c in ("'", '"'):
+            quote = c
+            cur.append(c)
+        elif c in ";&|\n()":
+            subs.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+    subs.append("".join(cur))
+    return subs
+
+def shell_tokens(s):
+    try:
+        return shlex.split(s, posix=True)
+    except ValueError:
+        return s.split()
+
+# GNU `timeout` options that take an argument (consume the NEXT token before
+# the DURATION): -k/--kill-after, -s/--signal.
+TIMEOUT_ARG_OPTS = {"-k", "--kill-after", "-s", "--signal"}
+# GNU `xargs` options that take an argument (consume the NEXT token before the
+# PROGRAM): -I/--replace, -n/--max-args, -P/--max-procs, -d/--delimiter, -E,
+# -s/--max-chars, -L/--max-lines. Best-effort (covers the arg-taking set).
+XARGS_ARG_OPTS = {
+    "-I", "--replace", "-n", "--max-args", "-P", "--max-procs",
+    "-d", "--delimiter", "-E", "-s", "--max-chars", "-L", "--max-lines",
+}
+
+def _next_operand(toks, i, arg_opts):
+    # From index i (the token AFTER a `timeout`/`xargs` wrapper), advance past
+    # option flags AND their option-args, returning the index of the first
+    # operand token (the DURATION for timeout, the PROGRAM for xargs). Handles
+    # attached forms (-k5s, --signal=TERM) and the "--" end-of-options sentinel.
+    n = len(toks)
+    while i < n:
+        t = toks[i]
+        if t == "-" or not t.startswith("-"):
+            break
+        if t == "--":
+            i += 1
+            break
+        if t.startswith("--"):
+            name, attached = t.split("=", 1)[0], "=" in t
+        else:
+            name, attached = "-" + t[1:2], len(t) > 2
+        i += 1
+        if name in arg_opts and not attached:
+            i += 1  # consume the separate option-arg token
+    return i
+
+def eval_tokens(toks, depth):
+    # Return True iff the token stream EXECUTES a launcher as its program
+    # (directly, or as the operand of an interpreter / eval / here-string).
+    if not toks:
+        return False
+    i = 0
+    while i < len(toks):  # strip leading wrappers so the real program is checked
+        t = toks[i]
+        if t in ("sudo", "env", "command", "nohup", "setsid") or re.match(r"^[A-Za-z_]\w*=", t):
+            i += 1
+            continue
+        if t == "timeout":  # skip options (and their args), then the DURATION, then the program
+            j = _next_operand(toks, i + 1, TIMEOUT_ARG_OPTS)
+            if j < len(toks):
+                j += 1  # the DURATION operand
+            i = j
+            continue
+        if t == "xargs":  # skip options (and their args), then the program
+            i = _next_operand(toks, i + 1, XARGS_ARG_OPTS)
+            continue
+        break
+    if i >= len(toks):
+        return False
+    prog = toks[i]
+    if is_launcher(prog):
+        return True
+    if prog == "eval":  # eval <rest> — remaining tokens form a command string
+        rest = toks[i + 1:]
+        if rest and scan_command(" ".join(rest), depth + 1):
+            return True
+    if os.path.basename(prog) in INTERPRETERS:
+        rest = toks[i + 1:]
+        k, has_c = 0, False
+        while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
+            if rest[k] in ("-c", "-lc", "-cl"):
+                has_c = True
+            k += 1
+        # here-string: bash <<< '<cmd>' — token after <<< is fed to the shell
+        for j, tok in enumerate(rest):
+            if tok == "<<<" and j + 1 < len(rest):
+                body = rest[j + 1]
+                if is_launcher(body) or scan_command(body, depth + 1):
+                    return True
+        if k < len(rest):
+            operand = rest[k]
+            if is_launcher(operand):
+                return True
+            if has_c and scan_command(operand, depth + 1):  # bash -lc "<body>"
+                return True
+    return False
+
+def scan_command(text, depth=0):
+    if depth > 4:
+        return False
+    # Command-substitution bodies ($(…) and `…`) are executed by the shell;
+    # scan each like a normal command before tokenizing the surface text.
+    for body in re.findall(r"\$\(([^)]*)\)|`([^`]*)`", text):
+        for b in body:
+            if b and scan_command(b, depth + 1):
+                return True
+    for sub in split_unquoted(text):
+        if eval_tokens(shell_tokens(sub), depth):
+            return True
+    return False
 
 for line in raw.splitlines():
     try:
-        values = strings(json.loads(line))
+        obj = json.loads(line)
     except ValueError:
-        values = (line,)
-    for value in values:
-        if launcher.search(value) and shell.search(value):
-            raise SystemExit(0)
+        continue
+    item = obj.get("item", obj) if isinstance(obj, dict) else {}
+    if not isinstance(item, dict) or item.get("type") != "command_execution":
+        continue
+    cmd = item.get("command", "")
+    if isinstance(cmd, str) and scan_command(cmd):
+        raise SystemExit(0)
 raise SystemExit(1)
 PYEOF
 }
