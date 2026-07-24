@@ -299,12 +299,12 @@ _sync_project_root() {
   local proj_scripts_toplevel="${root}/scripts"
   local -a toplevel_curated_files=(
     leadv2-answer.sh leadv2-ask.sh leadv2-bus.sh leadv2-client-surface-gate.sh
-    leadv2-fanout-classify.sh leadv2-fanout.sh leadv2-phase8-assert.sh leadv2-phase8-close.sh
+    leadv2-fanout-classify.sh leadv2-fanout.sh leadv2-phase8-assert.sh leadv2-phase8-close.sh leadv2-phase8-e2e-gate.sh
     leadv2-merge-queue.sh leadv2-provider-rollup.sh leadv2-session-route.sh
     leadv2-session-runner.sh leadv2-codex-session-runner.sh leadv2-progress-fingerprint.sh
     leadv2-state-path.sh leadv2-supervise.sh leadv2-tasks-regen-gate.sh
     leadv2-active-registry.sh leadv2-supervise-loop.sh leadv2-supervise-pick.sh
-    leadv2-tasks-lib.sh
+    leadv2-tasks-lib.sh leadv2-helpers.sh
   )
   if [[ "${vendors_scripts}" != "false" ]] && [[ -d "${proj_scripts_toplevel}" ]] && compgen -G "${proj_scripts_toplevel}/leadv2-*" > /dev/null 2>&1; then
     log "Syncing -> project top-level scripts (c2, out-of-worktree control plane): ${proj_scripts_toplevel} [curated set, additive]"
