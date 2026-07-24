@@ -107,7 +107,14 @@ INITIAL = {
         "schema_version": 2,
         "rendered_at": "",
         "hard_limit": 3,
-        "heavy_strategic_solo": True,
+        # HEAVY-MAX-2-WITH-COLLISION-GUARD-01: heavy_max is now the SOLE
+        # control for concurrent Heavy/strategic lanes. heavy_strategic_solo
+        # is kept (default False) purely as an explicit kill-switch a founder
+        # can flip True to force serialize; legacy active.yaml files written
+        # before this change (no heavy_max key at all) still fall back to the
+        # old True default at read time -- see leadv2_active_check_limits().
+        "heavy_max": 2,
+        "heavy_strategic_solo": False,
         "light_max": 3,
         "standard_max": 2,
     },
@@ -150,7 +157,9 @@ try:
     elif op == "register":
         (session_id, task_id, worktree, branch, started_at,
          phase, cls, pid, pid_birth, parent_session_id,
-         daemon_mode, last_pulse_at, pulse_log) = args
+         daemon_mode, last_pulse_at, pulse_log, group_key, risk_tags) = args
+        group_key = None if group_key in ("", "null", "None", "-") else group_key
+        risk_tags = None if risk_tags in ("", "null", "None", "-") else risk_tags
 
         pid_int = int(pid) if pid not in ("null", "", "None") else None
         daemon_bool = daemon_mode.lower() in ("1", "true", "yes")
@@ -195,6 +204,14 @@ try:
                 "last_pulse_at": last_pulse_at,
                 "stale": False,
                 "note": "",
+                # HEAVY-MAX-2-WITH-COLLISION-GUARD-01 (F1): a co-running
+                # fanout's collision guard reads these live off a session row
+                # -- this is the SECOND active.yaml writer (leadv2-fanout.sh's
+                # own _fanout_register_session is the first); both must
+                # persist group_key/risk_tags or the collision check is blind
+                # to sessions registered through this path (Gate1 self-reg).
+                "group_key": group_key,
+                "risk_tags": risk_tags,
                 # D-d registry-honesty fields (SUPERVISE-V2-01 item 3) — additive,
                 # every new row registers V2 explicitly; legacy rows written by
                 # an older registry simply lack these keys (reader-side infers
@@ -382,6 +399,8 @@ leadv2_active_register() {
   local worktree="${3:-$(pwd)}"
   local branch="${4:-}"
   local daemon_mode="${5:-false}"
+  local group_key="${6:-}"
+  local risk_tags="${7:-}"
 
   if [[ -z "$branch" ]]; then
     branch="$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || printf -- 'unknown')"
@@ -409,7 +428,7 @@ leadv2_active_register() {
     "$lockfile" "$yaml_file" register \
     "$session_id" "$task_id" "$worktree" "$branch" "$ts" \
     "intake" "$cls" "${durable_pid}" "$pid_birth" "$parent_sid" \
-    "$daemon_mode" "$ts" "$pulse_log"
+    "$daemon_mode" "$ts" "$pulse_log" "$group_key" "$risk_tags"
 
   # Auto-refresh LEAD_V2_STATE.md on every register — non-fatal to register itself
   _render_log="/tmp/lv2-render-$(date +%s).log"
@@ -648,23 +667,43 @@ def _resolve(key, default):
         return meta[key]
     return default
 
-hard_limit           = _resolve("hard_limit", 3)
-heavy_strategic_solo = _resolve("heavy_strategic_solo", True)
-light_max            = _resolve("light_max", 3)
-standard_max         = _resolve("standard_max", 2)
+def _key_present(key):
+    return key in overrides or key in meta
+
+hard_limit   = _resolve("hard_limit", 3)
+light_max    = _resolve("light_max", 3)
+standard_max = _resolve("standard_max", 2)
+
+# HEAVY-MAX-2-WITH-COLLISION-GUARD-01 (F4): heavy_max is the SOLE control for
+# concurrent Heavy/strategic lanes, mirroring leadv2-fanout.sh's selection
+# pass (the OTHER reader of these caps). Legacy heavy_strategic_solo is
+# honored as the fallback default ONLY when heavy_max is absent entirely
+# (very old active.yaml, back-compat) -- otherwise it is an explicit
+# kill-switch a founder can flip True to force serialize.
+heavy_max = _resolve("heavy_max", 2)
+if _key_present("heavy_max"):
+    heavy_strategic_solo = _resolve("heavy_strategic_solo", False)
+else:
+    heavy_strategic_solo = _resolve("heavy_strategic_solo", True)
 
 cls_l = cls.lower()
 
-# Check hard limit (total active sessions, all classes)
+# Check hard limit (total active sessions, all classes) -- hard ceiling, never bypassed here.
 if len(sessions) >= hard_limit:
     print(f"[registry] hard limit reached: {len(sessions)}/{hard_limit} active sessions", file=sys.stderr)
     sys.exit(1)
 
-# Check heavy/strategic conflict (solo rule)
-if cls_l in ("heavy", "strategic") and heavy_strategic_solo:
-    conflicting = [s for s in sessions if s.get("class", "").lower() in ("heavy", "strategic")]
-    if conflicting:
-        print(f"[registry] heavy/strategic conflict: {conflicting[0].get('task_id')} already running", file=sys.stderr)
+# Check heavy/strategic: solo kill-switch, else heavy_max ceiling. This
+# function has no collision-guard (no group_key/risk_tags input) -- it is a
+# coarser, conservative cap used by callers that only know `cls`.
+if cls_l in ("heavy", "strategic"):
+    heavy_count = sum(1 for s in sessions if s.get("class", "").lower() in ("heavy", "strategic"))
+    if heavy_strategic_solo:
+        if heavy_count > 0:
+            print(f"[registry] heavy/strategic conflict: solo rule -- a Heavy/strategic session already active", file=sys.stderr)
+            sys.exit(2)
+    elif heavy_count >= heavy_max:
+        print(f"[registry] heavy_max reached: {heavy_count}/{heavy_max}", file=sys.stderr)
         sys.exit(2)
 
 # Per-class caps

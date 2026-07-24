@@ -241,14 +241,90 @@ active_task_ids = {str(s.get("task_id")) for s in sessions}
 # active.yaml meta.hard_limit wins (this default only applies when the key is
 # absent), preserving the LEAD-FANOUT-01 single-source-of-truth decision above.
 hard_limit           = int(meta.get("hard_limit", 2))
-heavy_strategic_solo = bool(meta.get("heavy_strategic_solo", True))
+# HEAVY-MAX-2-WITH-COLLISION-GUARD-01: heavy_max is now the SOLE control for
+# concurrent Heavy/strategic lanes (was a blanket heavy_strategic_solo=True
+# rule). Legacy heavy_strategic_solo is honored ONLY as the fallback default
+# when heavy_max is absent from meta (very old active.yaml, back-compat) --
+# or as an explicit kill-switch when a founder sets it True even with
+# heavy_max present (forces serialize, heavy_max effectively 1).
+heavy_max            = int(meta.get("heavy_max", 2))
+if "heavy_max" in meta:
+    heavy_strategic_solo = bool(meta.get("heavy_strategic_solo", False))
+else:
+    heavy_strategic_solo = bool(meta.get("heavy_strategic_solo", True))
 light_max            = int(meta.get("light_max", 3))
 standard_max         = int(meta.get("standard_max", 2))
 
 total_active    = len(sessions)
 light_count     = sum(1 for s in sessions if str(s.get("class", "")).lower() == "light")
 standard_count  = sum(1 for s in sessions if str(s.get("class", "")).lower() in ("standard", "standard-light"))
+heavy_sessions  = [s for s in sessions if str(s.get("class", "")).lower() in ("heavy", "strategic")]
+heavy_count     = len(heavy_sessions)
 heavy_active    = any(str(s.get("class", "")).lower() in ("heavy", "strategic") for s in sessions)
+
+# Prod-risk tag set: a Heavy carrying any of these can never co-run with
+# another Heavy carrying any of these -- both sides must be non-prod AND
+# occupy disjoint subsystems (group_key) to co-run. Fail-closed (F3) on a
+# missing/malformed/empty signal: unknown is treated as prod-risk, never as
+# "no intersection => safe to co-run".
+PROD_RISK_TAGS = {"publish", "deploy", "migration", "prod", "prod-deploy"}
+
+def _norm_tags(raw):
+    if isinstance(raw, (list, tuple, set)):
+        parts = [str(x).strip().lower() for x in raw if str(x).strip()]
+    elif isinstance(raw, str):
+        s = raw.strip()
+        if not s or s.lower() in ("-", "none", "null"):
+            return None
+        parts = [p.strip().lower() for p in s.split(",") if p.strip()]
+    else:
+        return None
+    return set(parts) if parts else None
+
+def _group_key_unknown(gk):
+    if gk is None:
+        return True
+    s = str(gk).strip().lower()
+    return s in ("", "-", "none", "null")
+
+# FIX1/FIX2 (Codex Phase-5 review, HEAVY-MAX-2-WITH-COLLISION-GUARD-01): the
+# prior _heavy_collision() folded "unknown" into the prod predicate with AND
+# (`_is_prod_or_unknown(cand) and _is_prod_or_unknown(other)`), so an
+# unknown-risk/unknown-group candidate could co-run with a KNOWN-non-prod
+# Heavy as long as the other side wasn't also unknown/prod. That is the
+# opposite of fail-closed. Collide (serialize) if ANY of these hold, each an
+# INDEPENDENT clause -- never AND'd across sides:
+#   - unknown_risk(cand)  OR unknown_risk(other)   -> HARD
+#   - unknown_group(cand) OR unknown_group(other)  -> HARD
+#   - both_prod(cand, other)                       -> HARD
+#   - same_known_group(cand, other)                -> SOFT *only* when both
+#     sides are known-non-prod (neither unknown, neither carrying a prod-risk
+#     tag) -- any other same-known-group pairing (e.g. one side prod, one
+#     not) fails closed to HARD rather than being left unclassified.
+# Business rule preserved: KNOWN-non-prod + KNOWN-non-prod with DIFFERENT
+# known groups -> no collision, co-run allowed.
+# Returns "hard", "soft", or None (no collision).
+def _heavy_collision_kind(cand_gk, cand_tags, other_gk, other_tags):
+    cand_tags_set = _norm_tags(cand_tags)
+    other_tags_set = _norm_tags(other_tags)
+    cand_unknown_risk = cand_tags_set is None
+    other_unknown_risk = other_tags_set is None
+    cand_unknown_group = _group_key_unknown(cand_gk)
+    other_unknown_group = _group_key_unknown(other_gk)
+
+    cand_prod = bool(cand_tags_set & PROD_RISK_TAGS) if cand_tags_set else False
+    other_prod = bool(other_tags_set & PROD_RISK_TAGS) if other_tags_set else False
+    both_prod = cand_prod and other_prod
+
+    if cand_unknown_risk or other_unknown_risk or cand_unknown_group or other_unknown_group or both_prod:
+        return "hard"
+
+    same_known_group = str(cand_gk).strip().lower() == str(other_gk).strip().lower()
+    if same_known_group:
+        # Neither side is unknown or prod here (both branches above already
+        # returned) -- this is exactly the bypassable SOFT case.
+        return "soft"
+    return None
 
 try:
     with open(tasks_yaml, encoding="utf-8") as fh:
@@ -352,7 +428,7 @@ if explicit_ids:
     for tid in explicit_ids:
         t = by_id.get(tid)
         if t is None:
-            rows.append(("skip", tid, tid, "?", "", "not found in tasks.yaml", "", "", ""))
+            rows.append(("skip", tid, tid, "?", "", "not found in tasks.yaml", "", "", "", ""))
             continue
         ordered.append(t)
 else:
@@ -374,7 +450,10 @@ else:
     )
     ordered = candidates[:n]
 
-heavy_claimed_this_run = False
+# Heavy/strategic footprints claimed THIS run (F2): a 2nd Heavy selected in
+# the SAME fanout pass must collision-check against the 1st, not only
+# against live sessions from the active.yaml snapshot. list[(group_key, risk_tags)].
+heavy_claimed_this_run = []
 
 for t in ordered:
     tid = str(t.get("id"))
@@ -382,40 +461,67 @@ for t in ordered:
     cls, risk_tags, class_reason, lead_model, lead_effort = classify_task(t)
     cls_l = cls.lower()
     pri = t.get("priority", "")
+    cand_group_key = t.get("group_key")
 
     # Unconditional, never bypassed by --force: this IS the worktree-collision
     # safety net (two leads claiming the same task_id == two leads in the
     # same worktree, the exact failure this task exists to prevent).
     if tid in active_task_ids:
-        rows.append(("skip", tid, label, cls, pri, "already in active.yaml (session running)", risk_tags, lead_model, lead_effort))
+        rows.append(("skip", tid, label, cls, pri, "already in active.yaml (session running)", risk_tags, lead_model, lead_effort, cand_group_key))
         continue
 
     if explicit_ids and str(t.get("status", "")) != "queued":
-        rows.append(("skip", tid, label, cls, pri, f"not queued (status={t.get('status')})", risk_tags, lead_model, lead_effort))
+        rows.append(("skip", tid, label, cls, pri, f"not queued (status={t.get('status')})", risk_tags, lead_model, lead_effort, cand_group_key))
         continue
 
-    violation = None
+    # hard_violation: NEVER --force-bypassable (F5) -- hard_limit and
+    # heavy_max are ceilings, not policy defaults. soft_violation: the legacy
+    # solo kill-switch, per-class caps, and the collision-serialize decision
+    # remain --force-overridable, unchanged from prior behavior.
+    hard_violation = None
+    soft_violation = None
     if total_active >= hard_limit:
-        violation = f"hard_limit reached ({total_active}/{hard_limit})"
+        hard_violation = f"hard_limit reached ({total_active}/{hard_limit})"
     elif cls_l in ("heavy", "strategic"):
-        if heavy_strategic_solo and (total_active > 0 or heavy_active or heavy_claimed_this_run):
-            violation = "heavy_strategic_solo: another session already active/claimed — heavy must run alone"
+        claimed_heavy = heavy_count + len(heavy_claimed_this_run)
+        if heavy_strategic_solo:
+            if claimed_heavy > 0:
+                soft_violation = "heavy_strategic_solo: another Heavy/strategic session already active/claimed — heavy must run alone"
+        elif claimed_heavy >= heavy_max:
+            hard_violation = f"heavy_max reached ({claimed_heavy}/{heavy_max})"
+        else:
+            kinds = [
+                _heavy_collision_kind(cand_group_key, risk_tags, s.get("group_key"), s.get("risk_tags"))
+                for s in heavy_sessions
+            ] + [
+                _heavy_collision_kind(cand_group_key, risk_tags, prev_gk, prev_tags)
+                for (prev_gk, prev_tags) in heavy_claimed_this_run
+            ]
+            # FIX2: a HARD collision (both_prod OR any unknown risk/group) is
+            # NEVER --force-bypassable -- it goes in hard_violation. Only a
+            # SOFT collision (same known-non-prod group only) stays
+            # --force-overridable via soft_violation.
+            if "hard" in kinds:
+                hard_violation = "heavy collision (prod/unknown footprint) — serialize, not force-bypassable"
+            elif "soft" in kinds:
+                soft_violation = "heavy collision (same known group) — serialize"
     elif heavy_active or heavy_claimed_this_run:
-        violation = "heavy/strategic session active — solo rule blocks others"
+        soft_violation = "heavy/strategic session active — solo rule blocks others"
     elif cls_l == "light" and light_count >= light_max:
-        violation = f"light cap reached ({light_count}/{light_max})"
+        soft_violation = f"light cap reached ({light_count}/{light_max})"
     elif cls_l in ("standard", "standard-light") and standard_count >= standard_max:
-        violation = f"standard cap reached ({standard_count}/{standard_max})"
+        soft_violation = f"standard cap reached ({standard_count}/{standard_max})"
 
-    if violation and not force:
-        rows.append(("skip", tid, label, cls, pri, violation, risk_tags, lead_model, lead_effort))
+    violation = hard_violation or soft_violation
+    if violation and (hard_violation or not force):
+        rows.append(("skip", tid, label, cls, pri, violation, risk_tags, lead_model, lead_effort, cand_group_key))
         continue
 
     reason = f"selected ({class_reason})" if not violation else f"FORCE OVERRIDE — would have hit: {violation}"
-    rows.append(("launch", tid, label, cls, pri, reason, risk_tags, lead_model, lead_effort))
+    rows.append(("launch", tid, label, cls, pri, reason, risk_tags, lead_model, lead_effort, cand_group_key))
     total_active += 1
     if cls_l in ("heavy", "strategic"):
-        heavy_claimed_this_run = True
+        heavy_claimed_this_run.append((cand_group_key, risk_tags))
         heavy_active = True
     elif cls_l == "light":
         light_count += 1
@@ -443,7 +549,7 @@ FORCED_ANY=false
 NO_TITLE_COLUMN=false
 declare -a LAUNCH_IDS=() LAUNCH_CLASSES=() LAUNCH_LABELS=()
 declare -a LAUNCH_MODELS=() LAUNCH_EFFORTS=() LAUNCH_RISK_TAGS=() LAUNCH_REASONS=()
-declare -a LAUNCH_PROVIDERS=() LAUNCH_ROUTE_REASONS=()
+declare -a LAUNCH_PROVIDERS=() LAUNCH_ROUTE_REASONS=() LAUNCH_GROUP_KEYS=()
 declare -a REPORT_LINES=()
 
 SESSION_ROUTER="${LEADV2_SESSION_ROUTER:-$SCRIPT_DIR/leadv2-session-route.sh}"
@@ -452,16 +558,17 @@ if [[ ! -x "$SESSION_ROUTER" ]]; then
   exit 1
 fi
 
-while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9; do
+while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10; do
   [[ -z "$f1" ]] && continue
   if [[ "$f1" == "__NO_TITLE_COLUMN__" ]]; then
     [[ "$f2" == "True" ]] && NO_TITLE_COLUMN=true
     continue
   fi
   decision="$f1" tid="$f2" label="$f3" cls="$f4" pri="$f5" reason="$f6"
-  risk_tags="$f7" lead_model="$f8" lead_effort="$f9"
+  risk_tags="$f7" lead_model="$f8" lead_effort="$f9" group_key="$f10"
   # undo the "-" empty-field marker (see PLAN_TSV emission comment above)
   [[ "$risk_tags" == "-" ]] && risk_tags=""
+  [[ "$group_key" == "-" ]] && group_key=""
   # --lead-model CLI override wins over the classifier's per-task pick for
   # EVERY launch this run — opt-out valve for a founder-requested Opus child.
   # Effort is left as the classifier chose it (override is model-only).
@@ -517,6 +624,7 @@ while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9; do
     LAUNCH_RISK_TAGS+=("$risk_tags")
     LAUNCH_REASONS+=("$reason")
     LAUNCH_ROUTE_REASONS+=("$route_reason")
+    LAUNCH_GROUP_KEYS+=("$group_key")
     REPORT_LINES+=("- LAUNCH \`${label}\` (\`${tid}\`) — class=${cls}, priority=${pri}, provider=${route_provider}, model=${route_model}/${route_effort}, risk_tags=[${risk_tags}] — ${reason}; route=${route_reason}")
     [[ "$reason" == *"FORCE OVERRIDE"* ]] && FORCED_ANY=true
   else
@@ -606,6 +714,7 @@ _fanout_register_session() {
   local class_reason="${11:-}"
   local provider="${12:-claude}"
   local route_reason="${13:-}"
+  local group_key="${14:-}"
   local branch ts_now yaml_file lockfile session_id
   branch="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || printf -- 'unknown')"
   ts_now="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -613,18 +722,18 @@ _fanout_register_session() {
   lockfile="$(_leadv2_yaml_lockfile)"
   session_id="f-$(date -u +%Y%m%dT%H%M%SZ)-${pid_val}-$$"
 
+  local _reg_rc=0
   python3 - "$lockfile" "$yaml_file" "$session_id" "$tid" "$PROJECT_ROOT" \
     "$branch" "$ts_now" "$cls" "$pid_val" "$window_title" "$daemon_mode" \
     "docs/leadv2/tasks/${tid}/pulse.md" "$pid_pending" "$where" \
     "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" \
-    "$provider" "$route_reason" <<'PYEOF' \
-    || log "WARN: could not register ${tid} in active.yaml — session is running unregistered"
+    "$provider" "$route_reason" "$group_key" <<'PYEOF' || _reg_rc=$?
 import sys, os, fcntl, tempfile, yaml
 
 (lockfile, yaml_path, session_id, task_id, worktree, branch, started_at,
  cls, pid_str, window_title, daemon_mode_str, pulse_log, pid_pending_str,
  where, risk_tags, lead_model, lead_effort, class_reason,
- provider, route_reason) = sys.argv[1:21]
+ provider, route_reason, group_key) = sys.argv[1:22]
 
 pid_val = None if pid_str in ("null", "", "None") else int(pid_str)
 daemon_mode = daemon_mode_str.lower() in ("1", "true", "yes")
@@ -635,6 +744,48 @@ def pid_alive(p):
         os.kill(int(p), 0); return True
     except (TypeError, ValueError, ProcessLookupError, PermissionError):
         return False
+
+# FIX3 (HEAVY-MAX-2-WITH-COLLISION-GUARD-01 Codex Phase-5 review): the F6
+# under-lock re-count above only re-checks the numeric heavy_max/hard_limit
+# ceiling -- it never re-ran the pairwise group_key/risk_tags collision the
+# selection pass did OUTSIDE this lock. Two concurrent fanout invocations
+# each selecting a distinct Heavy from the same prod-risk/unknown footprint
+# can both pass the (unlocked) selection-time check and then both register
+# here successfully, because neither sees the other's row until after both
+# locks have already been acquired and released. Re-run ONLY the HARD half
+# of the collision predicate (both_prod OR any unknown risk/group -- see
+# _heavy_collision_kind in the selection pass above) under THIS lock, against
+# every live heavy/strategic session already in the locked snapshot. The SOFT
+# case (same known-non-prod group) is --force-bypassable by design and is not
+# re-enforced under lock, consistent with the selection-pass semantics.
+PROD_RISK_TAGS = {"publish", "deploy", "migration", "prod", "prod-deploy"}
+
+def _norm_tags_reg(raw):
+    if isinstance(raw, (list, tuple, set)):
+        parts = [str(x).strip().lower() for x in raw if str(x).strip()]
+    elif isinstance(raw, str):
+        s = raw.strip()
+        if not s or s.lower() in ("-", "none", "null"):
+            return None
+        parts = [p.strip().lower() for p in s.split(",") if p.strip()]
+    else:
+        return None
+    return set(parts) if parts else None
+
+def _group_key_unknown_reg(gk):
+    if gk is None:
+        return True
+    s = str(gk).strip().lower()
+    return s in ("", "-", "none", "null")
+
+def _hard_collision(cand_gk, cand_tags, other_gk, other_tags):
+    cand_tags_set = _norm_tags_reg(cand_tags)
+    other_tags_set = _norm_tags_reg(other_tags)
+    if cand_tags_set is None or other_tags_set is None:
+        return True
+    if _group_key_unknown_reg(cand_gk) or _group_key_unknown_reg(other_gk):
+        return True
+    return bool(cand_tags_set & PROD_RISK_TAGS) and bool(other_tags_set & PROD_RISK_TAGS)
 
 os.makedirs(os.path.dirname(lockfile), exist_ok=True)
 fd = open(lockfile, "a+")
@@ -651,8 +802,8 @@ try:
         # on every subsequent run (this literal only fires once, at first
         # bootstrap of a missing active.yaml).
         data = {"meta": {"schema_version": 2, "hard_limit": 2,
-                          "heavy_strategic_solo": True, "light_max": 3,
-                          "standard_max": 2, "rendered_at": ""},
+                          "heavy_max": 2, "heavy_strategic_solo": False,
+                          "light_max": 3, "standard_max": 2, "rendered_at": ""},
                 "sessions": []}
     data.setdefault("meta", {})
     sessions = data.setdefault("sessions", [])
@@ -663,6 +814,41 @@ try:
         sys.exit(0)
     if existing:
         sessions.remove(existing)
+
+    # F6 (HEAVY-MAX-2-WITH-COLLISION-GUARD-01): register-time re-count under
+    # the SAME lock -- the active.yaml snapshot the selection pass read was
+    # taken OUTSIDE this lock, so a concurrent fanout invocation may have
+    # registered a Heavy/strategic session (or hit hard_limit) in the
+    # meantime. Re-derive live counts from THIS locked read and refuse
+    # admission if it would exceed either ceiling. hard_limit/heavy_max are
+    # hard invariants (F5, never --force-bypassable), so no force flag is
+    # threaded through here -- only the numeric ceiling is re-verified.
+    meta_live = data.get("meta") or {}
+    heavy_max_live = int(meta_live.get("heavy_max", 2))
+    hard_limit_live = int(meta_live.get("hard_limit", 2))
+    live_sessions = [s for s in sessions if not s.get("stale")]
+    live_heavy = sum(1 for s in live_sessions if str(s.get("class", "")).lower() in ("heavy", "strategic"))
+    if cls.lower() in ("heavy", "strategic") and live_heavy >= heavy_max_live:
+        print(f"[fanout] LOST_RACE: {task_id} would exceed heavy_max under lock ({live_heavy}/{heavy_max_live}) -- refusing to register", file=sys.stderr)
+        sys.exit(3)
+    if len(live_sessions) >= hard_limit_live:
+        print(f"[fanout] LOST_RACE: {task_id} would exceed hard_limit under lock ({len(live_sessions)}/{hard_limit_live}) -- refusing to register", file=sys.stderr)
+        sys.exit(3)
+
+    # FIX3: pairwise HARD-collision re-check under THIS lock (see
+    # _hard_collision above) -- catches the exact race the numeric re-count
+    # above cannot: two concurrent fanout invocations each independently
+    # selecting a distinct Heavy with a prod-risk/unknown footprint, neither
+    # visible to the other's (unlocked) selection-time snapshot.
+    if cls.lower() in ("heavy", "strategic"):
+        for s in live_sessions:
+            if str(s.get("class", "")).lower() not in ("heavy", "strategic"):
+                continue
+            if _hard_collision(group_key, risk_tags, s.get("group_key"), s.get("risk_tags")):
+                print(f"[fanout] LOST_RACE: {task_id} HARD-collides under lock with live session task_id={s.get('task_id')} (prod/unknown footprint) -- refusing to register", file=sys.stderr)
+                sys.exit(3)
+
+    group_key_norm = None if group_key in ("", "null", "None", "-") else group_key
 
     sessions.append({
         "session_id": session_id, "task_id": task_id, "worktree": worktree,
@@ -676,6 +862,7 @@ try:
         # SUPERVISOR-RETRO-01 item 1: persisted classifier output — the
         # pre-launch decision that picked "class" above, kept for audit.
         "risk_tags": risk_tags,
+        "group_key": group_key_norm,
         "lead_model": lead_model,
         "lead_effort": lead_effort,
         "class_reason": class_reason,
@@ -721,12 +908,52 @@ finally:
     fcntl.flock(fd, fcntl.LOCK_UN)
     fd.close()
 PYEOF
+  if [[ "$_reg_rc" -eq 3 ]]; then
+    # FIX4: rc==3 means admission was refused under lock (F6 ceiling race OR
+    # FIX3 pairwise HARD-collision race). The caller already spawned the
+    # child process before this call -- returning 3 here tells it to KILL
+    # that child rather than leaving it running unregistered (the ceiling was
+    # cosmetic otherwise: it capped active.yaml rows, not actual processes).
+    log "WARN: ${tid} lost the register-time admission race under lock (F6/FIX3) — refusing to register; caller must terminate the spawned child"
+  elif [[ "$_reg_rc" -ne 0 ]]; then
+    log "WARN: could not register ${tid} in active.yaml — session is running unregistered"
+  fi
+  return "$_reg_rc"
+}
+
+# _fanout_kill_child <pid> <used_setsid> — FIX4: terminate a just-spawned
+# child whose registration was refused under lock (rc==3 from
+# _fanout_register_session), so the heavy_max/hard_limit ceiling caps actual
+# running sessions, not just active.yaml rows. When the child was started via
+# setsid it is its own session/process-group leader (pid == pgid), so kill
+# the whole group (`-pid`) to take any grandchildren (the runner's own
+# subprocess tree) with it; TERM first, KILL after a short grace window if it
+# didn't die. Without setsid (macOS fallback with no setsid binary) the child
+# shares this script's process group, so killing the group would be
+# collateral damage -- kill only the specific pid in that case.
+_fanout_kill_child() {
+  local pid="$1" used_setsid="${2:-false}"
+  [[ -z "$pid" || "$pid" == "null" ]] && return 0
+  if [[ "$used_setsid" == "true" ]]; then
+    kill -TERM -- "-${pid}" 2>/dev/null || true
+  else
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+  sleep 0.3
+  if kill -0 "$pid" 2>/dev/null; then
+    if [[ "$used_setsid" == "true" ]]; then
+      kill -KILL -- "-${pid}" 2>/dev/null || true
+    else
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
 }
 
 launch_headless() {
   local tid="$1" cls="$2" lead_model="${3:-sonnet}" lead_effort="${4:-medium}"
   local risk_tags="${5:-}" class_reason="${6:-}"
   local provider="${7:-claude}" route_reason="${8:-}"
+  local group_key="${9:-}"
   local task_dir="${PROJECT_ROOT}/docs/handoff/${tid}"
   mkdir -p "$task_dir"
   local logf="${task_dir}/fanout.log"
@@ -751,7 +978,9 @@ launch_headless() {
     log_error "leadv2-session-runner.sh missing/not executable at ${_runner} — refusing an unguarded one-shot launch"
     return 1
   fi
+  local _used_setsid=false
   if command -v setsid >/dev/null 2>&1; then
+    _used_setsid=true
     ( cd "$PROJECT_ROOT" && \
       exec env LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
         LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
@@ -769,8 +998,13 @@ launch_headless() {
   local pid=$!
   log "headless launch: task=${tid} pid=${pid} provider=${provider} model=${lead_model}/${lead_effort} log=${logf}"
 
+  local _reg_rc=0
   _fanout_register_session "$tid" "$cls" "$pid" "leadv2: ${tid}" "true" "false" "headless" \
-    "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason"
+    "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason" "$group_key" || _reg_rc=$?
+  if [[ "$_reg_rc" -eq 3 ]]; then
+    log "WARN: ${tid} admission refused under lock (F6/FIX3) — killing spawned child pid=${pid} (setsid=${_used_setsid})"
+    _fanout_kill_child "$pid" "$_used_setsid"
+  fi
 }
 
 # Escape a string for safe interpolation into an AppleScript double-quoted
@@ -825,6 +1059,7 @@ launch_windowed() {
   local tid="$1" cls="$2" lead_model="${3:-sonnet}" lead_effort="${4:-medium}"
   local risk_tags="${5:-}" class_reason="${6:-}"
   local provider="${7:-claude}" route_reason="${8:-}"
+  local group_key="${9:-}"
   if [[ "$(uname -s)" != "Darwin" ]]; then
     log_error "windowed launch requires macOS (osascript). Use --headless on this platform."
     exit 1
@@ -894,14 +1129,24 @@ OSA
     sleep 0.25
   done
 
+  local _reg_rc=0
   if [[ -n "$_resolved_pid" ]]; then
     log "windowed launch: task=${tid} resolved pid=${_resolved_pid} model=${lead_model}/${lead_effort}"
     _fanout_register_session "$tid" "$cls" "$_resolved_pid" "$title" "false" "false" "terminal" \
-      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason"
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason" "$group_key" || _reg_rc=$?
+    if [[ "$_reg_rc" -eq 3 ]]; then
+      # FIX4: this script never spawned the resolved pid itself (osascript
+      # handed it to Terminal/iTerm2), so there is no setsid process-group we
+      # own -- kill only the specific resolved pid, never a group.
+      log "WARN: ${tid} admission refused under lock (F6/FIX3) — killing spawned child pid=${_resolved_pid}"
+      _fanout_kill_child "$_resolved_pid" "false"
+    fi
   else
     log "WARN: could not resolve pid for task=${tid} within 10s — registering pid_pending=true"
+    # No resolved pid to kill on refusal here -- pid_pending=true already
+    # marks this row for the stale-sweeper's grace-window handling.
     _fanout_register_session "$tid" "$cls" "null" "$title" "false" "true" "terminal" \
-      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason"
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason" "$group_key" || true
   fi
 }
 
@@ -918,6 +1163,7 @@ launch_tmux() {
   local tid="$1" cls="$2" lead_model="${3:-sonnet}" lead_effort="${4:-medium}"
   local risk_tags="${5:-}" class_reason="${6:-}"
   local provider="${7:-claude}" route_reason="${8:-}"
+  local group_key="${9:-}"
   local window="$tid"
   local target="${TMUX_SESSION_NAME}:${window}"
   local task_dir="${PROJECT_ROOT}/docs/handoff/${tid}"
@@ -1000,14 +1246,26 @@ launch_tmux() {
     sleep 0.25
   done
 
+  local _reg_rc=0
   if [[ -n "$_resolved_pid" ]]; then
     log "tmux launch: task=${tid} window=${window} resolved pid=${_resolved_pid} provider=${provider} model=${lead_model}/${lead_effort}"
     _fanout_register_session "$tid" "$cls" "$_resolved_pid" "$window" "true" "false" "tmux" \
-      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason"
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason" "$group_key" || _reg_rc=$?
+    if [[ "$_reg_rc" -eq 3 ]]; then
+      # FIX4: kill the tmux window outright (cleaner than a bare pid kill for
+      # this backend -- it also tears down the pane/shell, not just the
+      # exec'd claude process) rather than leaving an orphaned, unregistered
+      # window running against the ceiling that just refused it.
+      log "WARN: ${tid} admission refused under lock (F6/FIX3) — killing tmux window ${target}"
+      tmux kill-window -t "$target" 2>/dev/null || true
+    fi
   else
     log "WARN: could not resolve pid for task=${tid} within 10s — registering pid_pending=true"
+    # No resolved pid/confirmed window occupant to kill on refusal here --
+    # pid_pending=true already marks this row for the stale-sweeper's
+    # grace-window handling.
     _fanout_register_session "$tid" "$cls" "null" "$window" "true" "true" "tmux" \
-      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason"
+      "$risk_tags" "$lead_model" "$lead_effort" "$class_reason" "$provider" "$route_reason" "$group_key" || true
   fi
 
   TMUX_LAUNCHED_IDS+=("$tid")
@@ -1022,10 +1280,11 @@ for i in "${!LAUNCH_IDS[@]}"; do
   risk_tags="${LAUNCH_RISK_TAGS[$i]:-}"
   class_reason="${LAUNCH_REASONS[$i]:-}"
   route_reason="${LAUNCH_ROUTE_REASONS[$i]:-}"
+  group_key="${LAUNCH_GROUP_KEYS[$i]:-}"
   case "$BACKEND" in
-    headless) launch_headless "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" "$provider" "$route_reason" ;;
-    tmux)     launch_tmux "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" "$provider" "$route_reason" ;;
-    windows)  launch_windowed "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" "$provider" "$route_reason" ;;
+    headless) launch_headless "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" "$provider" "$route_reason" "$group_key" ;;
+    tmux)     launch_tmux "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" "$provider" "$route_reason" "$group_key" ;;
+    windows)  launch_windowed "$tid" "$cls" "$lead_model" "$lead_effort" "$risk_tags" "$class_reason" "$provider" "$route_reason" "$group_key" ;;
   esac
 done
 
