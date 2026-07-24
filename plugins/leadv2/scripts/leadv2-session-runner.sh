@@ -118,7 +118,7 @@ RETRY_SLEEP_S="${LEADV2_RUNNER_RETRY_SLEEP_S:-5}"
 # LOGF (rc!=0, no fresh stream-json bytes) mean the resumed session is not
 # making progress — stop early instead of burning the full MAX_ATTEMPTS.
 NOOP_MAX="${LEADV2_RUNNER_NOOP_MAX:-3}"
-STALL_MAX="${LEADV2_RUNNER_STALL_MAX:-2}"
+STALL_MAX="${LEADV2_RUNNER_STALL_MAX:-6}"
 CLAUDE_BIN="${LEADV2_FANOUT_CLAUDE_BIN:-claude}"
 CLAUDE_MAX_TURNS="${LEADV2_CLAUDE_MAX_TURNS:-30}"
 CLAUDE_MAX_BUDGET_USD="${LEADV2_CLAUDE_MAX_BUDGET_USD:-}"
@@ -262,7 +262,7 @@ while (( attempt < MAX_ATTEMPTS )); do
 
   log "attempt ${attempt}/${MAX_ATTEMPTS}: launching claude -p (session-id=${SESSION_ID}, flag=${session_flag[0]})"
   progress_before="$("$PROGRESS_TOOL" "$TASK_ID" 2>/dev/null || printf -- 'unknown-before')"
-  log_size_before="$(wc -c <"$LOGF" 2>/dev/null || echo 0)"
+  log_size_before="$( { [ -f "$LOGF" ] && wc -c <"$LOGF"; } 2>/dev/null || echo 0)"
   claude_args=(
     -p
     "${session_flag[@]}"
@@ -314,7 +314,7 @@ while (( attempt < MAX_ATTEMPTS )); do
   # NO-NEW-OUTPUT-STOP: a resume that appended nothing new to LOGF made no
   # progress. N consecutive no-output resumes mean further resumes are
   # wasted cycles on a settled session — stop before MAX_ATTEMPTS.
-  log_size_after="$(wc -c <"$LOGF" 2>/dev/null || echo 0)"
+  log_size_after="$( { [ -f "$LOGF" ] && wc -c <"$LOGF"; } 2>/dev/null || echo 0)"
   if (( log_size_after <= log_size_before )); then
     noop_streak=$(( noop_streak + 1 ))
     log "attempt ${attempt} produced no new output (noop_streak=${noop_streak}/${NOOP_MAX})"
