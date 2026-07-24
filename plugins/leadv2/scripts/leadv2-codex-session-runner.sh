@@ -7,8 +7,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
-PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}}}"
-readonly PROJECT_ROOT
+# FIX-HEADLESS-RUNNER-01: guard so a second entry into this script body (same
+# process) never hits "readonly variable"; also fixed fallback depth — one
+# level up from scripts/, not two (this repo's scripts/ sits directly under
+# repo root; `../..` overshot into the parent-of-repo directory).
+if ! declare -p PROJECT_ROOT 2>/dev/null | grep -q -- '-r'; then
+  PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}}}"
+  readonly PROJECT_ROOT
+fi
 
 log() { printf -- '[leadv2-codex-session-runner] %s\n' "$*" >&2; }
 log_error() { printf -- '[leadv2-codex-session-runner] ERROR: %s\n' "$*" >&2; }
@@ -37,7 +43,7 @@ export LEADV2_TASK_ID="$TASK_ID"
 phase67_active() {
   local active phase
   [[ "${LEADV2_PHASE:-}" == "deploy" || "${LEADV2_PHASE:-}" == "verify" ]] && return 0
-  active="$(PROJECT_ROOT="$PROJECT_ROOT" "$SCRIPT_DIR/leadv2-state-path.sh" --no-link active.yaml 2>/dev/null)" || return 1
+  active="$(env PROJECT_ROOT="$PROJECT_ROOT" "$SCRIPT_DIR/leadv2-state-path.sh" --no-link active.yaml 2>/dev/null)" || return 1
   phase="$(python3 - "$active" "$TASK_ID" <<'PYEOF' 2>/dev/null
 import sys
 try:

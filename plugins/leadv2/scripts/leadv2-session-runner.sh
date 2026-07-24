@@ -57,8 +57,22 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
-PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-readonly PROJECT_ROOT
+# BUG-A/BUG-B fix (FIX-HEADLESS-RUNNER-01): two prior defects collapsed into
+# one guarded block. (1) `readonly PROJECT_ROOT` unconditionally errored if
+# this variable was already readonly in the process (e.g. re-sourced) — guard
+# with declare -p so the block is a no-op on a second entry. (2) the fallback
+# never checked LEADV2_PROJECT_ROOT / CLAUDE_PROJECT_DIR (unlike
+# leadv2-fanout.sh and leadv2-codex-session-runner.sh, which both do) AND used
+# `$SCRIPT_DIR/../..` — two levels up from scripts/, one too many for this
+# repo's flat `<repo>/scripts/` layout. Net effect verified live: headless
+# children launched `claude -p` with cwd=/Users/.../Projects (parent of the
+# repo) instead of the repo root, so `/leadv2 <task>` printed "Unknown
+# command: /leadv2" and exited rc=0 every attempt — no worktree, no phase
+# progress, eventual stall-kill. Fixed depth to `$SCRIPT_DIR/..` (one level).
+if ! declare -p PROJECT_ROOT 2>/dev/null | grep -q -- '-r'; then
+  PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}}}"
+  readonly PROJECT_ROOT
+fi
 
 log() { printf '[leadv2-session-runner] %s\n' "$*" >&2; }
 log_error() { printf '[leadv2-session-runner] ERROR: %s\n' "$*" >&2; }
@@ -194,7 +208,10 @@ PYEOF
 phase67_active() {
   local active phase
   [[ "${LEADV2_PHASE:-}" == "deploy" || "${LEADV2_PHASE:-}" == "verify" ]] && return 0
-  active="$(PROJECT_ROOT="$PROJECT_ROOT" "$SCRIPT_DIR/leadv2-state-path.sh" --no-link active.yaml 2>/dev/null)" || return 1
+  # `env VAR=val cmd` (not a bare `VAR=val cmd` prefix) — a prefix assignment
+  # to a readonly PROJECT_ROOT throws "readonly variable" noise on every call;
+  # `env` passes it as a plain argument instead, sidestepping the restriction.
+  active="$(env PROJECT_ROOT="$PROJECT_ROOT" "$SCRIPT_DIR/leadv2-state-path.sh" --no-link active.yaml 2>/dev/null)" || return 1
   phase="$(python3 - "$active" "$TASK_ID" <<'PYEOF' 2>/dev/null
 import sys
 try:
