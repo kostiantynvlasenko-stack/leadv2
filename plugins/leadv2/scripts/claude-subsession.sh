@@ -309,6 +309,11 @@ CLAUDE_ARGS=(
   --model "$MODEL"
   --session-id "$SESSION_ID"
   --output-format stream-json
+  # `-p` + stream-json REQUIRES --verbose in the current CLI; without it every
+  # subsession died instantly ("requires --verbose" written into the stream file),
+  # silently killing the sonnet dispatch channel. Found 2026-07-25 via a dispatched
+  # worker whose pid was never alive. Stream is machine-parsed, not human-read.
+  --verbose
   --max-turns "${LEADV2_SUBSESSION_MAX_TURNS:-25}"
   --permission-mode acceptEdits
 )
@@ -836,7 +841,12 @@ if [[ "$WAIT" == "1" ]]; then
   fi
 else
   _start_epoch=$(date +%s)
-  run_subsession &
+  # Detach the worker's std fds from whatever the CALLER handed us. Without this the
+  # forked subshell keeps the caller's stdout pipe open, so a caller using command
+  # substitution (leadv2-dispatch-code.sh) BLOCKS for the worker's entire lifetime
+  # instead of getting the PID handle back immediately. claude's own output already
+  # goes to STREAM_OUT inside run_subsession. Found 2026-07-25.
+  run_subsession </dev/null >/dev/null 2>&1 &
   PID=$!
 
   # W6-fix: async cost-recorder (was: background subshell may not fire if parent exits first).
