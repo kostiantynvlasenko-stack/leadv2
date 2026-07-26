@@ -151,10 +151,11 @@ fi
 # reads is worthless — THIS is what makes the child LOOK. `tmux send-keys`
 # does not submit (verified 4 ways); this replaces it.
 #
-# Ack (this step, S4b): read the file THEN move to inbox/done/ so it is not
-# re-surfaced. RACE WINDOW: read-then-move lets a concurrent fire (parent +
-# subagent on the same inbox) read the same file before either moves it,
-# double-delivering. S4c closes this with rename-first atomicity.
+# Ack (S4c, ATOMIC rename-first): mv the file to inbox/done/ FIRST — mv(2) on
+# the same APFS filesystem is the linearization point, so exactly one fire
+# wins; a concurrent fire (parent+subagent on the same inbox) hits ENOENT and
+# the loser skips. Then read from done/. This is exactly-once delivery even
+# under concurrency. Supersedes S4b's read-then-move (double-deliver race).
 #
 # HONEST LIMIT: a WEDGED child fires no PostToolUse and never polls — VOICE
 # reaches LIVE children only. This is a heartbeat-driven poll, not an interrupt.
@@ -177,9 +178,11 @@ if [[ ${#_inbox_files[@]} -gt 0 ]]; then
   for _f in "${_inbox_files[@]}"; do
     [[ "$_n_surfaced" -ge "$_max_surface" ]] && break
     _base="$(basename "$_f")"
-    # S4b: read content FIRST, then ack. (Race window here — S4c reorders.)
-    _content="$(cat "$_f" 2>/dev/null || true)"
+    # S4c: atomic ack — rename FIRST. mv is the linearization point: only one
+    # fire wins; a concurrent fire's mv hits ENOENT and skips. Then read from
+    # done/. Exactly-once even under parent+subagent concurrency on one inbox.
     if mv -f "$_f" "$_done_dir/$_base" 2>/dev/null; then
+      _content="$(cat "$_done_dir/$_base" 2>/dev/null || true)"
       _voice_ctx="${_voice_ctx}--- ${_base} ---"$'\n'"${_content}"$'\n\n'
       _n_surfaced=$((_n_surfaced + 1))
     fi
