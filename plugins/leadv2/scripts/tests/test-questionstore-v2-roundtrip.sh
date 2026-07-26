@@ -10,6 +10,13 @@
 #   3. double-answer on the same qid is rejected (exit 4, ALREADY_ANSWERED)
 #   4. answering with an option not in options[] is rejected (exit 3)
 #   5. answering a nonexistent qid is rejected (exit 5)
+#   6. bash -n syntax check
+#   7. QUESTION-BRIDGE-01: control-plane WRITE failure degrades to the legacy
+#      handoff store instead of crashing; leadv2-reply.sh answers it and the
+#      ask poll loop picks up the chosen option (exit 0).
+#   8. QUESTION-BRIDGE-01: control-plane AND legacy writes both fail ->
+#      LEADV2_ASK_DEGRADED_TO_DEFAULT marker on stderr, FIRST --option label
+#      on stdout, exit 0 (never a crash).
 #
 # Portable: no GNU-only date/sed -i/timeout/flock — sandboxed via
 # LEADV2_STATE_ROOT / PROJECT_ROOT env overrides (leadv2-state-path.sh).
@@ -22,6 +29,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/leadv2-temp.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASK_SH="${SCRIPT_DIR}/../leadv2-ask.sh"
 ANSWER_SH="${SCRIPT_DIR}/../leadv2-answer.sh"
+REPLY_SH="${SCRIPT_DIR}/../leadv2-reply.sh"
 
 PASS=0; FAIL=0; ERRORS=()
 log()  { printf -- '[TEST] %s\n' "$*"; }
@@ -170,14 +178,105 @@ test_5_missing_qid_rejected() {
 test_6_syntax() {
   log "Test 6: bash -n syntax check"
   bash -n "$ASK_SH" 2>/dev/null && bash -n "$ANSWER_SH" 2>/dev/null \
-    && pass "Test 6: bash -n OK (ask + answer)" \
+    && bash -n "$REPLY_SH" 2>/dev/null \
+    && pass "Test 6: bash -n OK (ask + answer + reply)" \
     || fail "Test 6: bash -n FAILED"
+}
+
+# ── Test 7: control-plane write failure -> legacy fallback (QUESTION-BRIDGE-01)
+
+test_7_control_plane_failure_fallback() {
+  log "Test 7: control-plane write failure degrades to legacy handoff store (no crash)"
+  # Force the control-plane WRITE to fail: pre-create $STATE_ROOT/questions and
+  # chmod it 000 so `mkdir -p` is an idempotent no-op but the python write
+  # (open()/flock() on .write.lock) raises EACCES -> exit non-zero -> fallback.
+  local bad_state="${TMP_DIR}/badstate7"
+  mkdir -p "${bad_state}/questions"
+  chmod 000 "${bad_state}/questions"
+  local work_root="${TMP_DIR}/work7"
+  mkdir -p "$work_root"
+
+  local task_id="QB1-T7"
+  local async_dir="${work_root}/docs/handoff/${task_id}/questions-async"
+
+  # Blocking ask (tiny poll interval, short timeout). Backgrounded because it
+  # BLOCKS on the legacy poll loop until we answer it from the side below.
+  LEADV2_STATE_ROOT="$bad_state" LEADV2_PROJECT_ROOT="$work_root" PROJECT_ROOT="$work_root" \
+    LEADV2_ASK_POLL_INTERVAL=1 \
+    bash "$ASK_SH" "$task_id" "Pick one" --option "a|Alpha" --option "b|Beta" \
+    --phase build --timeout 15 \
+    >"${TMP_DIR}/ask7.out" 2>"${TMP_DIR}/ask7.err" &
+  local ask_pid=$!
+
+  # Wait for the legacy fallback pending file to land (write succeeded = no crash).
+  local i got_pending=""
+  for i in $(seq 1 20); do
+    [[ -d "$async_dir" ]] && got_pending="$(find "$async_dir" -maxdepth 1 -name '*-pending.yaml' 2>/dev/null | head -1)"
+    [[ -n "$got_pending" ]] && break
+    sleep 0.3
+  done
+
+  if [[ -z "$got_pending" ]]; then
+    chmod 700 "${bad_state}/questions" 2>/dev/null || true
+    kill "$ask_pid" 2>/dev/null || true; wait "$ask_pid" 2>/dev/null || true
+    fail "Test 7: legacy fallback pending file not written under ${async_dir}"
+    return
+  fi
+
+  local legacy_qid; legacy_qid="$(basename "$got_pending")"
+  legacy_qid="${legacy_qid%-pending.yaml}"
+
+  # Answer it via leadv2-reply.sh against the SAME PROJECT_ROOT the ask used
+  # (option labels are single lowercase letters because reply enforces ^[a-z]$).
+  local reply_rc
+  LEADV2_PROJECT_ROOT="$work_root" \
+    bash "$REPLY_SH" --task-id "$task_id" "$legacy_qid" "b" >"${TMP_DIR}/reply7.out" 2>&1 && reply_rc=0 || reply_rc=$?
+
+  # Wait for the ask poll loop to observe the answer and exit (bounded by the
+  # 15s --timeout even if the pickup somehow fails).
+  wait "$ask_pid" 2>/dev/null || true
+  local chosen; chosen="$(cat "${TMP_DIR}/ask7.out" 2>/dev/null || true)"
+  chmod 700 "${bad_state}/questions" 2>/dev/null || true
+
+  if [[ "$reply_rc" -eq 0 && "$chosen" == "b" ]]; then
+    pass "Test 7: fallback pending written, reply answered, ask poll returned chosen=b (no crash)"
+  else
+    fail "Test 7: reply_rc=$reply_rc chosen='$chosen' (expected b). err=$(head -c 200 "${TMP_DIR}/ask7.err" 2>/dev/null)"
+  fi
+}
+
+# ── Test 8: double failure -> degrade-to-default (QUESTION-BRIDGE-01) ────────
+
+test_8_double_failure_degrades_to_default() {
+  log "Test 8: control-plane AND legacy writes both fail -> degrade-to-default (exit 0)"
+  # Control-plane: questions dir chmod-000 -> write fails -> fallback.
+  local bad_state="${TMP_DIR}/badstate8"
+  mkdir -p "${bad_state}/questions"; chmod 000 "${bad_state}/questions"
+  # Legacy: entire PROJECT_ROOT chmod-000 -> docs/handoff can't be created.
+  local dead_root="${TMP_DIR}/deadroot8"
+  mkdir -p "$dead_root"; chmod 000 "$dead_root"
+
+  local out err rc
+  LEADV2_STATE_ROOT="$bad_state" LEADV2_PROJECT_ROOT="$dead_root" PROJECT_ROOT="$dead_root" \
+    bash "$ASK_SH" "QB1-T8" "Pick one" --option "a|Alpha" --option "b|Beta" \
+    >"${TMP_DIR}/ask8.out" 2>"${TMP_DIR}/ask8.err" && rc=0 || rc=$?
+
+  out="$(cat "${TMP_DIR}/ask8.out" 2>/dev/null || true)"
+  err="$(cat "${TMP_DIR}/ask8.err" 2>/dev/null || true)"
+  chmod 700 "${bad_state}/questions" "$dead_root" 2>/dev/null || true
+
+  if [[ "$rc" -eq 0 && "$out" == "a" && "$err" == *"LEADV2_ASK_DEGRADED_TO_DEFAULT"* ]]; then
+    pass "Test 8: double-failure -> exit 0, stdout=first option 'a', DEGRADED marker on stderr"
+  else
+    fail "Test 8: rc=$rc out='$out' err='$(printf '%s' "$err" | head -c 160)'"
+  fi
 }
 
 main() {
   log "=== question-store V2 round-trip unit tests ==="
   log "ask: $ASK_SH"
   log "answer: $ANSWER_SH"
+  log "reply: $REPLY_SH"
   echo ""
   test_6_syntax
   test_1_ask_writes_pending
@@ -185,6 +284,8 @@ main() {
   test_3_double_answer_rejected
   test_4_invalid_option_rejected
   test_5_missing_qid_rejected
+  test_7_control_plane_failure_fallback
+  test_8_double_failure_degrades_to_default
   echo ""
   log "=== Results: PASS=$PASS FAIL=$FAIL ==="
   if [[ "${#ERRORS[@]}" -gt 0 ]]; then
