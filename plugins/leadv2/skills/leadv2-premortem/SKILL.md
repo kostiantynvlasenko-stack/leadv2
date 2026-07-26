@@ -1,6 +1,6 @@
 ---
 name: leadv2-premortem
-description: "[internal] Bash+heuristic probability table for build/deploy success and rollback risk; no LLM cost."
+description: "[internal] Estimates build/deploy success and rollback risk from a bash heuristic table, no LLM cost. Triggers: before Gate 1 and before Deploy."
 allowed-tools:
   - Read
   - Bash

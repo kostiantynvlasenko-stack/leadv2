@@ -1,6 +1,6 @@
 ---
 name: leadv2-memory-gc
-description: "[internal] Memory GC pass: finds stale paths, duplicate entries, and archive candidates in leadv2 memory stores."
+description: "[internal] Finds stale paths, duplicate entries, and archive candidates in leadv2 memory stores. Triggers: memory index over its line cap, or an explicit GC request."
 allowed-tools:
   - Read
   - Bash

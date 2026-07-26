@@ -1,6 +1,6 @@
 ---
 name: leadv2-token-discipline
-description: "[internal] Token discipline for every phase: bounded reads/output, compact handoffs, quiet pulses, cache telemetry, and capped spawns."
+description: "[internal] Keeps context bounded in every phase: bounded reads/output, compact handoffs, quiet pulses, cache telemetry, and capped spawns. Triggers: entering any phase that spawns subagents or reads worker output."
 allowed-tools:
   - Read
   - Bash

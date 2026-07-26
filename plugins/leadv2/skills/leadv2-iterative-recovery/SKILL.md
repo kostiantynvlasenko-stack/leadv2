@@ -1,6 +1,6 @@
 ---
 name: leadv2-iterative-recovery
-description: "[internal] Layer-peeling recovery for changing blockers: per-layer verify/commit, hard cap five iterations."
+description: "[internal] Peels one failure layer at a time, verifying and committing each. Triggers: a blocker that changes shape after every fix; hard cap five iterations."
 allowed-tools:
   - Read
   - Write

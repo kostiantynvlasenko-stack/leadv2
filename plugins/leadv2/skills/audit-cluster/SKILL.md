@@ -1,6 +1,6 @@
 ---
 name: audit-cluster
-description: 3-role per-page audit (QA, PO, Designer) producing PASS/PARTIAL/FAIL punch list per page. Used by frontend-screenshot-audit and standalone.
+description: "Audits one page from three roles (QA, PO, Designer) into a PASS/PARTIAL/FAIL punch list. Triggers: a per-page UI audit, standalone or called from frontend-screenshot-audit."
 triggers:
   - аудит страниц
   - punch list UI

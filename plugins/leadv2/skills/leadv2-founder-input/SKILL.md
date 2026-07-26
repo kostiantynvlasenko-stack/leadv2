@@ -1,6 +1,6 @@
 ---
 name: leadv2-founder-input
-description: "[internal] Composes structured decision file and waits for founder choice."
+description: "[internal] Puts a fork to the founder and blocks until they choose, via a structured decision file. Triggers: a decision the lead must not make alone — irreversible, or founder-owned scope."
 allowed-tools:
   - Read
   - Write

@@ -1,6 +1,6 @@
 ---
 name: leadv2-close
-description: "[internal] Phase 8 — cost summary, lead-reflect entry, outcome-watch scheduling for Heavy tasks."
+description: "[internal] Phase 8 Close — closes a finished task: cost summary, lead-reflect entry, outcome-watch scheduling for Heavy tasks. Triggers: after Verify passes."
 allowed-tools:
   - Read
   - Write

@@ -1,6 +1,6 @@
 ---
 name: leadv2-priors
-description: "[internal] Load the fresh, phase-relevant slice of operator priors for classify/plan/build/review/judge."
+description: "[internal] Loads only the phase-relevant slice of operator priors. Triggers: entering classify, plan, build, review, or judge."
 allowed-tools:
   - Read
   - Bash

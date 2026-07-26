@@ -1,6 +1,6 @@
 ---
 name: leadv2-verify
-description: "[internal] Phase 7 gate: needs a real prod signal + re-probed 0/null before close. Skip if Deploy circuit-broke (→ Recovery)."
+description: "[internal] Phase 7 anti-lying-green gate — proves the change works in prod from a live signal, re-probing every 0/null before close. Triggers: after Deploy succeeds; skips if Deploy circuit-broke (→ Recovery)."
 allowed-tools:
   - Read
   - Write
