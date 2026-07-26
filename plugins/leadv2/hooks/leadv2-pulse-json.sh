@@ -141,4 +141,57 @@ if ! mv -f "$_tmp" "$pulse" 2>/dev/null; then
   _bail "mv $_tmp -> $pulse failed"
 fi
 
+# ── VOICE: surface pending inbox messages (S4b of 1b07a6fd0490) ───────────
+# The child polls its OWN inbox by virtue of this hook firing on every tool
+# call. Pending messages in docs/handoff/<tid>/inbox/*.md are surfaced back
+# into the session as PostToolUse additionalContext. PROVEN LIVE on Claude
+# Code 2.1.220: hookSpecificOutput.additionalContext is delivered as a
+# <system-reminder> immediately after the tool result (the child quoted a
+# dynamic pid/ts marker verbatim in the empirical test). An inbox nothing
+# reads is worthless — THIS is what makes the child LOOK. `tmux send-keys`
+# does not submit (verified 4 ways); this replaces it.
+#
+# Ack (this step, S4b): read the file THEN move to inbox/done/ so it is not
+# re-surfaced. RACE WINDOW: read-then-move lets a concurrent fire (parent +
+# subagent on the same inbox) read the same file before either moves it,
+# double-delivering. S4c closes this with rename-first atomicity.
+#
+# HONEST LIMIT: a WEDGED child fires no PostToolUse and never polls — VOICE
+# reaches LIVE children only. This is a heartbeat-driven poll, not an interrupt.
+#
+# Hot path stays fast + fail-open: empty inbox → no jq, ~0 added cost. jq is
+# used ONLY when there are messages to escape (arbitrary lead-written content).
+# Cap at _max_surface per fire to bound additionalContext size.
+inbox_dir="$pulse_dir/inbox"
+_voice_ctx=""
+_n_surfaced=0
+_max_surface=5
+
+shopt -s nullglob
+_inbox_files=("$inbox_dir"/*.md)
+shopt -u nullglob
+
+if [[ ${#_inbox_files[@]} -gt 0 ]]; then
+  _done_dir="$inbox_dir/done"
+  mkdir -p "$_done_dir" 2>/dev/null || true
+  for _f in "${_inbox_files[@]}"; do
+    [[ "$_n_surfaced" -ge "$_max_surface" ]] && break
+    _base="$(basename "$_f")"
+    # S4b: read content FIRST, then ack. (Race window here — S4c reorders.)
+    _content="$(cat "$_f" 2>/dev/null || true)"
+    if mv -f "$_f" "$_done_dir/$_base" 2>/dev/null; then
+      _voice_ctx="${_voice_ctx}--- ${_base} ---"$'\n'"${_content}"$'\n\n'
+      _n_surfaced=$((_n_surfaced + 1))
+    fi
+  done
+fi
+
+if [[ "$_n_surfaced" -gt 0 ]]; then
+  # jq -Rs JSON-escapes the whole blob (newlines, quotes, backslashes in the
+  # lead-written message). Fail-open: a missing/broken jq drops the injection
+  # but NOT the pulse.json write above (already committed to disk).
+  printf '[LEADV2 VOICE] %d new message(s) from lead (acked to inbox/done/):\n\n%s' \
+    "$_n_surfaced" "$_voice_ctx" \
+    | jq -Rs -c '{hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:.}}' 2>/dev/null || true
+fi
 exit 0
