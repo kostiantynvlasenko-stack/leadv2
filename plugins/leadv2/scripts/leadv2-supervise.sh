@@ -425,6 +425,78 @@ def pid_alive(pid_val):
     except (TypeError, ValueError, ProcessLookupError, PermissionError):
         return False
 
+# ── EYES verdict (S2 of 1b07a6fd0490): replace the inert `stale` column ─────
+# G3 root cause: the `stale` field has NO writer anywhere in the live tree
+# (`leadv2-active-registry.sh mark_stale` has zero callers), so it is false
+# forever and every registered session renders "active" unconditionally.
+# This computes a real per-row verdict from:
+#   (a) pulse.json age (the S1 hook writes it on every tool call), with
+#       tool-type-aware thresholds (D4 mitigation): fast tools ~seconds,
+#       declared-long tools (Agent/Task/Monitor) ~minutes.
+#   (b) kill -0 process existence — strongest signal, overrides the rest.
+#   (c) `ps -o stat= -p <pid>` (macOS BSD; no GNU flags) — STAT containing
+#       'T' = STOPPED = wedged (D2). CAVEAT (D2): this detects ONLY the
+#       kill -STOP failure mode; passing it does NOT prove the real incident
+#       (alive, never STOPped, silently stuck 25-40min) is detected.
+# Every returned reason NAMES its artifact (pulse.json path / pid / STAT),
+# per plan.S2 `must_print`. References `now`, `handoff_dir` at call time.
+LONG_RUNNING_TOOLS = {"Agent", "Task", "Monitor", "WebFetch", "WebSearch",
+                      "CronCreate", "TaskOutput", "ScheduleWakeup"}
+PULSE_THRESHOLD_FAST_S = 90    # seconds — fast tool idle > 90s is suspect
+PULSE_THRESHOLD_LONG_S = 900   # 15 min  — Agent/Monitor may legitimately run minutes
+
+def _ps_stat(pid_val):
+    """macOS BSD: `ps -o stat= -p <pid>` -> e.g. 'SN', 'TN', 'Z+'. No GNU flags."""
+    try:
+        r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid_val)],
+                           capture_output=True, text=True, timeout=2)
+        return (r.stdout or "").strip()
+    except Exception:
+        return ""
+
+def pulse_verdict(tid, s):
+    """Return (status, reason). status in {"active","stale","wedged","dead"}.
+    reason always names its artifact (D2/D4 + plan.S2 must_print)."""
+    pid = s.get("pid")
+    # (b) process existence — strongest signal; overrides age/STAT.
+    if pid is None:
+        return ("dead", "active.yaml row has no pid")
+    try:
+        os.kill(int(pid), 0)
+    except (TypeError, ValueError, ProcessLookupError, PermissionError):
+        return ("dead", f"kill -0 pid={pid} failed (no such process / not ours)")
+    # (c) STAT containing 'T' = STOPPED = wedged (D2 scope only).
+    stat = _ps_stat(pid)
+    if stat and "T" in stat:
+        return ("wedged", f"ps -o stat= -p {pid} -> STAT={stat} (T=STOPPED, D2)")
+    # (a) pulse.json age with tool-type-aware threshold (D4).
+    pulse_path = os.path.join(handoff_dir, tid, "pulse.json")
+    if not os.path.isfile(pulse_path):
+        # EYES writer (S1) has not run yet for this row. Fall back to
+        # active.yaml last_pulse_at; if THAT itself is past STUCK_MIN, call
+        # it stale rather than lying green.
+        ref = parse_iso(s.get("last_pulse_at")) or parse_iso(s.get("started_at"))
+        if ref:
+            mins = int((now - ref).total_seconds() // 60)
+            if mins >= STUCK_MIN:
+                return ("stale", f"no pulse.json; active.yaml last_pulse_at age {mins}m >= STUCK_MIN={STUCK_MIN}m ({ref.isoformat()})")
+            return ("active", f"no pulse.json at {pulse_path}; active.yaml last_pulse_at age {mins}m")
+        return ("active", f"no pulse.json at {pulse_path}; active.yaml row has no timestamps")
+    try:
+        with open(pulse_path, encoding="utf-8") as fh:
+            pj = json.load(fh) or {}
+    except Exception as e:
+        return ("active", f"pulse.json unreadable at {pulse_path} ({e.__class__.__name__})")
+    last_ts = parse_iso(pj.get("last_tool_at") or pj.get("ts"))
+    if not last_ts:
+        return ("active", f"pulse.json missing last_tool_at/ts at {pulse_path}")
+    age_s = int((now - last_ts).total_seconds())
+    tool = pj.get("tool") or "Unknown"
+    threshold_s = PULSE_THRESHOLD_LONG_S if tool in LONG_RUNNING_TOOLS else PULSE_THRESHOLD_FAST_S
+    if age_s > threshold_s:
+        return ("stale", f"pulse.json age {age_s}s > threshold {threshold_s}s for tool={tool} ({pulse_path})")
+    return ("active", f"pulse.json age {age_s}s <= threshold {threshold_s}s tool={tool} ({pulse_path})")
+
 def emit_fatal(kind, message):
     """B1 fail-closed: registry_error / state_write_error. Never a successful
     empty table — only a registry that PARSED CLEANLY may return table: []."""
@@ -925,7 +997,7 @@ stuck_items = []
 
 for tid, s in sorted(current.items()):
     phase = s.get("phase") or "?"
-    status = "stale" if s.get("stale") else "active"
+    status, status_reason = pulse_verdict(tid, s)
     started_at = parse_iso(s.get("started_at"))
     last_pulse = parse_iso(s.get("last_pulse_at"))
     ref_ts = last_pulse or started_at
@@ -973,8 +1045,11 @@ for tid, s in sorted(current.items()):
         pid = s.get("pid")
         if pid is not None and not pid_alive(pid):
             reasons.append("pid dead")
-        if s.get("stale"):
-            reasons.append("marked stale")
+        # EYES (S2): the old `if s.get("stale")` was inert (G3 — no writer).
+        # pulse_verdict above already computed status from pulse.json + STAT;
+        # surface its non-active verdict as a stuck reason, naming its artifact.
+        if status in ("stale", "wedged", "dead"):
+            reasons.append(f"{status}: {status_reason}")
     if reasons:
         stuck_items.append({"task_id": tid, "reasons": reasons})
 
@@ -995,7 +1070,12 @@ for tid, s in sorted(current.items()):
     table.append({
         "task_id": tid, "phase": phase,
         "minutes_in_phase": minutes if minutes is not None else "?",
-        "status": status, "waiting": is_waiting, "where": where,
+        "status": status,
+        # EYES (S2): every verdict names its artifact (pulse.json path /
+        # pid / STAT) — plan.S2 must_print. JSON consumers can show WHY
+        # a row is stale/wedged/dead instead of trusting a bare label.
+        "status_reason": status_reason,
+        "waiting": is_waiting, "where": where,
         "protocol_version": protocol_version,
     })
 
