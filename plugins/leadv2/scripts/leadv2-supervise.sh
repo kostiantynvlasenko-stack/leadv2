@@ -540,7 +540,16 @@ current = {s["task_id"]: s for s in sessions}  # last-write-wins on dup task_id
 
 # ── Load previous snapshot ──────────────────────────────────────────────────
 prev = {}
-if os.path.isfile(snapshot_path):
+# S3 (1b07a6fd0490, row 33659fede36e): capture whether the snapshot existed
+# BEFORE we (maybe) create it via the snapshot write later. On a FRESH
+# supervise session the snapshot is absent, prev_tasks is empty, so the
+# has_flag diff loop below would read prev_flag=False for every task that
+# already has a stale phase8-passed.flag on disk -> every such task reported
+# CLOSED-just-now. cold_start suppresses that one-shot hallucination; the
+# snapshot is still seeded with the current has_flag state so cycle 2+ diffs
+# correctly. (G2 root cause.)
+snapshot_existed = os.path.isfile(snapshot_path)
+if snapshot_existed:
     try:
         with open(snapshot_path, encoding="utf-8") as fh:
             prev = json.load(fh) or {}
@@ -874,13 +883,21 @@ def flag_path(tid):
     return os.path.join(handoff_dir, tid, "phase8-passed.flag")
 
 known_ids = set(current) | set(prev_tasks)
+# S3 (1b07a6fd0490): True only on a fresh supervise session where no prior
+# snapshot file existed. Suppresses the one-shot false-CLOSED burst (G2);
+# the snapshot is still seeded below with current has_flag so cycle 2+ works.
+cold_start = not snapshot_existed
 closed_now = []
 new_snapshot_tasks = {}
 
 for tid in known_ids:
     has_flag = os.path.isfile(flag_path(tid))
     prev_flag = bool(prev_tasks.get(tid, {}).get("has_flag", False))
-    if has_flag and not prev_flag:
+    # S3 (1b07a6fd0490): on a cold start every pre-existing phase8-passed.flag
+    # would read as newly-closed (prev_flag defaults False). Seed the snapshot
+    # WITHOUT emitting closed_now; cycle 2 will diff against this seeding and
+    # report genuine new closures only. (G2 root cause.)
+    if has_flag and not prev_flag and not cold_start:
         closed_now.append(tid)
     if tid in current:
         entry = dict(current[tid])
