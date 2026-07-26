@@ -144,6 +144,16 @@ def read_file(path):
 
 
 def due_rows(path):
+    """COMPACT-LEDGER-BLOAT-01: scheduled-decisions.md stores each ledger row
+    as ONE physical line carrying a ~2000-char paragraph (DUE + GO-cond +
+    ACTION + ROLLBACK + WHY). The line-counting CAP never tripped because a
+    paragraph counted as one line, so ~40 paragraphs landed in every compact.
+    Keep only the newest N rows (the ledger is appended chronologically, so the
+    tail is what is still pending) and clip each to max_chars. The full text
+    stays in docs/leadv2/scheduled-decisions.md; the session-start inject hook
+    still surfaces genuinely DUE rows in full."""
+    max_rows = int(os.environ.get("LEADV2_FREEZE_SD_ROWS", "12"))
+    max_chars = int(os.environ.get("LEADV2_FREEZE_SD_CHARS", "220"))
     rows = []
     try:
         with open(path, encoding="utf-8") as f:
@@ -152,7 +162,18 @@ def due_rows(path):
                     rows.append(line.rstrip("\n"))
     except Exception:
         pass
-    return rows
+    dropped = len(rows) - max_rows
+    if dropped > 0:
+        rows = rows[-max_rows:]
+    clipped = []
+    for r in rows:
+        r = re.sub(r"\s+", " ", r).strip()
+        if len(r) > max_chars:
+            r = r[:max_chars].rstrip() + " …"
+        clipped.append(r)
+    if dropped > 0:
+        clipped.insert(0, f"(… {dropped} older ledger rows omitted; full text in docs/leadv2/scheduled-decisions.md)")
+    return clipped
 
 
 def latest_journal_tail(root, leadv2_dir, n=15):
