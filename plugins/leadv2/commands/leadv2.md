@@ -209,7 +209,7 @@ Principle: **context is cache, disk is truth.** Sessions run for days with many 
 **PULSE MODE (default ON):** between phases: absolute silence. Gate 1: one line + wait. Async question: one line + options. Phase 8 close: max 3 lines. Every extra sentence = protocol violation.
 
 **Enforcement (plugin-default hooks, active on fresh install):**
-- `leadv2-loop-detect-hook.sh` (PreToolUse `.*`): WARN at 30 tool calls, BLOCK at 50. Disable: `export LEADV2_LOOP_DETECT=0`. Adjust limits: `LEADV2_TOOL_FREQ_WARN=<n>`, `LEADV2_TOOL_HARD_LIMIT=<n>`.
+- `leadv2-loop-detect-hook.sh` (PreToolUse `.*`): WARN at 30 tool calls, BLOCK at 50. Disable: `export LEADV2_LOOP_DETECT=0`. Adjust limits: `LEADV2_TOOL_FREQ_WARN=<n>`, `LEADV2_TOOL_HARD_LIMIT=<n>`. The Agent tool is exempt from this per-tool-type cap by default (`LEADV2_UNCAPPED_TOOLS=Agent`) — a supervisor's job is spawning subagents, so it must not share Bash's 50-call ceiling; override the exempt list with `LEADV2_UNCAPPED_TOOLS=<comma,separated,tool,names>`.
 - `leadv2-compact-warn.sh` (UserPromptSubmit): injects reminder at >=80 turns, re-warns every +40. Disable: `export LEADV2_COMPACT_WARN=0`.
 - `leadv2-lead-read-guard.sh` (PreToolUse `Read`): advisory WARN when lead reads code files directly. Hard-block: `export LEADV2_LEAD_GUARD=1`. Disable: `export LEADV2_LEAD_GUARD=0`.
 

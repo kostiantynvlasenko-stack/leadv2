@@ -8,9 +8,15 @@
 | Hard block | `LEADV2_LOOP_HARD_AT` | 5 | Emit `DELIVERABLE_BLOCKED: loop detected — <reason>` and stop |
 | Per-tool warn | `LEADV2_TOOL_FREQ_WARN` | 30 | Same tool type used ≥30 times → warn |
 | Per-tool block | `LEADV2_TOOL_HARD_LIMIT` | 50 | Same tool type used ≥50 times → block |
+| Uncapped tools | `LEADV2_UNCAPPED_TOOLS` | `Agent` | Tool names exempt from the two per-tool rows above (identical-call-signature warn/block still applies) |
 
 All thresholds are tunable via environment variables. Defaults are conservative
 to avoid false positives on legitimately long sessions.
+
+`LEADV2_UNCAPPED_TOOLS` exists because a single global `LEADV2_TOOL_HARD_LIMIT`
+applies per tool_name — without an exemption, the Agent tool (a supervisor's
+primary output) shares the same ceiling as Bash (the tool a runaway loop
+actually abuses). Comma-separate multiple tool names to exempt more than one.
 
 ## Canonicalization rules
 
