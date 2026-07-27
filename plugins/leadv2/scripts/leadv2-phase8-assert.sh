@@ -16,6 +16,10 @@
 #       close otherwise proceeds even though the ff-only merge/deploy never actually landed)
 #   A7  docs/handoff/<task_id>/e2e-gate-passed.flag exists and is <1h old
 #       (project E2E gate run by leadv2-phase8-e2e-gate.sh — E2E-INTO-DEV-LOOP-01)
+#   A8  deploy-class tasks (task_class: deploy) must have a passing
+#       deploy-verify artifact (DEPLOY-CLASS-VERIFY-GATE-01). N/A for
+#       non-deploy tasks (leadv2-deploy-verify-check.sh rc=3); never a hard
+#       failure when the check script itself is not yet vendored here.
 #
 # Best-effort warnings (log_warning + continue; never exit 1):
 #   W1  docs/BOARD.md HEAD section has today's date AND task_id
@@ -71,6 +75,70 @@ else
   failures+=("A7: ${E2E_SENTINEL} not found -- run: bash ${SCRIPT_DIR}/leadv2-phase8-e2e-gate.sh ${TASK_ID}")
 fi
 
+# ── A8: deploy-verify artifact required for deploy-class tasks ──────────────
+# (DEPLOY-CLASS-VERIFY-GATE-01) Shells out to leadv2-deploy-verify-check.sh:
+#   rc 0 -> PASS (deploy verified, or legitimately bypassed with a reason)
+#   rc 3 -> N/A (task classified `code`, not `deploy`) -- not counted as failure
+#   rc 1/2 -> FAIL -- deploy-class task closing without a machine-checkable
+#             deploy-verify artifact (the OUTBOX-DEPLOY-UNBLOCK-01 hollow-close
+#             this task exists to fix)
+# Missing check script (not yet vendored in this repo) -> WARNING, never a
+# hard failure: a repo without the propagated files must not false-RED every
+# non-deploy task in the meantime.
+A8_CHECK="${SCRIPT_DIR}/leadv2-deploy-verify-check.sh"
+CLASSIFIER="${SCRIPT_DIR}/leadv2-deploy-classify.sh"
+# A8_EVALUATED: 1 iff the check script is non-empty AND ran (incl. N/A rc=3 --
+# N/A is a legitimate evaluated result, not "unevaluated"). 0 only when the
+# script is absent or 0-byte (M2: the N/8 receipt must not count a
+# warn-skipped A8 as verified).
+A8_EVALUATED=0
+if [[ -f "$A8_CHECK" && -s "$A8_CHECK" ]]; then
+  a8_out=""
+  a8_rc=0
+  # shellcheck disable=SC2097,SC2098  # intentional: scopes env vars to the forked
+  # bash "$A8_CHECK" child process only, not the current shell -- correct here.
+  a8_out=$(PROJECT_ROOT="$LEADV2_PROJECT_ROOT" LEADV2_PROJECT_ROOT="$LEADV2_PROJECT_ROOT" bash "$A8_CHECK" "$TASK_ID" 2>&1) || a8_rc=$?
+  case "$a8_rc" in
+    0)
+      # critic2 #4: a 0-byte/truncated check script running as `bash <empty>`
+      # also exits 0 -- require the real PASS:/WARN: prefix so a corrupted
+      # script that happens to exit 0 is caught, not silently logged PASS.
+      if [[ "$a8_out" == PASS:* || "$a8_out" == WARN:* ]]; then
+        log_pass "A8 deploy-verify: ${a8_out}"
+      else
+        log_fail "A8 deploy-verify: suspect truncated/corrupted check script (rc=0, unexpected output: ${a8_out})"
+        failures+=("A8: ${A8_CHECK} exited 0 with unrecognized output (suspect truncated/corrupted) -- ${a8_out}")
+      fi
+      A8_EVALUATED=1
+      ;;
+    3)
+      log_info "A8 N/A (non-deploy): ${a8_out}"
+      A8_EVALUATED=1
+      ;;
+    *)
+      log_fail "A8 deploy-verify: ${a8_out}"
+      failures+=("A8: deploy-verify check failed (exit ${a8_rc}) -- ${a8_out} -- run: bash ${SCRIPT_DIR}/leadv2-deploy-verify-check.sh ${TASK_ID}")
+      A8_EVALUATED=1
+      ;;
+  esac
+else
+  # critic2 #4: missing/empty check script must gate on classification,
+  # mirroring D6 (leadv2-phase8-e2e-gate.sh) -- warn-only is correct for a
+  # non-deploy task (repo not yet vendored with the check script), but a
+  # deploy-class task closing with NO deploy-verify check script at all is
+  # exactly the hollow-close this task exists to kill and must hard-fail.
+  A8_CLASS="code"
+  if [[ -f "$CLASSIFIER" ]]; then
+    A8_CLASS="$(bash "$CLASSIFIER" "$TASK_ID" 2>/dev/null || echo code)"
+  fi
+  if [[ "$A8_CLASS" == "deploy" ]]; then
+    log_fail "A8 deploy-verify check script missing/empty for deploy-class task: ${A8_CHECK}"
+    failures+=("A8: ${A8_CHECK} missing or 0-byte for deploy-class task ${TASK_ID} -- vendor leadv2-deploy-verify-check.sh before closing")
+  else
+    log_warning "A8 deploy-verify check script not found: ${A8_CHECK} -- non-blocking (not yet vendored in this repo, task not deploy-class)"
+  fi
+fi
+
 # ── file paths ────────────────────────────────────────────────────────────────
 CLOSED_YAML="${LEADV2_LEADV2_DIR}/closed/${TASK_ID}.yaml"
 TASK_STATE="${LEADV2_LEADV2_DIR}/tasks/${TASK_ID}/STATE.md"
@@ -99,18 +167,64 @@ fi
 
 # ── A2: tasks.yaml (or lane yamls fallback) has terminal status for task_id ───
 # Bridge mode: prefer tasks.yaml when present; else read lane yamls directly.
-TERMINAL_STATUSES="done|poisoned|rejected|failed|archived|closed|completed|admin-closed"
+#
+# CLOSE-GATE-A2-STORE-YAML-IMPEDANCE-01 (D-VOCAB): verified_closed is terminal
+# in the authoritative store (e.g. persona-engine's Supabase work_items, via
+# scripts/task-sync-yaml.sh) but was missing here -- plain bug, now fixed.
+# claimed_done/needs_evidence are the store's deliberate "work is done, an
+# acceptance probe is pending" states -- these are LANE-TERMINAL, not plain
+# terminal: A2 passes them ONLY when BOTH a release receipt (the sentinel
+# leadv2_tasks_release writes) AND this task's own phase-8 evidence artifact
+# ($SENTINEL, i.e. phase8-passed.flag) exist on disk -- proof the lane
+# actually finished the work, not merely that the store reached one of these
+# statuses by some other path. queued/pending/in_progress/unknown status
+# still FAIL -- this must never become "always pass".
+# fix-round-1 Finding 3: derived from the single shared source
+# (leadv2_tasks_yaml_common.py) instead of a hardcoded literal, so drift
+# there (e.g. a status added/removed) propagates here automatically instead
+# of creating a 4th silently-stale copy. Literal fallback below only fires
+# if the shared module can't be imported at all (e.g. corrupted install) --
+# kept identical to the shared constant so behavior is unchanged either way.
+## NOTE: these two derivation blocks deliberately avoid a bare `import sys`
+## first line (test-leadv2-phase8-assert-a2-schema.sh's _extract_a2_python
+## greps for the literal `^import sys$` to locate the REAL A2 heredoc below
+## -- a bare `import sys` here would false-match and corrupt the extraction).
+TERMINAL_STATUSES="$(python3 -c '
+import sys; sys.path.insert(0, sys.argv[1])
+try:
+    from leadv2_tasks_yaml_common import TERMINAL_STATUSES
+    print(TERMINAL_STATUSES)
+except Exception:
+    pass
+' "$SCRIPT_DIR" 2>/dev/null)"
+TERMINAL_STATUSES="${TERMINAL_STATUSES:-done|poisoned|rejected|failed|archived|closed|completed|admin-closed|verified_closed}"
+LANE_TERMINAL_STATUSES="$(python3 -c '
+import sys; sys.path.insert(0, sys.argv[1])
+try:
+    from leadv2_tasks_yaml_common import LANE_TERMINAL_STATUSES
+    print(LANE_TERMINAL_STATUSES)
+except Exception:
+    pass
+' "$SCRIPT_DIR" 2>/dev/null)"
+LANE_TERMINAL_STATUSES="${LANE_TERMINAL_STATUSES:-claimed_done|needs_evidence}"
+RELEASE_RECEIPT="${LEADV2_LEADV2_DIR}/closed/.tasks-sentinel-${TASK_ID}.yaml"
 if [[ -f "$TASKS_YAML" ]]; then
-  if python3 - "$TASK_ID" "$TASKS_YAML" "$TERMINAL_STATUSES" "$SCRIPT_DIR" <<'PYEOF' 2>/dev/null
+  if python3 - "$TASK_ID" "$TASKS_YAML" "$TERMINAL_STATUSES" "$LANE_TERMINAL_STATUSES" "$SCRIPT_DIR" <<'PYEOF' 2>/dev/null
 import sys
-task_id, path, terminals_raw, scripts_dir = sys.argv[1:5]
+task_id, path, terminals_raw, lane_terminal_raw, scripts_dir = sys.argv[1:6]
 terminals = set(terminals_raw.split("|"))
+lane_terminal = set(lane_terminal_raw.split("|")) if lane_terminal_raw else set()
 sys.path.insert(0, scripts_dir)
 from leadv2_tasks_yaml_common import load_tasks_items
 items = load_tasks_items(path)
 for it in items:
     if isinstance(it, dict) and str(it.get("id","")) == task_id:
-        sys.exit(0 if it.get("status","") in terminals else 1)
+        st = it.get("status","")
+        if st in terminals:
+            sys.exit(0)
+        if st in lane_terminal:
+            sys.exit(3)
+        sys.exit(1)
 # Not found in tasks.yaml — check lane yamls as fallback
 sys.exit(2)
 PYEOF
@@ -118,7 +232,34 @@ PYEOF
     log_pass "A2 tasks.yaml: ${TASK_ID} has terminal status"
   else
     rc=$?
-    if [[ $rc -eq 2 ]]; then
+    if [[ $rc -eq 3 ]]; then
+      # fix-round-1 Finding 1 (poison receipt): -f existence alone is not
+      # proof of a successful release -- write_closed_sentinel() also fires
+      # on outcome=poison and is write-once (never refreshed), so a task
+      # poisoned once and later reaching claimed_done/needs_evidence by some
+      # other path would PASS on a receipt that literally says
+      # `outcome: poison`. Parse the receipt and require the outcome field
+      # to be a success outcome (completed_success, the value
+      # write_closed_sentinel() writes for outcome=="success") in addition
+      # to both files existing.
+      receipt_outcome=""
+      if [[ -f "$RELEASE_RECEIPT" ]]; then
+        receipt_outcome="$(python3 -c '
+import sys, yaml
+try:
+    d = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+except Exception:
+    d = {}
+print(str(d.get("outcome") or ""))
+' "$RELEASE_RECEIPT" 2>/dev/null)"
+      fi
+      if [[ -f "$SENTINEL" && "$receipt_outcome" == "completed_success" ]]; then
+        log_pass "A2 PASS (lane-terminal, acceptance evidence pending): ${TASK_ID} status is claimed_done/needs_evidence, release receipt (outcome: completed_success) + phase-8 evidence both present"
+      else
+        log_fail "A2 tasks.yaml: ${TASK_ID} is lane-terminal (claimed_done/needs_evidence) but missing release receipt with outcome=completed_success and/or phase-8 evidence artifact (receipt outcome: '${receipt_outcome:-<missing>}')"
+        failures+=("A2: ${TASK_ID} status is claimed_done/needs_evidence -- lane-terminal requires BOTH ${RELEASE_RECEIPT} with outcome: completed_success AND ${SENTINEL} to exist (got outcome='${receipt_outcome:-<missing>}'); run leadv2_tasks_release then leadv2-phase8-e2e-gate.sh")
+      fi
+    elif [[ $rc -eq 2 ]]; then
       log_fail "A2 tasks.yaml: ${TASK_ID} not found — task not in tasks.yaml"
       failures+=("A2: ${TASK_ID} not found in ${TASKS_YAML} — run leadv2_tasks_release or ensure tasks.yaml is populated")
     else
@@ -351,7 +492,13 @@ else
 fi
 
 # ── result ────────────────────────────────────────────────────────────────────
-log_info "=== Phase 8 assertions for ${TASK_ID}: $((7 - ${#failures[@]})) / 7 HARD checks PASS ==="
+# M2: TOTAL_HARD reflects whether A8 was actually evaluated (7 base checks
+# A1-A7 + A8 only when A8_EVALUATED=1) -- a warn-skipped A8 (non-deploy task,
+# check script not vendored) must not inflate the receipt to a false "8/8".
+TOTAL_HARD=$((7 + A8_EVALUATED))
+A8_SUFFIX=""
+[[ "$A8_EVALUATED" -eq 0 ]] && A8_SUFFIX=" (A8 not evaluated)"
+log_info "=== Phase 8 assertions for ${TASK_ID}: $((TOTAL_HARD - ${#failures[@]})) / ${TOTAL_HARD} HARD checks PASS${A8_SUFFIX} ==="
 
 if (( ${#failures[@]} > 0 )); then
   {
@@ -371,10 +518,11 @@ fi
 # ── write sentinel on full PASS ───────────────────────────────────────────────
 mkdir -p "$(dirname "$SENTINEL")"
 ASSERTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf -- 'phase8-passed: %s\nasserted_at: %s\ntask_id: %s\nassertions: 7/7\n' \
+printf -- 'phase8-passed: %s\nasserted_at: %s\ntask_id: %s\nassertions: %s/%s%s\n' \
   "${TASK_ID}" \
   "${ASSERTED_AT}" \
   "${TASK_ID}" \
+  "${TOTAL_HARD}" "${TOTAL_HARD}" "${A8_SUFFIX}" \
   > "$SENTINEL"
 
 # A linked worktree's docs/handoff directory is private to that worktree. The
@@ -387,16 +535,17 @@ COMPLETION_RECEIPT="$(
   PROJECT_ROOT="$LEADV2_PROJECT_ROOT" \
     "${SCRIPT_DIR}/leadv2-state-path.sh" --no-link "completions/${TASK_ID}.json"
 )"
-if ! python3 - "$COMPLETION_RECEIPT" "$TASK_ID" "$ASSERTED_AT" "$SENTINEL" "$LEADV2_PROJECT_ROOT" <<'PYEOF'
+if ! python3 - "$COMPLETION_RECEIPT" "$TASK_ID" "$ASSERTED_AT" "$SENTINEL" "$LEADV2_PROJECT_ROOT" "$TOTAL_HARD" "$A8_EVALUATED" <<'PYEOF'
 import json, os, sys, tempfile
 
-path, task_id, asserted_at, sentinel, project_root = sys.argv[1:]
+path, task_id, asserted_at, sentinel, project_root, total_hard, a8_evaluated = sys.argv[1:]
 payload = {
     "schema_version": 1,
     "task_id": task_id,
     "status": "phase8_passed",
     "asserted_at": asserted_at,
-    "assertions": "7/7",
+    "assertions": f"{total_hard}/{total_hard}",
+    "a8_evaluated": bool(int(a8_evaluated)),
     "worktree": project_root,
     "sentinel": sentinel,
 }
@@ -433,5 +582,5 @@ fi
 
 log_info "Sentinel written: ${SENTINEL}"
 log_info "Completion receipt written: ${COMPLETION_RECEIPT}"
-log_info "Phase 8 gate PASSED for ${TASK_ID} (7/7 hard assertions)"
+log_info "Phase 8 gate PASSED for ${TASK_ID} (${TOTAL_HARD}/${TOTAL_HARD} hard assertions${A8_SUFFIX})"
 exit 0

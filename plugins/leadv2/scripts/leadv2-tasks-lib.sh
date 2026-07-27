@@ -440,7 +440,88 @@ leadv2_tasks_release() {
     esac
   done
   [[ -n "$outcome" ]] || { echo "[tasks-lib] --outcome required" >&2; return 1; }
+
   _tasks_dispatch release "$item_id" "$outcome" "${error_msg:-}" "$_TASKS_HANDOFF_DIR"
+  local dispatch_rc=$?
+
+  # CLOSE-GATE-A2-STORE-YAML-IMPEDANCE-01 (D-WRITE): docs/tasks.yaml is a
+  # PROJECTION regenerated from a repo's authoritative store (e.g. persona-
+  # engine's Supabase work_items via scripts/task-sync-yaml.sh). The dispatch
+  # above only ever hand-edits the projection -- the next regen restores the
+  # store's real status, undoing this write. When a repo declares a store
+  # (LEADV2_TASKS_RELEASE_CMD, from the optional `tasks_release_cmd` key in
+  # .claude/leadv2-overrides/state-paths.yaml), also write the outcome into
+  # the STORE, then regenerate the projection so the store's real status
+  # (e.g. claimed_done, not done -- the acceptance probe owns promotion to
+  # verified_closed) is what survives, not the hand-edit above. Key absent/
+  # null (m3-market / respiro-ios / campaign-platform have no such store)
+  # => behave exactly as before this change (file-only).
+  local store_rc=0
+  if [[ -n "${LEADV2_TASKS_RELEASE_CMD:-}" ]]; then
+    if [[ -x "$LEADV2_TASKS_RELEASE_CMD" ]]; then
+      # fix-round-1 Finding 2: guarded with `|| store_rc=$?` -- this function
+      # is called from callers with `set -euo pipefail` active (leadv2-queue-
+      # release.sh, leadv2-render-close.sh, etc.); an unguarded non-zero exit
+      # here would abort the ENTIRE calling script before store_rc=$? even
+      # runs, for what are now (below) legitimate non-error outcomes (4, 5).
+      "$LEADV2_TASKS_RELEASE_CMD" "$item_id" "$outcome" || store_rc=$?
+      # Contract (work-item-release.sh): 0 = store write succeeded AND
+      # matched >=1 row for a success outcome; 4 = no-op, outcome != success;
+      # 5 = no-op, outcome == success but 0 rows matched (ad-hoc/no-Supabase
+      # -row task); 1 = hard failure. ONLY rc==0 may trigger the regen gate
+      # below -- a 0-row no-op (5) or a non-success outcome (4) must NOT
+      # trigger the wholesale docs/tasks.yaml projection replace, or it
+      # erases the status this same call just wrote in the projection
+      # (work-item-release.sh:29-30's own documented "0 rows matched is NOT
+      # an error" case, plus every fail/poison release). A caller-supplied
+      # tasks_release_cmd that only ever returns 0/1 (unaware of 4/5) keeps
+      # today's exact behavior -- this is purely additive.
+      case "$store_rc" in
+        0)
+          local regen_cmd="${_PROJECT_ROOT}/scripts/leadv2-tasks-regen-gate.sh"
+          if [[ -x "$regen_cmd" ]]; then
+            "$regen_cmd" "$item_id" || echo "[tasks-lib] WARN: leadv2-tasks-regen-gate.sh reported non-zero for ${item_id} (its own terminal vocabulary is a separate, narrower concern than A2's lane-terminal tier; not treated as a release failure)" >&2
+          else
+            echo "[tasks-lib] WARN: regen gate script not found or not executable: ${regen_cmd}" >&2
+          fi
+          ;;
+        4)
+          echo "[tasks-lib] INFO: store write no-op for ${item_id} (outcome=${outcome} is not success) -- skipping regen (Finding 2: non-success must never trigger a projection replace)" >&2
+          store_rc=0
+          ;;
+        5)
+          echo "[tasks-lib] INFO: store write matched 0 rows for ${item_id} (ad-hoc/no-Supabase-row task) -- skipping regen (Finding 2: a 0-row no-op must never trigger a projection replace that erases the status just written)" >&2
+          store_rc=0
+          ;;
+        *)
+          # Loud, never swallowed: the store write failing means the projection
+          # will NOT reflect the true store status on the next regen.
+          echo "[tasks-lib] ERROR: store write FAILED for ${item_id} (tasks_release_cmd exit ${store_rc}) -- docs/tasks.yaml projection may not reflect the true store status" >&2
+          ;;
+      esac
+    else
+      echo "[tasks-lib] ERROR: tasks_release_cmd configured but not executable: ${LEADV2_TASKS_RELEASE_CMD}" >&2
+      store_rc=1
+    fi
+  fi
+
+  [[ "$dispatch_rc" -ne 0 ]] && return "$dispatch_rc"
+
+  # Round-2 finding 3 (CLOSE-GATE-A2-STORE-YAML-IMPEDANCE-01): this function's
+  # return code is the RELEASE contract -- did the primary docs/tasks.yaml
+  # dispatch succeed? -- not the store-sync contract. Callers such as
+  # leadv2-queue-release.sh run this bare under `set -euo pipefail` with no
+  # `||` guard; if a store failure (store_rc==1, e.g. a transient network
+  # blip) propagated as this function's exit code, it would abort those
+  # callers even though the local release they actually asked for succeeded.
+  # The store failure is NOT silently swallowed -- it's already logged loudly
+  # above ("[tasks-lib] ERROR: store write FAILED ...") and recorded in
+  # LEADV2_TASKS_RELEASE_LAST_STORE_RC for any caller that wants to check it
+  # explicitly. A hard dispatch failure (the real failure) still propagates
+  # via the early return above; only the optional store-sync outcome is kept
+  # out of this function's exit code.
+  LEADV2_TASKS_RELEASE_LAST_STORE_RC="$store_rc"
+  return 0
 }
 
 leadv2_tasks_add() {

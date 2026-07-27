@@ -37,6 +37,22 @@ import yaml
 # adding them (GATE-A2-FIX-01 scope).
 LIST_KEYS = ("tasks", "items", "queues")
 
+# CLOSE-GATE-A2-STORE-YAML-IMPEDANCE-01 fix-round-1 (Finding 3): the single
+# source of truth for the "terminal" and "lane-terminal" status vocabularies.
+# Before this, leadv2-phase8-assert.sh (bash literal), leadv2-tasks-lib.sh
+# (python literal, no verified_closed -- a DIFFERENT, narrower vocabulary
+# used for its own archive/claim bookkeeping and intentionally NOT changed
+# here), and leadv2-tasks-regen-gate.sh (bash literal, stale -- no
+# verified_closed, no lane-terminal) each hardcoded their own copy. Only
+# regen-gate.sh's copy was actually wrong (stale); phase8-assert.sh derives
+# its bash TERMINAL_STATUSES/LANE_TERMINAL_STATUSES from these constants at
+# runtime instead of hardcoding, so future drift here propagates
+# automatically. Pipe-delimited (not a list) to match the existing bash
+# `IFS`-free `"a|b|c".split("|")` consumption pattern already used by both
+# scripts' embedded python blocks.
+TERMINAL_STATUSES = "done|poisoned|rejected|failed|archived|closed|completed|admin-closed|verified_closed"
+LANE_TERMINAL_STATUSES = "claimed_done|needs_evidence"
+
 
 def load_tasks_items(path: str) -> list:
     """Return the list of task dicts found in *path*, tolerant of shape.

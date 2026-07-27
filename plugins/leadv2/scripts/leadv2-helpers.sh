@@ -114,6 +114,12 @@ path_defaults = {
     "LEADV2_LEADV2_DIR":        project_root + "/docs/leadv2",
     "LEADV2_QUEUE_ARCHIVE_DIR": project_root + "/docs/agents/product-owner/queue/_archive",
     "LEADV2_TASKS_DIR":         project_root + "/docs/leadv2/tasks",
+    # CLOSE-GATE-A2-STORE-YAML-IMPEDANCE-01 (D-WRITE): optional, repo-local
+    # backing-store release command. Default "" (not project_root + a path) --
+    # absent from state-paths.yaml means no store exists for this repo
+    # (m3-market / respiro-ios / campaign-platform) and leadv2_tasks_release
+    # must behave exactly as before this key was introduced (file-only).
+    "LEADV2_TASKS_RELEASE_CMD": "",
 }
 path_key_map = {
     "board_path":        "LEADV2_BOARD_PATH",
@@ -124,6 +130,7 @@ path_key_map = {
     "leadv2_dir":        "LEADV2_LEADV2_DIR",
     "queue_archive_dir": "LEADV2_QUEUE_ARCHIVE_DIR",
     "leadv2_tasks_dir":  "LEADV2_TASKS_DIR",
+    "tasks_release_cmd": "LEADV2_TASKS_RELEASE_CMD",
 }
 # Non-path keys — for project-specific extensions via state-paths.yaml.
 str_key_map = {}
@@ -1447,6 +1454,44 @@ leadv2_active_list() {
   local active
   active="$(_leadv2_active_file)"
   [[ -f "$active" ]] && cat "$active" || printf -- '(no active.md)\n'
+}
+
+# _leadv2_derive_real_state <task_id> <project_root> [worktree_dir]
+#
+# Re-derives real task state instead of trusting a prior attempt's
+# self-report (3bf68affc141 Case 2 fix). A subagent turn can end in
+# "success" without ever running Phase-8 close, and a runner restart has
+# no in-memory continuity to detect that on its own -- both session
+# runners must re-check durable evidence (sentinel + git commits) at the
+# top of every attempt-loop iteration instead of trusting log-diff deltas
+# from the current process alone. Prints exactly one of:
+#   done       - phase8-passed.flag already exists (main tree or worktree)
+#   close-only - commits landed on the task's git tree but the sentinel is
+#                still missing (the close pipeline stalled after success)
+#   resume     - neither signal fired; keep going as before
+_leadv2_derive_real_state() {
+  local task_id="$1" project_root="$2" worktree_dir="${3:-}"
+  local sentinel="${project_root}/docs/handoff/${task_id}/phase8-passed.flag"
+  local worktree_sentinel=""
+  [[ -n "$worktree_dir" ]] && worktree_sentinel="${worktree_dir}/docs/handoff/${task_id}/phase8-passed.flag"
+
+  if [[ -f "$sentinel" ]] || { [[ -n "$worktree_sentinel" ]] && [[ -f "$worktree_sentinel" ]]; }; then
+    echo "done"
+    return 0
+  fi
+
+  local git_tree="${worktree_dir:-$project_root}"
+  if [[ -d "$git_tree/.git" || -f "$git_tree/.git" ]]; then
+    local head_sha merge_base
+    head_sha="$(git -C "$git_tree" rev-parse HEAD 2>/dev/null || true)"
+    merge_base="$(git -C "$git_tree" merge-base HEAD origin/main 2>/dev/null || true)"
+    if [[ -n "$head_sha" && -n "$merge_base" && "$head_sha" != "$merge_base" ]]; then
+      echo "close-only"
+      return 0
+    fi
+  fi
+
+  echo "resume"
 }
 
 # Registry sourced LAST so active.yaml functions override active.md legacy stubs above.
