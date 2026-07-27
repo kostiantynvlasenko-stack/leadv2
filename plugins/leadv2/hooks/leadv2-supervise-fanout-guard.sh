@@ -48,11 +48,17 @@
 # silently passed through ungated. Both are now fail-CLOSED: default is
 # deny-when-self-supervising, not allow.
 #
-# MODE SPLIT: provider-aware full-cycle relay is now the default. It stamps
-# mode="legacy-relay" and denies abbreviated same-session workers; work must
-# go through leadv2-fanout.sh so every child receives Phase 0..8. An explicit
-# mode="interactive-lanes" remains a compatibility escape hatch and is the
-# only mode that permits owning-session Agent/Workflow spawns.
+# MODE SPLIT (DEFAULT FLIPPED fix-3, 75051ca2507f gate-2, 2026-07-27, founder
+# ruling: the supervisor may spawn ANY subagent_type on ANY model/provider --
+# ROUTING decides placement, not a hook allowlist): mode="interactive-lanes"
+# is now the DEFAULT and permits owning-session Agent/Workflow spawns of any
+# subagent_type. Top-level code-writing task work is still steered through
+# scripts/leadv2-fanout.sh (full Phase 0..8 + mandatory Codex/GLM-FIRST
+# review) by the leadv2-supervise SKILL.md's own documented procedure (step
+# 3) -- that discipline now lives in routing/skill instructions, not in this
+# hook. An explicit mode="legacy-relay" (opt-in via
+# LEADV2_SUPERVISE_MODE=legacy-relay) remains available as a strict
+# coordinator-only fallback that denies abbreviated same-session workers.
 #
 # Toggle: LEADV2_SUPERVISE_GUARD=0 disables this guard entirely.
 # Fail-safe: any internal error exits 0 (never bricks the session); a stale
@@ -142,7 +148,10 @@ SENTINEL_PID="$(printf -- '%s' "$SENTINEL_INFO" | sed -n '2p')"
 # (fail-CLOSED default — see comment above); only an explicit
 # "interactive-lanes" stamp bypasses the deny-worker gate below.
 SENTINEL_MODE="$(printf -- '%s' "$SENTINEL_INFO" | sed -n '3p')"
-[[ "$SENTINEL_MODE" != "interactive-lanes" ]] && SENTINEL_MODE="legacy-relay"
+# DEFAULT FLIPPED fix-3: missing/unknown mode normalizes to
+# "interactive-lanes" (permissive default per founder ruling); only an
+# explicit "legacy-relay" stamp reaches the strict deny-worker gate below.
+[[ "$SENTINEL_MODE" != "legacy-relay" ]] && SENTINEL_MODE="interactive-lanes"
 
 if [[ "$SENTINEL_STATUS" != "LIVE" ]]; then
   # Stale sentinel (owning session already died) — self-clean and allow.
@@ -163,14 +172,16 @@ if [[ -f "$REGISTRY" ]]; then
 fi
 [[ -z "$MY_PID" || "$MY_PID" != "$SENTINEL_PID" ]] && exit 0
 
-# Compatibility escape hatch: only an explicitly stamped interactive-lanes
-# session may create same-session workers. The default provider-aware relay
-# (and missing/unknown modes) reaches the BLOCK below.
+# DEFAULT (fix-3): interactive-lanes -- and missing/unknown modes normalize
+# here per the normalization above -- lets the supervising session spawn any
+# subagent_type freely; routing (SKILL.md's fanout procedure), not this
+# hook, keeps code-writing work on the full Phase 0..8 path.
 [[ "$SENTINEL_MODE" == "interactive-lanes" ]] && exit 0
 
-# This IS the supervising session in legacy-relay mode, and the
-# subagent_type is not on the read-only allow-list (recognized worker OR
-# unrecognized/future type — fail-CLOSED by design, H2 fix) — BLOCK.
+# Only reached when the session explicitly opted into the strict
+# LEADV2_SUPERVISE_MODE=legacy-relay fallback, and the subagent_type is not
+# on the read-only allow-list (recognized worker OR unrecognized/future type
+# — fail-CLOSED by design, H2 fix) — BLOCK.
 python3 -c "
 import json
 print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':'supervise mode: dispatch this work via scripts/leadv2-fanout.sh --tasks <ID>, do not spawn in-session workers. Override: export LEADV2_SUPERVISE_GUARD=0'}}))

@@ -135,16 +135,25 @@ SNAPSHOT="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" .s
 SUPERVISE_SENTINEL="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" .supervise-active)"
 
 # SUPERVISE-GUARD-01 (restored, SUPERVISE-V2-01 fix-1 C1; mode split fix-2
-# R2-1): (re)write the supervise-mode sentinel -- {"pid","started_at","mode"}
-# -- consumed by hooks/leadv2-supervise-fanout-guard.sh (PreToolUse:Agent).
-# `mode` resolves the D-f=A contradiction found in codex-review-2.md finding
-# 1. The current default is provider-aware full-cycle relay: the supervisor
-# dispatches complete Claude/Codex sessions through leadv2-fanout.sh and must
-# not create abbreviated in-session worker lanes. Two compatibility modes:
-#   - "legacy-relay" (DEFAULT): coordinator-only; any Agent spawn is denied
-#     and directed to the provider-neutral full-cycle fanout runner.
-#   - "interactive-lanes": compatibility escape hatch for old flows that
-#     intentionally use same-session Workflow/Agent lanes.
+# R2-1; DEFAULT FLIPPED fix-3 75051ca2507f gate-2, 2026-07-27 per explicit
+# founder ruling: "запускай любых агентов, на любых моделях/провайдере, в
+# зависимости от роутинга — сам ты не пишешь код, ты супервизор"): (re)write
+# the supervise-mode sentinel -- {"pid","started_at","mode"} -- consumed by
+# hooks/leadv2-supervise-fanout-guard.sh (PreToolUse:Agent). `mode` resolves
+# the D-f=A contradiction found in codex-review-2.md finding 1. Two modes:
+#   - "interactive-lanes" (DEFAULT as of fix-3): the supervisor may spawn any
+#     subagent_type, any model/provider -- ROUTING (this skill's own
+#     documented dispatch procedure: SKILL.md step 3 sends top-level
+#     code-writing task work through scripts/leadv2-fanout.sh for the full
+#     Phase 0..8 cycle + mandatory Codex/GLM-FIRST review; same-session
+#     Agent/Workflow calls remain valid ONLY as child-internal phase
+#     helpers) decides placement, not this hook. The supervisor itself still
+#     never edits code directly -- that discipline is enforced by the
+#     skill's own procedure, not by an Agent-spawn type ban.
+#   - "legacy-relay": opt-in strict coordinator-only mode (set
+#     LEADV2_SUPERVISE_MODE=legacy-relay explicitly); any Agent spawn is
+#     denied and directed to the provider-neutral full-cycle fanout runner.
+#     Retained for a session that wants the stricter gate back.
 # `mode` is recomputed on every (re)write (reflects the CURRENT invocation's
 # intent), while pid/started_at identity is preserved for a live sentinel.
 # Idempotent: a live sentinel keeps its original started_at; a missing/dead
@@ -154,9 +163,9 @@ SUPERVISE_SENTINEL="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-p
 # guard itself the next time it sees a dead pid. Deleted by 799dc99's B1
 # root-resolution refactor and never re-added -- guard was silently inert
 # (lying-green: hook installed, reads a file nobody wrote) until fix-1.
-_SUP_MODE="${LEADV2_SUPERVISE_MODE:-legacy-relay}"
+_SUP_MODE="${LEADV2_SUPERVISE_MODE:-interactive-lanes}"
 if [[ "$_SUP_MODE" != "interactive-lanes" && "$_SUP_MODE" != "legacy-relay" ]]; then
-  _SUP_MODE="legacy-relay"
+  _SUP_MODE="interactive-lanes"
 fi
 if [[ -f "${SCRIPT_DIR}/leadv2-active-registry.sh" ]]; then
   # shellcheck source=leadv2-active-registry.sh
@@ -197,7 +206,7 @@ if os.path.isfile(path):
 caller_pid = int(pid_str)
 if existing_pid is not None and existing_pid != caller_pid:
     owner_pid = existing_pid
-    owner_mode = existing_mode or "legacy-relay"
+    owner_mode = existing_mode or "interactive-lanes"
 else:
     owner_pid = caller_pid
     owner_mode = mode
