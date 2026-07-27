@@ -7,6 +7,17 @@
 # manufactures false confidence — that is exactly what let a stale plugin
 # cache silently revert 4 shipped fixes for an hour undetected.
 #
+# DRIFT-GUARD-ADVISES-BACKWARD-SYNC-01 (2026-07-27): the guard used to
+# assume canonical always wins on a mismatch and always advised "sync from
+# canonical" — but "canonical" here just means first-in-array, not
+# most-recent. Measured live: 4/5 persona-engine copies were 1-10 days
+# NEWER than canonical, so that advice would have overwritten newer working
+# code with older code. Direction is now decided PER ENTRY by evidence
+# (canonical's last git-commit time in ~/Projects/leadv2 vs the copy's
+# filesystem mtime) — never by position in the hierarchy. See
+# decide_direction() below; each drift entry now carries a
+# CANONICAL_NEWER / VENDORED_NEWER / UNKNOWN suffix and its own remedy.
+#
 # The five copies:
 #   (1) canonical  ~/Projects/leadv2/plugins/leadv2/scripts/        [git-tracked source of truth]
 #   (2) leadv2-repo-vendored  ~/Projects/leadv2/.claude/scripts/
@@ -166,8 +177,60 @@ _extras_csv="$(IFS=$'\x1f'; echo "${COPY_EXTRA[*]}")"
 COMPARE_OUT="$(NAMES="${_names_csv}" PATHS="${_paths_csv}" RELPATHS="${_relpaths_csv}" \
   EXTRAS="${_extras_csv}" CANONICAL_SCRIPTS="${CANONICAL_SCRIPTS}" \
   CANONICAL_PLUGIN_ROOT="${CANONICAL_ROOT}/plugins/leadv2" \
+  CANONICAL_ROOT="${CANONICAL_ROOT}" \
   RUNTIME_EXCLUDE="docs/leadv2" python3 <<'PYEOF'
-import hashlib, os
+import hashlib, os, subprocess
+
+canonical_root = os.environ["CANONICAL_ROOT"]
+
+def canonical_commit_time(git_relpath):
+    """Last commit time (unix epoch) that touched git_relpath in the
+    canonical repo. None if untracked/unknown — caller falls back to mtime.
+    Never raises: a git failure must not crash the guard."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", canonical_root, "log", "-1", "--format=%ct", "--", git_relpath],
+            capture_output=True, text=True, timeout=5,
+        )
+        ts = out.stdout.strip()
+        if ts:
+            return int(ts)
+    except Exception:
+        pass
+    return None
+
+def _mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+# DRIFT-GUARD-ADVISES-BACKWARD-SYNC-01: evidence-based direction, never
+# "canonical wins because it's listed first". Evidence used, in priority
+# order: (1) canonical's own git-log recency for that path — the most
+# trustworthy signal, since checkouts/rsyncs can rewrite mtimes but git
+# history can't; falls back to (2) canonical's filesystem mtime if the path
+# is untracked; compared against (3) the copy's filesystem mtime. A 2s
+# buffer absorbs filesystem timestamp resolution / clock skew noise so
+# near-simultaneous writes don't get misclassified either direction.
+def decide_direction(canonical_file, canonical_git_relpath, copy_file):
+    canon_evidence = canonical_commit_time(canonical_git_relpath)
+    if canon_evidence is None:
+        canon_evidence = _mtime(canonical_file)
+    copy_evidence = _mtime(copy_file)
+    if canon_evidence is None or copy_evidence is None:
+        return "UNKNOWN"
+    if copy_evidence > canon_evidence + 2:
+        return "VENDORED_NEWER"
+    if canon_evidence > copy_evidence + 2:
+        return "CANONICAL_NEWER"
+    return "UNKNOWN"
+
+REMEDY = {
+    "VENDORED_NEWER": "promote vendored -> canonical (this copy is newer; copy it INTO ~/Projects/leadv2, do not overwrite it)",
+    "CANONICAL_NEWER": "sync from canonical (canonical is newer; leadv2-plugin-sync.sh is safe here)",
+    "UNKNOWN": "inconclusive evidence — diff manually before syncing either direction",
+}
 
 def sha256_file(path):
     try:
@@ -228,30 +291,52 @@ for idx in range(len(names)):
     # PASS 1: scripts (canonical .sh/.py+tests set).
     for rp in relpaths:
         copy_file = os.path.join(path, rp)
+        canonical_file = os.path.join(canonical_scripts, rp)
+        canonical_git_relpath = f"plugins/leadv2/scripts/{rp}"
         if not os.path.isfile(copy_file):
+            # Copy has nothing — canonical is the only source, direction is
+            # unambiguous regardless of timestamps.
             drift_found = True
-            report.append(f"{name}:{rp}:MISSING")
-            print(f"DRIFT [{name}]: missing file {rp}")
+            report.append(f"{name}:{rp}:MISSING:CANONICAL_NEWER")
+            print(f"DRIFT [{name}]: missing file {rp} ({REMEDY['CANONICAL_NEWER']})")
             continue
         if sha256_file(copy_file) != canon_hashes[rp]:
             drift_found = True
-            report.append(f"{name}:{rp}:CONTENT_DIFFERS")
-            print(f"DRIFT [{name}]: content differs for {rp}")
+            direction = decide_direction(canonical_file, canonical_git_relpath, copy_file)
+            report.append(f"{name}:{rp}:CONTENT_DIFFERS:{direction}")
+            print(f"DRIFT [{name}]: content differs for {rp} [{direction}] — {REMEDY[direction]}")
     # PASS 2: extra warn-mode subdirs. The copy's plugin-root is the parent
     # of its scripts/ dir (plugin-cache -> .../0.1.0, shared -> .../leadv2-shared).
     copy_plugin_root = os.path.dirname(path)
     for sub in subs:
         for rp, chash in canon_set(sub).items():
             copy_file = os.path.join(copy_plugin_root, sub, rp)
+            canonical_file = os.path.join(canonical_plugin, sub, rp)
+            canonical_git_relpath = f"plugins/leadv2/{sub}/{rp}"
             if not os.path.isfile(copy_file):
                 drift_found = True
-                report.append(f"{name}:{sub}/{rp}:MISSING")
-                print(f"DRIFT [{name}]: missing file {sub}/{rp}")
+                report.append(f"{name}:{sub}/{rp}:MISSING:CANONICAL_NEWER")
+                print(f"DRIFT [{name}]: missing file {sub}/{rp} ({REMEDY['CANONICAL_NEWER']})")
                 continue
             if sha256_file(copy_file) != chash:
                 drift_found = True
-                report.append(f"{name}:{sub}/{rp}:CONTENT_DIFFERS")
-                print(f"DRIFT [{name}]: content differs for {sub}/{rp}")
+                direction = decide_direction(canonical_file, canonical_git_relpath, copy_file)
+                report.append(f"{name}:{sub}/{rp}:CONTENT_DIFFERS:{direction}")
+                print(f"DRIFT [{name}]: content differs for {sub}/{rp} [{direction}] — {REMEDY[direction]}")
+
+if drift_found:
+    n_vendored = sum(1 for r in report if r.endswith(":VENDORED_NEWER"))
+    n_canonical = sum(1 for r in report if r.endswith(":CANONICAL_NEWER"))
+    n_unknown = sum(1 for r in report if r.endswith(":UNKNOWN"))
+    print(
+        f"SUMMARY: {n_vendored} entr{'y' if n_vendored == 1 else 'ies'} where a "
+        f"copy is NEWER than canonical (promote vendored -> canonical); "
+        f"{n_canonical} entr{'y' if n_canonical == 1 else 'ies'} where canonical "
+        f"is newer or the copy is missing the file (sync from canonical); "
+        f"{n_unknown} entr{'y' if n_unknown == 1 else 'ies'} with inconclusive "
+        f"evidence (diff manually). Do NOT blanket re-run leadv2-plugin-sync.sh "
+        f"across all entries — check the direction tag on each one first."
+    )
 
 print("---REPORT---")
 for r in report:
@@ -284,7 +369,13 @@ if [[ "${JSON}" -eq 1 ]]; then
 fi
 
 if [[ ${drift_found} -eq 1 ]]; then
-  log "DRIFT DETECTED across ${#drift_report[@]} entr$([[ ${#drift_report[@]} -eq 1 ]] && echo y || echo ies) — re-run leadv2-plugin-sync.sh from canonical (~/Projects/leadv2/plugins/leadv2/scripts/) to reconcile."
+  # DRIFT-GUARD-ADVISES-BACKWARD-SYNC-01: no blanket remedy — each entry
+  # above (and each --json entries[] string) carries its own
+  # CANONICAL_NEWER / VENDORED_NEWER / UNKNOWN suffix decided by evidence.
+  # Blindly re-running leadv2-plugin-sync.sh from canonical is only correct
+  # for CANONICAL_NEWER entries; a VENDORED_NEWER entry needs the opposite
+  # (promote that copy INTO ~/Projects/leadv2 first, then sync).
+  log "DRIFT DETECTED across ${#drift_report[@]} entr$([[ ${#drift_report[@]} -eq 1 ]] && echo y || echo ies) — see per-entry direction/remedy above (SUMMARY line) before syncing anything."
   exit 1
 fi
 
