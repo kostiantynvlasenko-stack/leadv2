@@ -304,6 +304,12 @@ ${PER_TASK_BOILERPLATE}"
 
 STREAM_OUT="$HANDOFF_DIR/${ROLE}.stream.jsonl"
 
+# Turn cap — captured once so the spawn arg and the post-run truncation detector
+# (SUBSESSION-MAXTURNS-TRUNCATION-01) compare against the SAME value. Default
+# raised 25 → 60: real builds routinely needed >25 turns and died silently at the
+# cap (caller saw rc=0 on a half-written file). Override: LEADV2_SUBSESSION_MAX_TURNS.
+MAX_TURNS="${LEADV2_SUBSESSION_MAX_TURNS:-60}"
+
 CLAUDE_ARGS=(
   -p "$FINAL_PROMPT"
   --model "$MODEL"
@@ -314,7 +320,7 @@ CLAUDE_ARGS=(
   # silently killing the sonnet dispatch channel. Found 2026-07-25 via a dispatched
   # worker whose pid was never alive. Stream is machine-parsed, not human-read.
   --verbose
-  --max-turns "${LEADV2_SUBSESSION_MAX_TURNS:-25}"
+  --max-turns "$MAX_TURNS"
   --permission-mode acceptEdits
 )
 [[ -n "$EFFORT" ]] && CLAUDE_ARGS+=(--effort "$EFFORT")
@@ -786,6 +792,45 @@ _detect_empty_session() {
 }
 
 # ---------------------------------------------------------------------------
+# Truncation detection — SUBSESSION-MAXTURNS-TRUNCATION-01.
+# When `claude --max-turns N` stops because it exhausted N turns (vs a clean
+# end_turn finish), the wrapper used to exit 0 — callers saw "success" on a
+# half-written build. The stream-json `result` event already carries `num_turns`
+# (same stream parse_and_record_cost walks for usage/stop_reason), so we attach
+# to THAT real signal rather than invent a new mechanism. num_turns >= cap ⇒ the
+# process was forcstopped at the turn limit. Prints num_turns + returns 0 on
+# ---------------------------------------------------------------------------
+_detect_truncation() {
+  local stream_file="$1" cap="$2"
+  [[ -f "$stream_file" && -n "$cap" ]] || return 1
+  [[ "$cap" =~ ^[0-9]+$ ]] || return 1
+  python3 -c '
+import sys, json
+stream_file, cap = sys.argv[1], int(sys.argv[2])
+num = None
+try:
+    with open(stream_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if o.get("type") == "result":
+                nt = o.get("num_turns")
+                if isinstance(nt, int):
+                    num = nt
+except Exception:
+    sys.exit(1)
+if num is not None and num >= cap:
+    print(num)
+    sys.exit(0)
+sys.exit(1)
+' "$stream_file" "$cap"
+}
+# ---------------------------------------------------------------------------
 # D5 DRY_RUN chokepoint — call site 1 of 4 (claude-subsession.sh spawn).
 # leadv2_dry_run_guard() is sourced from leadv2-helpers.sh above.
 # When LEADV2_DRY_RUN=1: logs "[DRY_RUN] subsession spawn ..." and exits 0
@@ -830,6 +875,14 @@ if [[ "$WAIT" == "1" ]]; then
         [[ -f "$SUMMARY_FILE" ]] && return 0
       fi
     fi
+    # SUBSESSION-MAXTURNS-TRUNCATION-01: worker hit --max-turns without finishing.
+    # Takes priority over the refusal / generic missing-marker messages — it is the
+    # root cause. Exit 3 distinguishes truncation from refusal(2)/missing-marker(1).
+    if _trunc_turns=$(_detect_truncation "$STREAM_OUT" "$MAX_TURNS"); then
+      echo "claude-subsession: TRUNCATED at max-turns=${MAX_TURNS} (num_turns=${_trunc_turns}; worker did not finish) — raise LEADV2_SUBSESSION_MAX_TURNS or split the task" >&2
+      _costs_append "$HANDOFF_DIR/costs.yaml" "$(printf -- '- event: max_turns_truncated\n  role: %s\n  model: %s\n  num_turns: %s\n  max_turns: %s\n  timestamp: %s\n' "$ROLE" "$MODEL" "$_trunc_turns" "$MAX_TURNS" "$(date -u +%FT%TZ)")"
+      exit 3
+    fi
     # Check if this failure was due to a model refusal (stop_reason='refusal').
     # Refusal exit code 2 lets callers distinguish refusal from ordinary missing-marker failures.
     if [[ "${_SUBSESSION_REFUSAL_DETECTED:-0}" == "1" ]]; then
@@ -866,6 +919,15 @@ else
     wait "$PID" 2>/dev/null || true
     parse_and_record_cost "$STREAM_OUT" "$ROLE" "$MODEL" "$SESSION_ID" "$HANDOFF_DIR" "$_start_epoch" "$PREFIX_CHECKSUM"
     _detect_empty_session
+    # SUBSESSION-MAXTURNS-TRUNCATION-01: bg path can't change the wrapper exit
+    # (caller already holds the PID), but surface the same signal so cost-flush /
+    # pulse logs explain a half-written build. Only when deliverable is missing.
+    if ! grep -q "DELIVERABLE_COMPLETE" "$HANDOFF_DIR/${ROLE}.full.md" 2>/dev/null && ! grep -q "DELIVERABLE_COMPLETE" "$HANDOFF_DIR/${ROLE}.md" 2>/dev/null; then
+      if _trunc_turns=$(_detect_truncation "$STREAM_OUT" "$MAX_TURNS"); then
+        echo "claude-subsession: TRUNCATED at max-turns=${MAX_TURNS} (num_turns=${_trunc_turns}; worker did not finish) — raise LEADV2_SUBSESSION_MAX_TURNS or split the task" >&2
+        _costs_append "$HANDOFF_DIR/costs.yaml" "$(printf -- '- event: max_turns_truncated\n  role: %s\n  model: %s\n  num_turns: %s\n  max_turns: %s\n  timestamp: %s\n' "$ROLE" "$MODEL" "$_trunc_turns" "$MAX_TURNS" "$(date -u +%FT%TZ)")"
+      fi
+    fi
     rm -f "$MARKER_FILE"
   ) &
   echo "PID=$PID LABEL=$SESSION_LABEL SESSION_ID=$SESSION_ID STREAM=$STREAM_OUT"
