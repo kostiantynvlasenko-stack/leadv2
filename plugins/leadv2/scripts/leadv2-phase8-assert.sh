@@ -58,6 +58,14 @@ if [[ -z "$TASK_ID" ]]; then
   exit 2
 fi
 
+# Hard failures accumulate here; warnings do not.
+# MUST be declared before the FIRST check that appends to it. It used to sit
+# below A7/A8 (~line 158), so every A7/A8 hard failure was silently erased
+# before the verdict was computed: a task with a missing E2E sentinel or a
+# failed deploy-verify still closed GREEN. That is the hollow-close mechanism
+# this gate exists to kill (ASSERT-FAILURES-ERASED-01, 2026-07-27).
+failures=()
+
 # ── A7: E2E gate sentinel exists and is fresh (E2E-INTO-DEV-LOOP-01) ─────────
 E2E_SENTINEL="${LEADV2_HANDOFF_DIR}/${TASK_ID}/e2e-gate-passed.flag"
 if [[ -f "$E2E_SENTINEL" ]]; then
@@ -153,9 +161,6 @@ SENTINEL="${LEADV2_HANDOFF_DIR}/${TASK_ID}/phase8-passed.flag"
 REFLECT_HISTORY="${LEADV2_PROJECT_ROOT}/docs/leadv2/reflect-history.yaml"
 
 TODAY="$(date '+%Y-%m-%d')"
-
-# Hard failures accumulate here; warnings do not.
-failures=()
 
 # ── A1: closed YAML exists ────────────────────────────────────────────────────
 if [[ -f "$CLOSED_YAML" ]]; then
