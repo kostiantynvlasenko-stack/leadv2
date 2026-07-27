@@ -46,6 +46,19 @@ for value in (project_root, worktree):
         if os.path.isdir(real) and real not in roots:
             roots.append(real)
 
+# CODEX-LANE-FALSEKILL-0726: a codex child session runs the leadv2 Phase-0
+# worktree protocol itself and does ALL of its work (STATE.md, active.yaml,
+# circuit-breaker, the phase-8 sentinel) inside the conventional worktree dir.
+# It never registers that worktree in active.yaml, so `worktree` above is empty
+# and the fingerprint only measures the main repo — where codex leaves no trace.
+# Every turn then scores as "no progress" and the runner's stall guard
+# false-kills the lane. Include the conventional worktree path explicitly.
+_conventional_wt = os.path.join(project_root, ".claude", "worktrees", task_id)
+if os.path.isdir(_conventional_wt):
+    _real_wt = os.path.realpath(_conventional_wt)
+    if _real_wt not in roots:
+        roots.append(_real_wt)
+
 def file_digest(path):
     h = hashlib.sha256()
     try:

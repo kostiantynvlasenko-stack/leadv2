@@ -71,6 +71,13 @@ LOCK_FILE="$TASK_DIR/.session-runner.lock"
 PID_FILE="$TASK_DIR/.session-runner.pid"
 THREAD_ID_FILE="$TASK_DIR/.session-runner.codex-thread-id"
 LOGF="$TASK_DIR/codex-session-runner.log"
+# CODEX-LANE-FALSEKILL-0726: the codex child session runs the leadv2 Phase-0
+# worktree protocol itself and does all of its work (incl. writing the phase-8
+# sentinel) inside the conventional worktree, not in this main repo that the
+# runner watches. Mirror the completion-sentinel path there so a finished codex
+# lane can actually signal completion.
+WORKTREE_DIR="$PROJECT_ROOT/.claude/worktrees/$TASK_ID"
+WORKTREE_SENTINEL="$WORKTREE_DIR/docs/handoff/$TASK_ID/phase8-passed.flag"
 PROGRESS_TOOL="${LEADV2_PROGRESS_FINGERPRINT:-$SCRIPT_DIR/leadv2-progress-fingerprint.sh}"
 
 exec 9>"$LOCK_FILE"
@@ -82,6 +89,9 @@ printf -- '%s\n' "$$" > "$PID_FILE"
 
 sentinel_present() {
   [[ -f "$SENTINEL" ]] && return 0
+  # CODEX-LANE-FALSEKILL-0726: codex writes the sentinel into its Phase-0
+  # worktree; check there too or a completed codex lane never registers as done.
+  [[ -n "${WORKTREE_SENTINEL:-}" && -f "$WORKTREE_SENTINEL" ]] && return 0
   [[ -f "$COMPLETION_RECEIPT" ]] || return 1
   python3 - "$COMPLETION_RECEIPT" "$TASK_ID" <<'PYEOF' >/dev/null 2>&1
 import json, sys
