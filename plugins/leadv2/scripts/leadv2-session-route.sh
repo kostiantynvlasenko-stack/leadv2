@@ -17,7 +17,7 @@ usage() {
   cat >&2 <<'EOF'
 Usage: leadv2-session-route.sh --class <Light|Standard|Heavy|Strategic>
        [--risk-tags <csv>] [--suggested-model <model>]
-       [--suggested-effort <effort>] [--provider <auto|claude|codex>]
+       [--suggested-effort <effort>] [--provider <auto|claude|codex|glm>]
 EOF
   exit 1
 }
@@ -41,8 +41,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$PROVIDER_REQUEST" in
-  auto|claude|codex) ;;
-  *) log_error "provider must be auto, claude, or codex (got: $PROVIDER_REQUEST)"; exit 1 ;;
+  auto|claude|codex|glm) ;;
+  *) log_error "provider must be auto, claude, codex, or glm (got: $PROVIDER_REQUEST)"; exit 1 ;;
 esac
 
 # Defaults are intentionally usable without YAML/PyYAML. The canonical config
@@ -60,6 +60,11 @@ CLAUDE_STANDARD_MODEL="sonnet"
 CLAUDE_STANDARD_EFFORT="medium"
 CLAUDE_HEAVY_MODEL="opus"
 CLAUDE_HEAVY_EFFORT="high"
+GLM_ENABLED="true"
+GLM_LIGHT_MODEL="glm-5.2"
+GLM_LIGHT_EFFORT="low"
+GLM_STANDARD_MODEL="glm-5.2"
+GLM_STANDARD_EFFORT="medium"
 HIGH_RISK_TAGS="auth,rls,safety,publish,security,arch"
 
 _config_file="${LEADV2_SESSION_ROUTING_CONFIG:-}"
@@ -87,6 +92,11 @@ if [[ -n "$_config_file" && -f "$_config_file" ]]; then
       claude_standard_effort) CLAUDE_STANDARD_EFFORT="$_value" ;;
       claude_heavy_model) CLAUDE_HEAVY_MODEL="$_value" ;;
       claude_heavy_effort) CLAUDE_HEAVY_EFFORT="$_value" ;;
+      glm_enabled) GLM_ENABLED="$_value" ;;
+      glm_light_model) GLM_LIGHT_MODEL="$_value" ;;
+      glm_light_effort) GLM_LIGHT_EFFORT="$_value" ;;
+      glm_standard_model) GLM_STANDARD_MODEL="$_value" ;;
+      glm_standard_effort) GLM_STANDARD_EFFORT="$_value" ;;
       high_risk_tags) HIGH_RISK_TAGS="$_value" ;;
     esac
   done < <(python3 - "$_config_file" <<'PYEOF' 2>/dev/null || true
@@ -99,8 +109,10 @@ except Exception:
 
 codex = data.get("codex") or {}
 claude = data.get("claude") or {}
+glm = data.get("glm") or {}
 cm = codex.get("models") or {}
 am = claude.get("models") or {}
+gm = glm.get("models") or {}
 high = data.get("high_risk") or {}
 
 values = {
@@ -117,6 +129,11 @@ values = {
     "claude_standard_effort": (am.get("standard") or {}).get("effort"),
     "claude_heavy_model": (am.get("heavy") or {}).get("model"),
     "claude_heavy_effort": (am.get("heavy") or {}).get("effort"),
+    "glm_enabled": glm.get("enabled"),
+    "glm_light_model": (gm.get("light") or {}).get("model"),
+    "glm_light_effort": (gm.get("light") or {}).get("effort"),
+    "glm_standard_model": (gm.get("standard") or {}).get("model"),
+    "glm_standard_effort": (gm.get("standard") or {}).get("effort"),
     "high_risk_tags": ",".join(str(x) for x in (high.get("tags") or [])),
 }
 for key, value in values.items():
@@ -133,6 +150,11 @@ CODEX_LIGHT_MODEL="${LEADV2_CODEX_LIGHT_MODEL:-$CODEX_LIGHT_MODEL}"
 CODEX_LIGHT_EFFORT="${LEADV2_CODEX_LIGHT_EFFORT:-$CODEX_LIGHT_EFFORT}"
 CODEX_STANDARD_MODEL="${LEADV2_CODEX_STANDARD_MODEL:-$CODEX_STANDARD_MODEL}"
 CODEX_STANDARD_EFFORT="${LEADV2_CODEX_STANDARD_EFFORT:-$CODEX_STANDARD_EFFORT}"
+GLM_ENABLED="${LEADV2_GLM_ENABLED:-$GLM_ENABLED}"
+GLM_LIGHT_MODEL="${LEADV2_GLM_LIGHT_MODEL:-$GLM_LIGHT_MODEL}"
+GLM_LIGHT_EFFORT="${LEADV2_GLM_LIGHT_EFFORT:-$GLM_LIGHT_EFFORT}"
+GLM_STANDARD_MODEL="${LEADV2_GLM_STANDARD_MODEL:-$GLM_STANDARD_MODEL}"
+GLM_STANDARD_EFFORT="${LEADV2_GLM_STANDARD_EFFORT:-$GLM_STANDARD_EFFORT}"
 HIGH_RISK_TAGS="${LEADV2_HIGH_RISK_TAGS:-$HIGH_RISK_TAGS}"
 
 if ! [[ "$CODEX_MAX_USED_PERCENT" =~ ^[0-9]+$ ]] || (( CODEX_MAX_USED_PERCENT < 1 || CODEX_MAX_USED_PERCENT > 100 )); then
@@ -176,11 +198,28 @@ if [[ "$_class_l" == "light" ]]; then
   _codex_effort="$CODEX_LIGHT_EFFORT"
 fi
 
+_glm_model="$GLM_STANDARD_MODEL"
+_glm_effort="$GLM_STANDARD_EFFORT"
+if [[ "$_class_l" == "light" ]]; then
+  _glm_model="$GLM_LIGHT_MODEL"
+  _glm_effort="$GLM_LIGHT_EFFORT"
+fi
+
+_emit_route_log() {
+  # PROVIDER-LEAD-PARITY: one machine-parseable stderr line per routing
+  # decision, for ALL THREE providers — fixes "routing choice not legible".
+  local provider="$1" model="$2" effort="$3" reason="$4" displaced="$5"
+  printf -- '[leadv2-session-route] provider=%s model=%s effort=%s reason=%s displaced=%s\n' \
+    "$provider" "$model" "$effort" "$reason" "$displaced" >&2
+}
+
 # An explicit/safety-forced Claude route does not need a Codex login probe or
 # three-provider quota request. Besides latency, those probes created noisy
 # auth failures during perfectly valid Claude-only launches. Emit the final
 # route immediately and mark the skipped telemetry honestly.
 if [[ "$_high_risk" == "true" && "${LEADV2_ALLOW_CODEX_HIGH_RISK:-0}" != "1" ]]; then
+  _emit_route_log "claude" "$_claude_model" "$_claude_effort" \
+    "high-risk class/tags force Claude; Codex/GLM full-session routing is blocked" "none"
   printf 'provider=claude\n'
   printf 'model=%s\n' "$_claude_model"
   printf 'effort=%s\n' "$_claude_effort"
@@ -191,6 +230,8 @@ if [[ "$_high_risk" == "true" && "${LEADV2_ALLOW_CODEX_HIGH_RISK:-0}" != "1" ]];
   printf 'anthropic_used_percent=unknown\n'
   exit 0
 elif [[ "$PROVIDER_REQUEST" == "claude" ]]; then
+  _emit_route_log "claude" "$_claude_model" "$_claude_effort" \
+    "explicit provider override: claude" "none"
   printf 'provider=claude\n'
   printf 'model=%s\n' "$_claude_model"
   printf 'effort=%s\n' "$_claude_effort"
@@ -287,15 +328,59 @@ if [[ -n "$_codex_used" ]]; then
   fi
 fi
 
+# GLM eligibility: class Light/Standard only (never Heavy/Strategic), risk_tags
+# must not intersect HIGH_RISK_TAGS, and leadv2-glm-quota-gate.sh must exit 0
+# (headroom OK). Gate exit 1 (>=80% threshold) or exit 2 (peak, no override) is
+# treated as no-headroom -> not eligible; off_limits forbids reimplementing
+# that gate's logic here, so it is always called, never inlined.
+_glm_eligible=false
+_glm_unavailable_reason=""
+if [[ "$GLM_ENABLED" != "true" && "$GLM_ENABLED" != "1" ]]; then
+  _glm_unavailable_reason="disabled by policy"
+elif [[ "$_high_risk" == "true" ]]; then
+  _glm_unavailable_reason="high-risk class/tags; GLM is banned from arch/design/safety work"
+elif [[ "$_class_l" != "light" && "$_class_l" != "standard" ]]; then
+  _glm_unavailable_reason="class ${TASK_CLASS} not eligible for GLM (Light/Standard only)"
+else
+  _glm_eligible=true
+fi
+
+_glm_quota_ok=false
+if [[ "$_glm_eligible" == "true" ]]; then
+  _glm_quota_gate="${LEADV2_GLM_QUOTA_GATE:-$SCRIPT_DIR/leadv2-glm-quota-gate.sh}"
+  if [[ -f "$_glm_quota_gate" ]]; then
+    if bash "$_glm_quota_gate" >/dev/null 2>/dev/null; then
+      _glm_quota_ok=true
+    else
+      _glm_gate_rc=$?
+      _glm_unavailable_reason="quota gate refused (rc=${_glm_gate_rc}; see leadv2-glm-quota-gate.sh for the live reroute reason)"
+    fi
+  else
+    _glm_unavailable_reason="quota gate script missing (${_glm_quota_gate})"
+  fi
+fi
+
 _provider="claude"
 _model="$_claude_model"
 _effort="$_claude_effort"
 _reason=""
 
 if [[ "$_high_risk" == "true" && "${LEADV2_ALLOW_CODEX_HIGH_RISK:-0}" != "1" ]]; then
-  _reason="high-risk class/tags force Claude; Codex full-session routing is blocked"
+  _reason="high-risk class/tags force Claude; Codex/GLM full-session routing is blocked"
 elif [[ "$PROVIDER_REQUEST" == "claude" ]]; then
   _reason="explicit provider override: claude"
+elif [[ "$PROVIDER_REQUEST" == "glm" && "$_glm_eligible" == "true" && "$_glm_quota_ok" == "true" ]]; then
+  _provider="glm"
+  _model="$_glm_model"
+  _effort="$_glm_effort"
+  _reason="explicit provider override: glm"
+elif [[ "$PROVIDER_REQUEST" == "glm" ]]; then
+  _reason="explicit glm request refused (${_glm_unavailable_reason:-ineligible}); Claude fallback"
+elif [[ "$PROVIDER_REQUEST" == "auto" && "$_glm_eligible" == "true" && "$_glm_quota_ok" == "true" ]]; then
+  _provider="glm"
+  _model="$_glm_model"
+  _effort="$_glm_effort"
+  _reason="routine ${TASK_CLASS} task routed to GLM (primary code writer, GLM-FIRST-01) to preserve Claude/Codex quota"
 elif [[ "$_codex_available" != "true" ]]; then
   _reason="Codex unavailable (${_codex_unavailable_reason}); Claude fallback"
 elif [[ "$_codex_quota_ok" != "true" ]]; then
@@ -311,6 +396,28 @@ elif [[ "$PROVIDER_REQUEST" == "codex" || "$PROVIDER_REQUEST" == "auto" ]]; then
   fi
 fi
 
+# Observability: which OTHER provider would have been picked instead, purely
+# among the providers that were actually eligible+quota-OK — makes a
+# double-spend risk (e.g. glm chosen while codex also had headroom) legible.
+_displaced="none"
+case "$_provider" in
+  glm)
+    [[ "$_codex_available" == "true" && "$_codex_quota_ok" == "true" ]] && _displaced="codex"
+    ;;
+  codex)
+    [[ "$_glm_eligible" == "true" && "$_glm_quota_ok" == "true" ]] && _displaced="glm"
+    ;;
+  claude)
+    if [[ "$_glm_eligible" == "true" && "$_glm_quota_ok" == "true" ]]; then
+      _displaced="glm"
+    elif [[ "$_codex_available" == "true" && "$_codex_quota_ok" == "true" ]]; then
+      _displaced="codex"
+    fi
+    ;;
+esac
+
+_emit_route_log "$_provider" "$_model" "$_effort" "$_reason" "$_displaced"
+
 printf 'provider=%s\n' "$_provider"
 printf 'model=%s\n' "$_model"
 printf 'effort=%s\n' "$_effort"
@@ -319,3 +426,6 @@ printf 'high_risk=%s\n' "$_high_risk"
 printf 'codex_available=%s\n' "$_codex_available"
 printf 'codex_used_percent=%s\n' "${_codex_used:-unknown}"
 printf 'anthropic_used_percent=%s\n' "${_anthropic_used:-unknown}"
+printf 'glm_eligible=%s\n' "$_glm_eligible"
+printf 'glm_quota_ok=%s\n' "$_glm_quota_ok"
+printf 'displaced=%s\n' "$_displaced"
