@@ -978,25 +978,37 @@ launch_headless() {
     log_error "leadv2-session-runner.sh missing/not executable at ${_runner} — refusing an unguarded one-shot launch"
     return 1
   fi
+  # LANE-WORKTREE-ISOLATION-01: create (or reattach) this lane's own git
+  # worktree+branch BEFORE launch, and run the child there instead of the
+  # shared PROJECT_ROOT — SD-LANES-HAVE-NO-WORKTREE-01 found headless children
+  # never actually isolated (Phase 0's EnterWorktree call is not reliable for
+  # fanout children). LEADV2_PROJECT_ROOT is pinned to the ORIGINAL shared
+  # root so control-plane files (active.yaml, docs/handoff, bus.jsonl) still
+  # resolve to the one shared location regardless of which worktree the
+  # child's code edits land in. ensure() never fails the launch — on any git
+  # error it logs loud and falls back to PROJECT_ROOT (legacy shared tree).
+  local _lane_dir
+  _lane_dir="$("${SCRIPT_DIR}/leadv2-lane-worktree.sh" ensure "$tid" "$cls" 2>>"$logf")"
+  [[ -n "$_lane_dir" ]] || _lane_dir="$PROJECT_ROOT"
   local _used_setsid=false
   if command -v setsid >/dev/null 2>&1; then
     _used_setsid=true
-    ( cd "$PROJECT_ROOT" && \
+    ( cd "$_lane_dir" && \
       exec env LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
         LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
         LEADV2_LEAD_EFFORT="${lead_effort}" LEADV2_SESSION_PROVIDER="${provider}" \
-        LEADV2_RUNNER_FORCE_FRESH="${FORCE}" \
+        LEADV2_RUNNER_FORCE_FRESH="${FORCE}" LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" \
         setsid nohup "$_runner" </dev/null >>"$logf" 2>&1 ) &
   else
-    ( cd "$PROJECT_ROOT" && \
+    ( cd "$_lane_dir" && \
       exec env LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 \
         LEADV2_TASK_ID="${tid}" LEADV2_LEAD_MODEL="${lead_model}" \
         LEADV2_LEAD_EFFORT="${lead_effort}" LEADV2_SESSION_PROVIDER="${provider}" \
-        LEADV2_RUNNER_FORCE_FRESH="${FORCE}" \
+        LEADV2_RUNNER_FORCE_FRESH="${FORCE}" LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" \
         nohup "$_runner" </dev/null >>"$logf" 2>&1 ) &
   fi
   local pid=$!
-  log "headless launch: task=${tid} pid=${pid} provider=${provider} model=${lead_model}/${lead_effort} log=${logf}"
+  log "headless launch: task=${tid} pid=${pid} provider=${provider} model=${lead_model}/${lead_effort} lane_dir=${_lane_dir} log=${logf}"
 
   local _reg_rc=0
   _fanout_register_session "$tid" "$cls" "$pid" "leadv2: ${tid}" "true" "false" "headless" \
@@ -1079,8 +1091,14 @@ launch_windowed() {
   # Windowed children use the same provider-neutral completion runner as
   # headless/tmux. The visible terminal is observability, not a weaker
   # lifecycle contract.
-  printf -v cmd 'cd %q && export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q LEADV2_SESSION_PROVIDER=%q LEADV2_RUNNER_FORCE_FRESH=%q; exec %q' \
-    "$PROJECT_ROOT" "$tid" "$lead_model" "$lead_effort" "$provider" "$FORCE" "$_runner"
+  # LANE-WORKTREE-ISOLATION-01: same ensure()-before-launch as launch_headless
+  # — cd into the lane's own worktree, keep LEADV2_PROJECT_ROOT pinned to the
+  # shared root for control-plane files.
+  local _lane_dir
+  _lane_dir="$("${SCRIPT_DIR}/leadv2-lane-worktree.sh" ensure "$tid" "$cls")"
+  [[ -n "$_lane_dir" ]] || _lane_dir="$PROJECT_ROOT"
+  printf -v cmd 'cd %q && export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q LEADV2_SESSION_PROVIDER=%q LEADV2_RUNNER_FORCE_FRESH=%q LEADV2_PROJECT_ROOT=%q; exec %q' \
+    "$_lane_dir" "$tid" "$lead_model" "$lead_effort" "$provider" "$FORCE" "$PROJECT_ROOT" "$_runner"
 
   # AppleScript double-quoted strings treat backslash as an escape char, but
   # bash's %q emits backslash-escaped tokens (e.g. `/leadv2\ ${tid}`) — raw
@@ -1171,6 +1189,11 @@ launch_tmux() {
   local logf="${task_dir}/session.log"
   : > "$logf"  # truncate/create so "non-empty after launch" is a real signal, not stale content
 
+  # LANE-WORKTREE-ISOLATION-01: same ensure()-before-launch as launch_headless.
+  local _lane_dir
+  _lane_dir="$("${SCRIPT_DIR}/leadv2-lane-worktree.sh" ensure "$tid" "$cls" 2>>"$logf")"
+  [[ -n "$_lane_dir" ]] || _lane_dir="$PROJECT_ROOT"
+
   # Some hosts (observed: no-tty parent shells with no pty anywhere in the
   # chain) run an intermittently unstable tmux server that can exit between
   # one window's creation and the next, independent of the new-window notty
@@ -1181,7 +1204,7 @@ launch_tmux() {
   local _tmux_attempt
   for ((_tmux_attempt = 1; _tmux_attempt <= 3; _tmux_attempt++)); do
     if ! tmux has-session -t "$TMUX_SESSION_NAME" 2>/dev/null; then
-      tmux new-session -d -s "$TMUX_SESSION_NAME" -n "$window" -c "$PROJECT_ROOT"
+      tmux new-session -d -s "$TMUX_SESSION_NAME" -n "$window" -c "$_lane_dir"
       log "tmux: created session '${TMUX_SESSION_NAME}' with window '${window}' (attempt ${_tmux_attempt})"
     else
       # Never reuse a window whose task is already registered live in
@@ -1202,9 +1225,9 @@ launch_tmux() {
       # verified fix across repeated runs. `new-session -d` above has never
       # reproduced this (only the SECOND+ window trips it), unwrapped.
       if [[ "$(uname -s)" == "Darwin" ]] && command -v script >/dev/null 2>&1 && ! tty -s 2>/dev/null; then
-        script -q /dev/null tmux new-window -t "$TMUX_SESSION_NAME" -n "$window" -c "$PROJECT_ROOT" >/dev/null 2>&1 || true
+        script -q /dev/null tmux new-window -t "$TMUX_SESSION_NAME" -n "$window" -c "$_lane_dir" >/dev/null 2>&1 || true
       else
-        tmux new-window -t "$TMUX_SESSION_NAME" -n "$window" -c "$PROJECT_ROOT" 2>/dev/null || true
+        tmux new-window -t "$TMUX_SESSION_NAME" -n "$window" -c "$_lane_dir" 2>/dev/null || true
       fi
       log "tmux: added window '${window}' to existing session '${TMUX_SESSION_NAME}' (attempt ${_tmux_attempt})"
     fi
@@ -1232,8 +1255,8 @@ launch_tmux() {
     log_error "leadv2-session-runner.sh missing/not executable at ${_runner} — refusing an unguarded one-shot launch"
     return 1
   fi
-  printf -v cmd 'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q LEADV2_SESSION_PROVIDER=%q LEADV2_RUNNER_FORCE_FRESH=%q; exec %q' \
-    "$tid" "$lead_model" "$lead_effort" "$provider" "$FORCE" "$_runner"
+  printf -v cmd 'export LEADV2_DAEMON=1 LEADV2_ASYNC_QUESTIONS=1 LEADV2_FANOUT=1 LEADV2_TASK_ID=%q LEADV2_LEAD_MODEL=%q LEADV2_LEAD_EFFORT=%q LEADV2_SESSION_PROVIDER=%q LEADV2_RUNNER_FORCE_FRESH=%q LEADV2_PROJECT_ROOT=%q; exec %q' \
+    "$tid" "$lead_model" "$lead_effort" "$provider" "$FORCE" "$PROJECT_ROOT" "$_runner"
   tmux send-keys -t "$target" "$cmd" C-m 2>/dev/null || true
 
   # tmux new-window hands back the pane's shell pid, not the exec'd `claude`
