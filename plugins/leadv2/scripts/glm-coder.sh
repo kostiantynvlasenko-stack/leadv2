@@ -59,20 +59,19 @@ umask 077
 readonly SECRETS_FILE="${GLM_SECRETS_FILE:-${HOME}/.claude/secrets/zai.env}"
 readonly ZAI_BASE_URL="https://api.z.ai/api/anthropic"
 readonly RUNS_DIR="${GLM_RUNS_DIR:-${HOME}/.claude/cache/glm-runs}"
-# GLM_TIMEOUT: was 3600s (1h) -- the silent-hang window this task fixes.
-# Lowered to 900s (15min) as fix-round-4's RADICAL SIMPLIFY: this is now the
-# SOLE bound on a stuck run (the overload-specific detector was removed
-# entirely after 4 review rounds each found a new race in it).
+# GLM_TIMEOUT: wall-clock backstop. Turn and no-progress guards below stop
+# superlinear conversation replay before a run reaches this outer bound.
 readonly GLM_TIMEOUT="${GLM_TIMEOUT:-900}"
-# GLM-REVIVE-01 (2026-07-16): earlier, separate bound than GLM_TIMEOUT above.
-# Watched by watchdog_loop independently of the full-run timeout: if
-# progress.log stops growing (no new TOKENS/TOOL line) for GLM_STALL_S, the
-# run is killed EARLY and auto-retried once under a fresh run-id (see
-# cmd_supervise). Root cause this fixes: GLM calling the Agent tool trips the
-# nested-spawn permission gate and then hangs completely silent -- with only
-# GLM_TIMEOUT as a bound, that silent hang ate the full 900s every time.
+# GLM-REVIVE-01 legacy compatibility: when configured lower than the explicit
+# no-progress guard below, GLM_STALL_S still kills and revives once. At the
+# defaults, GLM_NO_PROGRESS_S reaches the timeout/fallback path first.
 readonly GLM_STALL_S="${GLM_STALL_S:-300}"
 readonly GLM_MAX_TURNS="${GLM_MAX_TURNS:-40}"
+# Hard watchdog limits. GLM_MAX_TURNS remains the Claude CLI request limit and
+# --max-turns remains backward compatible; GLM_TURN_LIMIT is independently
+# enforced from observed stream turns through the timeout/fallback path.
+readonly GLM_TURN_LIMIT="${GLM_TURN_LIMIT:-40}"
+readonly GLM_NO_PROGRESS_S="${GLM_NO_PROGRESS_S:-${GLM_STALL_S}}"
 # Dedicated non-zero exit code for "GLM gave up, fall back to sonnet" —
 # distinct from 75 (lock busy, pre-existing) and from ordinary shell exit 1.
 readonly GLM_FALLBACK_EXIT_CODE="${GLM_FALLBACK_EXIT_CODE:-76}"
@@ -154,6 +153,7 @@ Usage:
   test    Self-test: sends a short prompt and prints the tail of the response.
 
 Env knobs: GLM_TIMEOUT (default 900s), GLM_MAX_TURNS (default 40),
+  GLM_TURN_LIMIT (default 40), GLM_NO_PROGRESS_S (default 300s),
   GLM_FALLBACK_EXIT_CODE (default 76).
 
 Terminal sentinels (GLM-RELIABILITY-529-01) — mutually exclusive, appended to
@@ -168,9 +168,10 @@ progress.log, mirrored into meta.yaml's exit_code field:
                            sonnet would hit too. meta.yaml exit_code = the
                            REAL child exit code (never overridden).
 Provider retries (HTTP 429/503/529) are logged as PROVIDER_RETRY lines in
-progress.log for visibility, but are NOT independently detected or acted on
-— the run is bounded solely by GLM_TIMEOUT. glm-coder.sh never invokes
-sonnet itself — callers/Monitor must react to whichever sentinel appears.
+progress.log for visibility. Wall time, observed turns, and no-progress time
+all terminate through the same timeout marker and fallback path.
+glm-coder.sh never invokes sonnet itself — callers/Monitor must react to
+whichever sentinel appears.
 EOF
 }
 
@@ -384,13 +385,25 @@ endpoint: ${ZAI_BASE_URL}
 model: glm-5.2
 max_turns: ${max_turns}
 timeout: ${timeout_s}
+turn_limit: ${GLM_TURN_LIMIT}
+no_progress_s: ${GLM_NO_PROGRESS_S}
 pid: ${pid}
 status: running
 exit_code:
-turns:
-duration_s:
+turns: 0
+duration_s: 0
 tokens_in: 0
 tokens_out: 0
+cache_read_input_tokens: 0
+cache_creation_input_tokens: 0
+usage_source: stream_proxy
+usage_is_estimate: true
+usage_estimate_turns: 0
+usage_estimate_elapsed_s: 0
+usage_estimate_bytes_streamed: 0
+usage_estimate_output_tokens: 0
+usage_updated_at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')
+termination_bound:
 started_at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 finished_at:
 EOF
@@ -399,7 +412,9 @@ EOF
 
 finalize_meta() {
   local run_dir="$1" status="$2" exit_code="$3" duration="$4" tokens_in="$5" tokens_out="$6" turns="$7"
-  local run_id repo cwd_dir prompt_file endpoint model max_turns timeout_s pid started_at
+  local run_id repo cwd_dir prompt_file endpoint model max_turns timeout_s turn_limit no_progress_s pid started_at
+  local cache_read cache_creation usage_source usage_is_estimate estimate_turns
+  local estimate_elapsed estimate_bytes estimate_output usage_updated_at termination_bound
   run_id="$(meta_get "${run_dir}" run_id)"
   repo="$(meta_get "${run_dir}" repo)"
   cwd_dir="$(meta_get "${run_dir}" cwd)"
@@ -408,8 +423,32 @@ finalize_meta() {
   model="$(meta_get "${run_dir}" model)"
   max_turns="$(meta_get "${run_dir}" max_turns)"
   timeout_s="$(meta_get "${run_dir}" timeout)"
+  turn_limit="$(meta_get "${run_dir}" turn_limit)"
+  no_progress_s="$(meta_get "${run_dir}" no_progress_s)"
   pid="$(meta_get "${run_dir}" pid)"
   started_at="$(meta_get "${run_dir}" started_at)"
+  cache_read="$(meta_get "${run_dir}" cache_read_input_tokens)"
+  cache_creation="$(meta_get "${run_dir}" cache_creation_input_tokens)"
+  usage_source="$(meta_get "${run_dir}" usage_source)"
+  usage_is_estimate="$(meta_get "${run_dir}" usage_is_estimate)"
+  estimate_turns="$(meta_get "${run_dir}" usage_estimate_turns)"
+  estimate_elapsed="$(meta_get "${run_dir}" usage_estimate_elapsed_s)"
+  estimate_bytes="$(meta_get "${run_dir}" usage_estimate_bytes_streamed)"
+  estimate_output="$(meta_get "${run_dir}" usage_estimate_output_tokens)"
+  usage_updated_at="$(meta_get "${run_dir}" usage_updated_at)"
+  termination_bound="$(cat "${run_dir}/.bound_reason" 2>/dev/null || meta_get "${run_dir}" termination_bound)"
+  cache_read="${cache_read:-0}"
+  cache_creation="${cache_creation:-0}"
+  usage_source="${usage_source:-stream_proxy}"
+  usage_is_estimate="${usage_is_estimate:-true}"
+  estimate_turns="${estimate_turns:-${turns}}"
+  estimate_elapsed="${estimate_elapsed:-${duration}}"
+  estimate_bytes="${estimate_bytes:-0}"
+  estimate_output="${estimate_output:-0}"
+  if [[ "${usage_is_estimate}" == "true" ]]; then
+    estimate_elapsed="${duration}"
+  fi
+  usage_updated_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   local tmp
   tmp="$(mktemp "${run_dir}/.meta.XXXXXX")"
   cat > "${tmp}" <<EOF
@@ -421,6 +460,8 @@ endpoint: ${endpoint}
 model: ${model}
 max_turns: ${max_turns}
 timeout: ${timeout_s}
+turn_limit: ${turn_limit:-${GLM_TURN_LIMIT}}
+no_progress_s: ${no_progress_s:-${GLM_NO_PROGRESS_S}}
 pid: ${pid}
 status: ${status}
 exit_code: ${exit_code}
@@ -428,6 +469,16 @@ turns: ${turns}
 duration_s: ${duration}
 tokens_in: ${tokens_in}
 tokens_out: ${tokens_out}
+cache_read_input_tokens: ${cache_read}
+cache_creation_input_tokens: ${cache_creation}
+usage_source: ${usage_source}
+usage_is_estimate: ${usage_is_estimate}
+usage_estimate_turns: ${estimate_turns}
+usage_estimate_elapsed_s: ${estimate_elapsed}
+usage_estimate_bytes_streamed: ${estimate_bytes}
+usage_estimate_output_tokens: ${estimate_output}
+usage_updated_at: ${usage_updated_at}
+termination_bound: ${termination_bound}
 started_at: ${started_at}
 finished_at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
@@ -455,22 +506,162 @@ os.execvp(sys.argv[1], sys.argv[1:])
 ' "$@"
 }
 
-# Best-effort observability filter over stream-json (R3): never determines
-# run success/failure — only produces MODEL/TOOL/TOKENS/PROVIDER_RETRY lines
-# for progress.log.
+# Incremental observability filter over stream-json. It never determines run
+# success/failure, but it atomically persists usage after stream progress so a
+# process-group kill cannot strand meta.yaml at an unexplained 0/0. Real
+# per-message usage is accumulated by message id when present; the terminal
+# result replaces it with authoritative totals. Current GLM streams report
+# zero per-message usage, so until that result arrives the explicitly-labelled
+# proxy is observed turns, elapsed time, stream bytes, and SDK thinking-token
+# estimates.
 parse_stream() {
+  local run_dir="$1"
   python3 -u -c '
-import sys, json
+import datetime
+import json
+import os
+import sys
+import tempfile
+import time
+
+run_dir = sys.argv[1]
+meta_path = os.path.join(run_dir, "meta.yaml")
+state_path = os.path.join(run_dir, ".stream_state")
+started_ts = time.time()
+last_persist_ts = 0.0
+last_progress_ts = int(started_ts)
+stream_bytes = 0
+estimated_output_tokens = 0
+observed_turns = 0
+reported_turns = 0
+seen_message_ids = set()
+message_usage = {}
+terminal_usage = None
+
+def _num(value):
+    try:
+        return max(0, int(value))
+    except Exception:
+        return 0
+
+def _usage_values(usage):
+    usage = usage if isinstance(usage, dict) else {}
+    return {
+        "tokens_in": _num(usage.get("input_tokens", usage.get("inputTokens", 0))),
+        "tokens_out": _num(usage.get("output_tokens", usage.get("outputTokens", 0))),
+        "cache_read_input_tokens": _num(usage.get("cache_read_input_tokens", usage.get("cacheReadInputTokens", 0))),
+        "cache_creation_input_tokens": _num(usage.get("cache_creation_input_tokens", usage.get("cacheCreationInputTokens", 0))),
+    }
+
+def _result_usage(ev):
+    values = _usage_values(ev.get("usage"))
+    if any(values.values()):
+        return values
+    totals = {key: 0 for key in values}
+    model_usage = ev.get("modelUsage")
+    if isinstance(model_usage, dict):
+        for item in model_usage.values():
+            parsed = _usage_values(item)
+            for key in totals:
+                totals[key] += parsed[key]
+    return totals
+
+def _atomic_write(path, text):
+    fd, tmp_path = tempfile.mkstemp(prefix=".usage.", dir=run_dir, text=True)
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+
+def _rewrite_meta(values):
+    try:
+        with open(meta_path) as source:
+            lines = source.readlines()
+    except FileNotFoundError:
+        return
+    remaining = dict(values)
+    rewritten = []
+    for line in lines:
+        key = line.split(":", 1)[0] if ":" in line else ""
+        if key in remaining:
+            rewritten.append(key + ": " + str(remaining.pop(key)) + "\n")
+        else:
+            rewritten.append(line)
+    for key, value in remaining.items():
+        rewritten.append(key + ": " + str(value) + "\n")
+    _atomic_write(meta_path, "".join(rewritten))
+
+def _usage_totals():
+    if terminal_usage is not None and any(terminal_usage.values()):
+        return terminal_usage, "terminal_result", "false"
+    totals = {
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    }
+    for usage in message_usage.values():
+        for key in totals:
+            totals[key] += usage[key]
+    if any(totals.values()):
+        return totals, "assistant_events", "false"
+    return totals, "stream_proxy", "true"
+
+def _persist(force=False):
+    global last_persist_ts
+    now = time.time()
+    if not force and now - last_persist_ts < 1.0:
+        return
+    totals, source, is_estimate = _usage_totals()
+    elapsed = max(0, int(now - started_ts))
+    turns = reported_turns or observed_turns
+    updated_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state = (
+        "turns=" + str(observed_turns) + "\n"
+        + "last_progress_ts=" + str(last_progress_ts) + "\n"
+        + "bytes_streamed=" + str(stream_bytes) + "\n"
+    )
+    _atomic_write(state_path, state)
+    _rewrite_meta({
+        "turns": turns,
+        "duration_s": elapsed,
+        "tokens_in": totals["tokens_in"],
+        "tokens_out": totals["tokens_out"],
+        "cache_read_input_tokens": totals["cache_read_input_tokens"],
+        "cache_creation_input_tokens": totals["cache_creation_input_tokens"],
+        "usage_source": source,
+        "usage_is_estimate": is_estimate,
+        "usage_estimate_turns": observed_turns,
+        "usage_estimate_elapsed_s": elapsed,
+        "usage_estimate_bytes_streamed": stream_bytes,
+        "usage_estimate_output_tokens": estimated_output_tokens,
+        "usage_updated_at": updated_at,
+    })
+    last_persist_ts = now
+
+_persist(force=True)
 
 for raw in sys.stdin:
-    raw = raw.strip()
-    if not raw:
+    stream_bytes += len(raw.encode("utf-8", "replace"))
+    line = raw.strip()
+    if not line:
+        _persist()
         continue
     try:
-        ev = json.loads(raw)
+        ev = json.loads(line)
     except Exception:
+        _persist()
         continue
     etype = ev.get("type")
+    made_progress = False
+    force_persist = False
     try:
         if etype == "system" and ev.get("subtype") == "init":
             print("MODEL " + str(ev.get("model", "unknown")))
@@ -482,38 +673,78 @@ for raw in sys.stdin:
             # eval/splice the untrusted error body. Purely observational:
             # retries are NOT independently detected/acted on any more --
             # the run is bounded solely by GLM_TIMEOUT.
-            def _num(v):
+            def _display_num(v):
                 try:
                     return str(int(v))
                 except Exception:
                     return "?"
-            print("PROVIDER_RETRY status=" + _num(ev.get("error_status")) + " attempt=" + _num(ev.get("attempt")))
+            print("PROVIDER_RETRY status=" + _display_num(ev.get("error_status")) + " attempt=" + _display_num(ev.get("attempt")))
+        elif etype == "system" and ev.get("subtype") == "thinking_tokens":
+            estimated_output_tokens += _num(ev.get("estimated_tokens_delta"))
+            made_progress = True
+        elif etype == "system" and ev.get("subtype") in ("task_started", "task_notification"):
+            made_progress = True
         elif etype == "result":
-            # GLM-REVIVE-01 (2026-07-16): z.ai/GLM streaming leaves every
-            # per-turn assistant.message.usage at {0,0} (confirmed live,
-            # 260716-194916 run) -- the ONLY place real accumulated tokens
-            # appears is the single terminal type:"result" event, top-level
-            # usage field. Emitted once per completed run, so this adds
-            # exactly one real TOKENS line (no double-count against the
-            # always-zero assistant-branch lines above).
-            usage = ev.get("usage") or {}
-            if usage:
-                print("TOKENS in=" + str(usage.get("input_tokens", 0)) + " out=" + str(usage.get("output_tokens", 0)))
+            # GLM-REVIVE-01: this is currently the only authoritative usage
+            # event. Persist all billable categories before the parser exits.
+            terminal_usage = _result_usage(ev)
+            reported_turns = _num(ev.get("num_turns"))
+            if any(terminal_usage.values()):
+                print(
+                    "TOKENS in=" + str(terminal_usage["tokens_in"])
+                    + " out=" + str(terminal_usage["tokens_out"])
+                    + " cache_read=" + str(terminal_usage["cache_read_input_tokens"])
+                    + " cache_creation=" + str(terminal_usage["cache_creation_input_tokens"])
+                    + " source=terminal_result"
+                )
+            made_progress = True
+            force_persist = True
         elif etype == "assistant":
             msg = ev.get("message") or {}
-            for block in (msg.get("content") or []):
+            message_id = str(msg.get("id") or "")
+            if not message_id:
+                message_id = "event-" + str(observed_turns + 1)
+            if message_id not in seen_message_ids:
+                seen_message_ids.add(message_id)
+                observed_turns += 1
+                force_persist = True
+            blocks = msg.get("content") or []
+            if blocks:
+                made_progress = True
+            for block in blocks:
                 if isinstance(block, dict) and block.get("type") == "tool_use":
                     name = block.get("name", "?")
                     inp = block.get("input") or {}
                     detail = inp.get("file_path") or inp.get("command") or inp.get("path") or ""
                     print("TOOL " + str(name) + " " + str(detail)[:120])
-            usage = msg.get("usage")
-            if usage:
-                print("TOKENS in=" + str(usage.get("input_tokens", 0)) + " out=" + str(usage.get("output_tokens", 0)))
+            usage = _usage_values(msg.get("usage"))
+            previous = message_usage.get(message_id, {key: 0 for key in usage})
+            merged = {key: max(previous[key], usage[key]) for key in usage}
+            message_usage[message_id] = merged
+            if merged != previous and any(merged.values()):
+                print(
+                    "TOKENS in=" + str(merged["tokens_in"])
+                    + " out=" + str(merged["tokens_out"])
+                    + " cache_read=" + str(merged["cache_read_input_tokens"])
+                    + " cache_creation=" + str(merged["cache_creation_input_tokens"])
+                    + " source=assistant_event"
+                )
+                force_persist = True
+        elif etype == "user":
+            msg = ev.get("message") or {}
+            for block in (msg.get("content") or []):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    made_progress = True
+                    break
     except Exception:
-        continue
+        pass
+    if made_progress:
+        last_progress_ts = int(time.time())
+    _persist(force=force_persist)
     sys.stdout.flush()
-'
+
+_persist(force=True)
+' "${run_dir}"
 }
 
 # Masks the literal Z.AI token substring wherever it appears in a stream.
@@ -582,10 +813,22 @@ if is_error:
 
 sum_tokens() {
   local run_dir="$1" field="$2"
-  { grep -oE "TOKENS in=[0-9]+ out=[0-9]+" "${run_dir}/progress.log" 2>/dev/null \
-    | grep -oE "${field}=[0-9]+" \
-    | cut -d= -f2 \
-    | awk '{s+=$1} END {print s+0}'; } || true
+  local key value
+  case "${field}" in
+    in) key="tokens_in" ;;
+    out) key="tokens_out" ;;
+    *) return 1 ;;
+  esac
+  value="$(meta_get "${run_dir}" "${key}")"
+  [[ "${value}" =~ ^[0-9]+$ ]] || value=0
+  printf '%s\n' "${value}"
+}
+
+observed_turns() {
+  local run_dir="$1" value
+  value="$(meta_get "${run_dir}" turns)"
+  [[ "${value}" =~ ^[0-9]+$ ]] || value=0
+  printf '%s\n' "${value}"
 }
 
 # ---------------------------------------------------------------------------
@@ -733,21 +976,51 @@ cmd_run_child() {
       --permission-mode bypassPermissions \
       --disallowedTools "Agent" \
       2> >(redact_stream >> "${run_dir}/stderr.log")
-  ) | tee "${run_dir}/journal.jsonl" | ( parse_stream >> "${run_dir}/progress.log" 2>>"${run_dir}/parser-error.log" || true )
+  ) | tee "${run_dir}/journal.jsonl" | ( parse_stream "${run_dir}" >> "${run_dir}/progress.log" 2>>"${run_dir}/parser-error.log" || true )
   echo "${PIPESTATUS[0]}" > "${run_dir}/exit_code"
   set -e
 }
 
+stream_state_get() {
+  local run_dir="$1" key="$2"
+  { grep "^${key}=" "${run_dir}/.stream_state" 2>/dev/null | head -1 | cut -d= -f2-; } || true
+}
+
+terminate_through_timeout_path() {
+  local child_pid="$1" run_dir="$2" bound="$3" value="$4" limit="$5"
+  printf '%s\n' "${bound}" > "${run_dir}/.bound_reason"
+  # Same marker-first ordering as the original wall-clock timeout. The
+  # supervisor therefore reaches the unchanged fallback sentinel/exit-76 path.
+  touch "${run_dir}/.timed_out"
+  case "${bound}" in
+    wall_clock)
+      printf '[%s] TIMEOUT after %ss -- killing process group %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "${limit}" "${child_pid}" >> "${run_dir}/progress.log"
+      ;;
+    turn_count)
+      printf '[%s] BOUND_TRIPPED bound=turn_count observed_turns=%s limit=%s -- killing process group %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "${value}" "${limit}" "${child_pid}" >> "${run_dir}/progress.log"
+      ;;
+    no_progress)
+      printf '[%s] BOUND_TRIPPED bound=no_progress idle_s=%s limit_s=%s -- killing process group %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "${value}" "${limit}" "${child_pid}" >> "${run_dir}/progress.log"
+      ;;
+  esac
+  kill -TERM "-${child_pid}" 2>/dev/null || true
+  sleep 5
+  kill -KILL "-${child_pid}" 2>/dev/null || true
+}
+
 watchdog_loop() {
   local child_pid="$1" timeout_s="$2" run_dir="$3" stall_s="${4:-${GLM_STALL_S}}"
+  local turn_limit="${5:-${GLM_TURN_LIMIT}}" no_progress_s="${6:-${GLM_NO_PROGRESS_S}}"
   local waited=0 interval=2
-  # GLM-REVIVE-01: independent, earlier stall bound. Tracked via
-  # progress.log's byte size -- any TOOL/TOKENS/PROVIDER_RETRY line appended
-  # by parse_stream resets the clock. A silent hang (e.g. GLM stuck on the
-  # nested-spawn permission gate after calling the Agent tool) now gets
-  # caught at stall_s instead of riding the full timeout_s to the floor.
-  local last_size=-1 last_change_ts
-  last_change_ts="$(date +%s)"
+  # GLM-REVIVE-01 legacy stall bound shares parse_stream activity state with
+  # the stricter no-progress guard. The explicit guard is checked first and
+  # routes through .timed_out; a lower legacy GLM_STALL_S may still revive.
+  local started_ts last_progress_ts
+  started_ts="$(date +%s)"
+  last_progress_ts="${started_ts}"
   while [[ ! -f "${run_dir}/.done" ]]; do
     if [[ "${waited}" -ge "${timeout_s}" ]]; then
       # fix-round-1 H1 (KEEP item from fix-round-4): touch the marker FIRST,
@@ -759,32 +1032,28 @@ watchdog_loop() {
       # downstream branch that reads it becomes dead code. Touching first
       # makes the marker unconditionally reliable regardless of who wins
       # that reap race.
-      touch "${run_dir}/.timed_out"
-      printf '[%s] TIMEOUT after %ss -- killing process group %s\n' \
-        "$(date '+%Y-%m-%d %H:%M:%S')" "${timeout_s}" "${child_pid}" >> "${run_dir}/progress.log"
-      kill -TERM "-${child_pid}" 2>/dev/null || true
-      sleep 5
-      kill -KILL "-${child_pid}" 2>/dev/null || true
+      terminate_through_timeout_path "${child_pid}" "${run_dir}" "wall_clock" "${waited}" "${timeout_s}"
       return 0
     fi
 
-    local cur_size now
-    # -f guard first: progress.log doesn't exist yet for the first ~0-2s
-    # while cmd_run_child is still spawning claude/tee/parse_stream -- an
-    # unguarded `wc -c < missing-file` under set -e would abort this whole
-    # backgrounded watchdog subshell silently on that startup race.
-    if [[ -f "${run_dir}/progress.log" ]]; then
-      cur_size="$(wc -c < "${run_dir}/progress.log" 2>/dev/null || echo 0)"
-    else
-      cur_size=0
-    fi
-    cur_size="$(printf '%s' "${cur_size}" | tr -d ' ')"
-    cur_size="${cur_size:-0}"
+    local observed now state_progress idle_s
     now="$(date +%s)"
-    if [[ "${cur_size}" != "${last_size}" ]]; then
-      last_size="${cur_size}"
-      last_change_ts="${now}"
-    elif [[ $(( now - last_change_ts )) -ge "${stall_s}" ]]; then
+    observed="$(stream_state_get "${run_dir}" turns)"
+    [[ "${observed}" =~ ^[0-9]+$ ]] || observed=0
+    if [[ "${observed}" -ge "${turn_limit}" ]]; then
+      terminate_through_timeout_path "${child_pid}" "${run_dir}" "turn_count" "${observed}" "${turn_limit}"
+      return 0
+    fi
+
+    state_progress="$(stream_state_get "${run_dir}" last_progress_ts)"
+    if [[ "${state_progress}" =~ ^[0-9]+$ ]] && [[ "${state_progress}" -gt "${last_progress_ts}" ]]; then
+      last_progress_ts="${state_progress}"
+    fi
+    idle_s=$(( now - last_progress_ts ))
+    if [[ "${idle_s}" -ge "${no_progress_s}" ]]; then
+      terminate_through_timeout_path "${child_pid}" "${run_dir}" "no_progress" "${idle_s}" "${no_progress_s}"
+      return 0
+    elif [[ "${idle_s}" -ge "${stall_s}" ]]; then
       # Same touch-before-kill ordering rationale as the timeout branch above.
       touch "${run_dir}/.stalled"
       printf '[%s] STALL_KILL after=%ss -- no progress; killing process group %s\n' \
@@ -827,7 +1096,7 @@ cmd_supervise() {
     echo "${child_pid}" > "$(lock_dir_for "${repo_hash}")/pgid" 2>/dev/null || true
   fi
 
-  ( watchdog_loop "${child_pid}" "${timeout_s}" "${run_dir}" "${GLM_STALL_S}" ) &
+  ( watchdog_loop "${child_pid}" "${timeout_s}" "${run_dir}" "${GLM_STALL_S}" "${GLM_TURN_LIMIT}" "${GLM_NO_PROGRESS_S}" ) &
   local watchdog_pid=$!
 
   wait "${child_pid}" 2>/dev/null || true
@@ -858,11 +1127,28 @@ cmd_supervise() {
       printf 'revived_from: %s\n' "$(meta_get "${run_dir}" run_id)" >> "${new_run_dir}/meta.yaml"
       printf '%s\n' "${repo_hash}" > "${new_run_dir}/.lockref"
 
+      # SD-GLM-PEAK-GATE-BYPASSED-01 (2026-07-27): the stall-revive recursion
+      # relaunches GLM via __run_child directly -- it never went back through
+      # cmd_bg/cmd_run's glm_launch_gate call, so a revive could silently
+      # cross into peak/reroute territory. Gate it here too, same idiom as
+      # the other two call sites (`|| gate_rc=$?`, never `!`, to preserve the
+      # real exit code under `set -e`).
+      local gate_rc=0
+      glm_launch_gate || gate_rc=$?
+      if (( gate_rc != 0 )); then
+        echo "REVIVE_BLOCKED_BY_GATE -- quota gate refused the revive (code ${gate_rc}); not relaunching" >> "${run_dir}/progress.log"
+        extract_result "${run_dir}"
+        finalize_meta "${run_dir}" "revive_blocked_by_gate" "${gate_rc}" "$(( $(date +%s) - start_ts ))" \
+          "$(sum_tokens "${run_dir}" in)" "$(sum_tokens "${run_dir}" out)" \
+          "$(observed_turns "${run_dir}")"
+        return "${gate_rc}"
+      fi
+
       extract_result "${run_dir}"
       echo "REVIVED -> new_run_id=${new_run_id}" >> "${run_dir}/progress.log"
       finalize_meta "${run_dir}" "revived" "0" "$(( $(date +%s) - start_ts ))" \
         "$(sum_tokens "${run_dir}" in)" "$(sum_tokens "${run_dir}" out)" \
-        "$(grep -c '^TOKENS ' "${run_dir}/progress.log" 2>/dev/null || echo 0)"
+        "$(observed_turns "${run_dir}")"
       printf 'revived_to: %s\n' "${new_run_id}" >> "${run_dir}/meta.yaml"
 
       # Lock stays held (same repo_hash) — the recursive call's own finalize
@@ -906,7 +1192,7 @@ cmd_supervise() {
   local tokens_in tokens_out turns status
   tokens_in="$(sum_tokens "${run_dir}" in)"
   tokens_out="$(sum_tokens "${run_dir}" out)"
-  turns="$(grep -c '^TOKENS ' "${run_dir}/progress.log" 2>/dev/null || echo 0)"
+  turns="$(observed_turns "${run_dir}")"
 
   # FIX2 (KEEP item): an ERROR result payload (extract_result's
   # .result_is_error marker -- is_error:true or an "error*" subtype on the
@@ -1015,6 +1301,8 @@ cmd_bg() {
   cwd_dir="$(cd "${cwd_dir}" && pwd)"
   [[ "${max_turns}" =~ ^[0-9]+$ ]] || { log_error "--max-turns must be a positive integer"; exit 1; }
   [[ "${timeout_s}" =~ ^[0-9]+$ ]] || { log_error "--timeout must be a positive integer"; exit 1; }
+  [[ "${GLM_TURN_LIMIT}" =~ ^[1-9][0-9]*$ ]] || { log_error "GLM_TURN_LIMIT must be a positive integer"; exit 1; }
+  [[ "${GLM_NO_PROGRESS_S}" =~ ^[1-9][0-9]*$ ]] || { log_error "GLM_NO_PROGRESS_S must be a positive integer"; exit 1; }
 
   glm_launch_gate || exit $?
   load_secret
