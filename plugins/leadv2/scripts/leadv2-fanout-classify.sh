@@ -51,7 +51,7 @@ declare -A RISK_GROUPS=(
   [auth]="auth|oauth|login|cookie|session token|credential|api key|app_id"
   [rls]="rls|row level security|row-level security|policy|supabase policy"
   [safety]="safety gate|safety-gate|moderation|content policy|harmful"
-  [publish]="publish|deploy|prod|production|migration|schema change|ddl|drop table|destructive"
+  [publish]="publish|deploy|production deploy|production migration|schema change|ddl|drop table|destructive"
   [security]="security|secret|token|payment|billing|pii|gdpr"
   [arch]="architecture|arch redesign|rearchitect|breaking change|irreversible"
 )

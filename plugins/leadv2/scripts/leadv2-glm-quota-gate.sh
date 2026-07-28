@@ -56,7 +56,8 @@ cur_hour=$((10#${cur_hour}))
 in_peak=0
 if (( cur_hour >= 6 && cur_hour < 10 )); then in_peak=1; fi
 peak_ends_at="10:00 UTC"
-mins_until_peak_ends=$(( (10 - cur_hour) * 60 - $(date -u +%M) ))
+cur_min="$(date -u +%M)"; cur_min=$((10#${cur_min}))
+mins_until_peak_ends=$(( (10 - cur_hour) * 60 - cur_min ))
 (( mins_until_peak_ends < 0 )) && mins_until_peak_ends=0
 
 # ── live GLM read (fails open on any error) ──────────────────────────────────

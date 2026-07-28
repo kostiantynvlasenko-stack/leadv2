@@ -96,6 +96,14 @@ case "$SESSION_PROVIDER" in
     fi
     exec "$CODEX_RUNNER"
     ;;
+  glm)
+    GLM_RUNNER="${SCRIPT_DIR}/leadv2-glm-session-runner.sh"
+    if [[ ! -x "$GLM_RUNNER" ]]; then
+      log_error "provider=glm but runner is missing/not executable: $GLM_RUNNER"
+      exit 1
+    fi
+    exec "$GLM_RUNNER"
+    ;;
   auto)
     log_error "provider=auto reached the session runner unresolved; call leadv2-session-route.sh first"
     exit 1
@@ -236,9 +244,33 @@ fi
 attempt=0
 noop_streak=0
 stall_streak=0
+force_close_only=0
 while (( attempt < MAX_ATTEMPTS )); do
+  # Crash-recovery (3bf68affc141): re-derive real state from durable evidence
+  # before trusting this process's own log-diff bookkeeping — catches both a
+  # runner restart between attempts and a same-process success-without-close.
+  if (( attempt > 0 )); then
+    if ! type _leadv2_derive_real_state >/dev/null 2>&1; then
+      # shellcheck source=leadv2-helpers.sh
+      source "$SCRIPT_DIR/leadv2-helpers.sh"
+    fi
+    _real_state="$(_leadv2_derive_real_state "$TASK_ID" "$PROJECT_ROOT")"
+    case "$_real_state" in
+      done)
+        log "crash-recovery: phase8-passed.flag already present for ${TASK_ID} — task complete, skipping further attempts"
+        exit 0
+        ;;
+      close-only)
+        force_close_only=1
+        ;;
+    esac
+  fi
+
   if [[ "$attempt" -eq 0 ]]; then
     prompt="/leadv2 ${TASK_ID}"
+  elif [[ "$force_close_only" -eq 1 ]]; then
+    prompt="/leadv2 ${TASK_ID} -- CONTINUE: Your previous turn ended in success but the Phase-8 sentinel is missing. Do NOT redo any build/review/deploy work — git log shows it already landed. Run ONLY .claude/scripts/leadv2-phase8-close.sh (and its prerequisite leadv2-phase8-assert.sh / leadv2-phase8-e2e-gate.sh) to completion now (attempt ${attempt}/${MAX_ATTEMPTS})."
+    force_close_only=0
   else
     # Imperative continue prompt — same --session-id, so this is a
     # resume of the prior conversation, not a fresh /leadv2 dispatch.
@@ -303,8 +335,21 @@ while (( attempt < MAX_ATTEMPTS )); do
     exit 0
   fi
 
+  # Case 2 (3bf68affc141): this attempt's own log slice ended in
+  # "subtype":"success" but sentinel_present() above already returned false
+  # (or we would have exited at line ~303) — the model narrated completion
+  # without ever running Phase-8 close. Force a close-only continuation on
+  # the next attempt and treat this as progress, not a stall.
+  _attempt_log_slice="$(tail -c "+$((log_size_before + 1))" "$LOGF" 2>/dev/null || true)"
+  if printf '%s' "$_attempt_log_slice" | grep -q '"subtype"[[:space:]]*:[[:space:]]*"success"'; then
+    force_close_only=1
+    log "attempt ${attempt} reported success but phase8-passed.flag missing — forcing close-only continuation"
+  fi
+
   progress_after="$("$PROGRESS_TOOL" "$TASK_ID" 2>/dev/null || printf -- 'unknown-after')"
-  if [[ "$progress_before" == "$progress_after" ]]; then
+  if [[ "$force_close_only" -eq 1 ]]; then
+    stall_streak=0
+  elif [[ "$progress_before" == "$progress_after" ]]; then
     stall_streak=$((stall_streak + 1))
     log "attempt ${attempt} changed no phase/git/handoff evidence (stall_streak=${stall_streak}/${STALL_MAX})"
   else

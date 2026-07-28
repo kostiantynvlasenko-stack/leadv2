@@ -362,9 +362,36 @@ log "task=$TASK_ID provider=codex model=$MODEL effort=$EFFORT log=$LOGF resume=$
 attempt=0
 noop_streak=0
 stall_streak=0
+force_close_only=0
 while (( attempt < MAX_ATTEMPTS )); do
+  # Crash-recovery (3bf68affc141): re-derive real state from durable evidence
+  # (sentinel + git commits in the task's own worktree) before trusting this
+  # process's own bookkeeping — catches a runner restart between attempts.
+  if (( attempt > 0 )); then
+    if ! type _leadv2_derive_real_state >/dev/null 2>&1; then
+      # shellcheck source=leadv2-helpers.sh
+      source "$SCRIPT_DIR/leadv2-helpers.sh"
+    fi
+    _real_state="$(_leadv2_derive_real_state "$TASK_ID" "$PROJECT_ROOT" "$WORKTREE_DIR")"
+    case "$_real_state" in
+      done)
+        log "crash-recovery: phase8-passed.flag already present for $TASK_ID — task complete, skipping further attempts"
+        exit 0
+        ;;
+      close-only)
+        force_close_only=1
+        ;;
+    esac
+  fi
+
+  _close_only_sentence=""
+  if [[ "$force_close_only" -eq 1 ]]; then
+    _close_only_sentence=" Your previous turn already landed commits but the Phase-8 sentinel is missing -- do NOT redo any build/review/deploy work; run ONLY leadv2-phase8-close.sh (and its prerequisite leadv2-phase8-assert.sh / leadv2-phase8-e2e-gate.sh) to completion now."
+    force_close_only=0
+  fi
+
   if [[ -z "$THREAD_ID" ]]; then
-    prompt="You ARE ALREADY the leadv2 headless child session for task ${TASK_ID}; execute its Phase 0..8 lifecycle yourself (plan, build, adversarial review, deploy gate, live verification, close). NEVER invoke leadv2-codex-session-runner.sh, leadv2-session-runner.sh, leadv2-fanout.sh, leadv2-supervise.sh, or any launcher/dispatcher: that is self-recursion and will fail on this session's flock. Reuse only per-phase helper scripts and guards (such as leadv2-gate1-prompt.sh and leadv2-phase8-{assert,e2e-gate,close}.sh), never a session launcher. Never bypass a safety, merge, deploy, or phase gate. All founder questions must use .claude/scripts/leadv2-ask.sh because LEADV2_ASYNC_QUESTIONS=1. Stop only after docs/handoff/${TASK_ID}/phase8-passed.flag or its validated shared completion receipt exists, or a circuit breaker requires the supervising founder."
+    prompt="You ARE ALREADY the leadv2 headless child session for task ${TASK_ID}; execute its Phase 0..8 lifecycle yourself (plan, build, adversarial review, deploy gate, live verification, close). NEVER invoke leadv2-codex-session-runner.sh, leadv2-session-runner.sh, leadv2-fanout.sh, leadv2-supervise.sh, or any launcher/dispatcher: that is self-recursion and will fail on this session's flock. Reuse only per-phase helper scripts and guards (such as leadv2-gate1-prompt.sh and leadv2-phase8-{assert,e2e-gate,close}.sh), never a session launcher. Never bypass a safety, merge, deploy, or phase gate. All founder questions must use .claude/scripts/leadv2-ask.sh because LEADV2_ASYNC_QUESTIONS=1. Stop only after docs/handoff/${TASK_ID}/phase8-passed.flag or its validated shared completion receipt exists, or a circuit breaker requires the supervising founder. An active.yaml unregister failure is explicitly non-blocking (see leadv2-phase8-close.sh comment '(non-blocking)') -- log it and continue Phase 8 close; do NOT raise a question or stall on it.${_close_only_sentence}"
     cmd=("$CODEX_BIN" exec --json --model "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"" -C "$PROJECT_ROOT")
     if [[ "${LEADV2_UNSAFE_AUTOPILOT:-0}" == "1" ]]; then
       log "UNSAFE_AUTOPILOT receipt: full Codex approval and sandbox bypass enabled"
@@ -382,7 +409,7 @@ while (( attempt < MAX_ATTEMPTS )); do
     cmd+=("$prompt")
     _mode="fresh"
   else
-    prompt="Continue task ${TASK_ID} as the ALREADY-RUNNING leadv2 child session: execute the current Phase 0..8 work yourself. NEVER invoke leadv2-codex-session-runner.sh, leadv2-session-runner.sh, leadv2-fanout.sh, leadv2-supervise.sh, or any launcher/dispatcher; doing so is self-recursion under your own flock. Use only per-phase helper scripts, never session launchers. Re-check every sentinel and provider receipt before repeating any side effect. Drive it to canonical Phase-8 completion proof; route any founder decision through leadv2-ask.sh."
+    prompt="Continue task ${TASK_ID} as the ALREADY-RUNNING leadv2 child session: execute the current Phase 0..8 work yourself. NEVER invoke leadv2-codex-session-runner.sh, leadv2-session-runner.sh, leadv2-fanout.sh, leadv2-supervise.sh, or any launcher/dispatcher; doing so is self-recursion under your own flock. Use only per-phase helper scripts, never session launchers. Re-check every sentinel and provider receipt before repeating any side effect. Drive it to canonical Phase-8 completion proof; route any founder decision through leadv2-ask.sh. An active.yaml unregister failure is explicitly non-blocking (see leadv2-phase8-close.sh comment '(non-blocking)') -- log it and continue Phase 8 close; do NOT raise a question or stall on it.${_close_only_sentence}"
     cmd=("$CODEX_BIN" exec resume --json --model "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"")
     if [[ "${LEADV2_UNSAFE_AUTOPILOT:-0}" == "1" ]]; then
       log "UNSAFE_AUTOPILOT receipt: full Codex approval and sandbox bypass enabled"

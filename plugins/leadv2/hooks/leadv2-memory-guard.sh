@@ -103,16 +103,22 @@ fi
 # First attempt — deny and write sentinel
 touch "$SENTINEL_FILE"
 
-# Emit deny response using exact PreToolUse schema
+# Emit deny response using exact PreToolUse schema.
+# F1 (task 6d0c93f4a7b2): also print the reason to stderr -- on exit 2 the
+# harness surfaces stderr to the caller, not the stdout JSON, so a
+# stdout-only reason is a textless denial.
 trap - ERR
+REASON_MSG="Route durable facts to docs/leadv2/immune-patterns.yaml; keep global MEMORY.md thin."
 python3 -c "
 import sys, json
+reason = sys.argv[1]
 print(json.dumps({
     'hookSpecificOutput': {
         'hookEventName': 'PreToolUse',
         'permissionDecision': 'deny',
-        'permissionDecisionReason': 'Route durable facts to docs/leadv2/immune-patterns.yaml; keep global MEMORY.md thin.'
+        'permissionDecisionReason': reason
     }
 }))
-" 2>/dev/null
+" "$REASON_MSG"
+printf '[leadv2-memory-guard] %s\n' "$REASON_MSG" >&2 || true
 exit 2

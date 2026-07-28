@@ -37,7 +37,7 @@ _TASKS_MAX_human_needed=1
 # ── Single Python dispatcher — all operations via one heredoc ─────────────
 _tasks_dispatch() {
   python3 - "$_TASKS_FILE" "$_TASKS_LOCK" "$@" <<'DISPATCHER'
-import sys, os, yaml, fcntl, time, datetime
+import sys, os, yaml, fcntl, time, datetime, hashlib
 
 tasks_file = sys.argv[1]
 lock_path  = sys.argv[2]
@@ -87,12 +87,26 @@ def acquire_lock(shared=False):
 _wrapper_key = None
 _wrapper_extra = {}
 _LIST_KEYS = ("tasks", "items", "queues")
+# TASKS-YAML-STALE-BASE-CLOBBER-01 (c4e91a70b83d): sha256 of the raw on-disk
+# bytes captured at load_tasks() time. save_tasks() refuses to write if the
+# on-disk hash has changed in the meantime — i.e. another writer (a lane doing
+# a whole-file Edit/Write outside this flock) mutated the file under us. This
+# is defense-in-depth behind the pre-commit guard; within a single op we hold
+# the exclusive flock from load through save so the hash matches and this never
+# false-fires. It only trips on a real concurrent external mutation, and when
+# it does, refusing is the SAFE outcome (no silent clobber; caller retries).
+_load_hash = None
 
 def load_tasks():
-    global _wrapper_key, _wrapper_extra
+    global _wrapper_key, _wrapper_extra, _load_hash
     try:
-        with open(tasks_file) as f: doc = yaml.safe_load(f)
-    except FileNotFoundError: return []
+        with open(tasks_file, "rb") as f: raw = f.read()
+    except FileNotFoundError:
+        _load_hash = None
+        return []
+    try: _load_hash = hashlib.sha256(raw).hexdigest()
+    except Exception: _load_hash = None
+    doc = yaml.safe_load(raw.decode("utf-8", "replace"))
     if doc is None: return []
     if isinstance(doc, list): return doc
     if isinstance(doc, dict):
@@ -106,6 +120,21 @@ def load_tasks():
     return []
 
 def save_tasks(items):
+    # TASKS-YAML-STALE-BASE-CLOBBER-01 (c4e91a70b83d): base-aware write. Refuse
+    # to clobber if the on-disk file changed since load_tasks() read it. Exit
+    # 27 (distinct from 1/3/9) so callers can tell a stale-base refusal from a
+    # generic failure and retry by re-loading + re-applying.
+    if _load_hash is not None:
+        try:
+            with open(tasks_file, "rb") as f: cur = f.read()
+            if hashlib.sha256(cur).hexdigest() != _load_hash:
+                print("[tasks-lib] STALE-BASE-REFUSED: docs/tasks.yaml changed on disk since this "
+                      "process loaded it (another lane wrote it under us). Re-read fresh and re-apply "
+                      "your change; do NOT whole-file overwrite. (base=%s.. current=%s..)"
+                      % (_load_hash[:10], hashlib.sha256(cur).hexdigest()[:10]), file=sys.stderr)
+                sys.exit(27)
+        except FileNotFoundError:
+            pass  # file vanished since load; a save will (re)create it — allowed
     os.makedirs(os.path.dirname(tasks_file), exist_ok=True)
     tmp = tasks_file + ".tmp"
     if _wrapper_key:

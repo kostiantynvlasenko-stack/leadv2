@@ -1,6 +1,6 @@
 ---
 name: lead-reflect
-description: "[internal] Phase 8 Close §2 + pre-/compact — structured reflection on task outcomes, pattern extraction, and immune memory integration."
+description: "[internal] Phase 8 Close §2 — capture what the task taught: outcome patterns, immune-memory updates. Triggers: after leadv2-close writes its graph-reflect footprint, and before /compact."
 allowed-tools:
   - Read
   - Write

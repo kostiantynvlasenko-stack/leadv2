@@ -116,7 +116,7 @@ while [[ $# -gt 0 ]]; do
     --lead-model) LEAD_MODEL_OVERRIDE="$2"; shift 2 ;;
     --provider)   PROVIDER_REQUEST="$2";   shift 2 ;;
     -h|--help)
-      printf -- 'Usage: leadv2-fanout.sh [--n N] [--filter STR] [--tasks ID1,ID2] [--provider auto|claude|codex] [--dry-run] [--tmux|--windows|--headless] [--force] [--lead-model MODEL]\n'
+      printf -- 'Usage: leadv2-fanout.sh [--n N] [--filter STR] [--tasks ID1,ID2] [--provider auto|claude|codex|glm] [--dry-run] [--tmux|--windows|--headless] [--force] [--lead-model MODEL]\n'
       printf -- '  --tmux: one shared tmux session "leadv2", one window per task. Default\n'
       printf -- '          backend on macOS when tmux is on PATH.\n'
       printf -- '  --windows: force Terminal.app/iTerm2 osascript windows (old default).\n'
@@ -128,7 +128,7 @@ while [[ $# -gt 0 ]]; do
       printf -- '           launched by this invocation (default: classifier picks sonnet for\n'
       printf -- '           Light/Standard, opus for Heavy/Strategic). Use `--lead-model opus`\n'
       printf -- '           when the founder explicitly wants an Opus child; never on by default.\n'
-      printf -- '  --provider auto|claude|codex: provider for COMPLETE Phase 0..8 child\n'
+      printf -- '  --provider auto|claude|codex|glm: provider for COMPLETE Phase 0..8 child\n'
       printf -- '           sessions. auto routes routine work by live policy/quota; high-risk\n'
       printf -- '           classes/tags remain on Claude unless an explicit policy override exists.\n'
       exit 0
@@ -138,8 +138,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$PROVIDER_REQUEST" in
-  auto|claude|codex) ;;
-  *) log_error "--provider must be auto, claude, or codex (got: $PROVIDER_REQUEST)"; exit 1 ;;
+  auto|claude|codex|glm) ;;
+  *) log_error "--provider must be auto, claude, codex, or glm (got: $PROVIDER_REQUEST)"; exit 1 ;;
 esac
 
 if [[ -n "$LEAD_MODEL_OVERRIDE" ]]; then
@@ -157,6 +157,41 @@ if ! [[ "$N" =~ ^[0-9]+$ ]]; then
   log_error "--n must be a non-negative integer, got '$N'"
   exit 1
 fi
+
+# F2 (fix-round-2, task 6d0c93f4a7b2 / D4): log the EFFECTIVE LEADV2_LEAD_GUARD
+# value each child session will actually run under, and warn loudly when the
+# ambient env this script sees disagrees with it. ~/.claude/settings.json arms
+# LEADV2_LEAD_GUARD=1 as hook env for every session (including dispatched
+# children) -- that always wins over whatever this shell has exported, so
+# `export LEADV2_LEAD_GUARD=0` before calling fanout is silently ignored.
+# LEADV2_LEAD_GUARD_FORCE is the one override that actually reaches the hook.
+_log_effective_lead_guard() {
+  local _settings="$HOME/.claude/settings.json"
+  local _settings_val=""
+  if [[ -f "$_settings" ]]; then
+    _settings_val="$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    print(d.get('env', {}).get('LEADV2_LEAD_GUARD', ''))
+except Exception:
+    print('')
+" "$_settings" 2>/dev/null || true)"
+  fi
+  local _ambient="${LEADV2_LEAD_GUARD:-}"
+  local _force="${LEADV2_LEAD_GUARD_FORCE:-}"
+  local _effective="${_settings_val:-${_ambient:-0}}"
+  if [[ -n "$_force" ]]; then
+    log "LEADV2_LEAD_GUARD effective=${_force} (LEADV2_LEAD_GUARD_FORCE=${_force} overrides everything below)"
+  else
+    log "LEADV2_LEAD_GUARD effective=${_effective} (settings.json env=${_settings_val:-<unset>}, ambient shell=${_ambient:-<unset>})"
+    if [[ -n "$_ambient" && -n "$_settings_val" && "$_ambient" != "$_settings_val" ]]; then
+      log "WARN: ambient LEADV2_LEAD_GUARD=${_ambient} disagrees with settings.json's ${_settings_val} -- settings.json wins for every dispatched child, your export is silently ignored. Use 'export LEADV2_LEAD_GUARD_FORCE=${_ambient}' to actually force it."
+    fi
+  fi
+}
+_log_effective_lead_guard
 
 # ── Backend resolution ──────────────────────────────────────────────────────
 # Precedence: --headless > --tmux > --windows > platform default. Platform

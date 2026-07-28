@@ -97,6 +97,25 @@ Only things that need the founder reach chat.
    re-entry/PostCompact. The LOOP renders output, not the lead: URGENT events
    (new question / dead / close / truth-breach) surface within ~5s; a full
    pulse of exactly N <=180-byte lines (one per non-dead lane) every 300s.
+   **TOKEN-ECONOMY-01 (2026-07-27): attach with a filtering `Monitor(command=)`,
+   never a raw `Monitor(path=<log>)`.** Every stdout line from a Monitor'd
+   process/command is a model-visible wake, regardless of whether it needs a
+   decision — this is fixed harness behaviour the plugin cannot change. The
+   loop already tags every decision-worthy line with the literal substring
+   `URGENT` (question/dead/stuck/closed/truth-breach — see `_render_events`
+   and the `TRUTH_RED` branch of `_render_pulse` in
+   `scripts/leadv2-supervise-loop.sh`); routine pulse rows, `DONE`, and
+   `started`/`already running` lines never contain it. Attach with:
+   ```
+   Monitor(command="tail -F -n0 '<supervise-loop.log path>' | grep --line-buffered URGENT")
+   ```
+   `-n0` skips backlog on attach (no wake for history); `grep --line-buffered`
+   only emits (and only wakes the lead) on a URGENT-tagged line, so it still
+   surfaces within the same ~5s the loop appends it. No-decision events never
+   reach stdout, so they never cost a turn. Do not `Monitor(path=<log>)`
+   directly — that mode has no filter and wakes on every appended line
+   (pulse rows, DONE, started/already-running), which is the dominant
+   supervisor-turn cost this rule exists to kill.
 5. **Founder contract.**
    - Questions surface INSTANTLY as `AskUserQuestion` — never batched into
      the next pulse.

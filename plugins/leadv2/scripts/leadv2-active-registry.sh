@@ -325,7 +325,20 @@ try:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as tf:
             yaml.dump(data, tf, default_flow_style=False, sort_keys=False)
-        os.replace(tmp_path, yaml_path)
+        try:
+            os.replace(tmp_path, yaml_path)
+        except (OSError, PermissionError):
+            # Sandboxed callers (e.g. codex CLI's stricter --sandbox
+            # enforcement) can reject a rename that crosses a symlink
+            # boundary even though a direct write to the target succeeds.
+            # Still under the flock -- fall back to overwriting the target
+            # file in place instead of rename+replace.
+            with open(yaml_path, "w", encoding="utf-8") as tf2:
+                yaml.dump(data, tf2, default_flow_style=False, sort_keys=False)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     except Exception:
         try:
             os.unlink(tmp_path)
