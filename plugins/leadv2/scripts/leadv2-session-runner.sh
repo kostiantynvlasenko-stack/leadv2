@@ -32,7 +32,10 @@
 #       scripts/leadv2-fanout.sh's CLAUDE_BIN convention).
 #   LEADV2_SESSION_PROVIDER (default: claude) — claude|codex. `auto` must be
 #       resolved by leadv2-session-route.sh before this runner is launched.
-#   LEADV2_CLAUDE_MAX_TURNS (default: 30) — per-attempt runaway guard.
+#   LEADV2_CLAUDE_MAX_TURNS (default: 60) — per-attempt runaway guard. A
+#       nine-phase Heavy pipeline routinely needs more than 30 tool turns;
+#       each resumed attempt receives this fresh budget. Set the variable to
+#       override the default for a specific lane.
 #   LEADV2_CLAUDE_MAX_BUDGET_USD — optional per-attempt API budget ceiling.
 #
 # Idempotency: a per-task flock (docs/handoff/<task>/.session-runner.lock)
@@ -128,7 +131,7 @@ RETRY_SLEEP_S="${LEADV2_RUNNER_RETRY_SLEEP_S:-5}"
 NOOP_MAX="${LEADV2_RUNNER_NOOP_MAX:-3}"
 STALL_MAX="${LEADV2_RUNNER_STALL_MAX:-6}"
 CLAUDE_BIN="${LEADV2_FANOUT_CLAUDE_BIN:-claude}"
-CLAUDE_MAX_TURNS="${LEADV2_CLAUDE_MAX_TURNS:-30}"
+CLAUDE_MAX_TURNS="${LEADV2_CLAUDE_MAX_TURNS:-60}"
 CLAUDE_MAX_BUDGET_USD="${LEADV2_CLAUDE_MAX_BUDGET_USD:-}"
 CLAUDE_PERMISSION_MODE="${LEADV2_CLAUDE_PERMISSION_MODE:-acceptEdits}"
 # These are the only interactive-side-effect commands that may be pre-approved
@@ -213,6 +216,48 @@ raise SystemExit(0 if valid else 1)
 PYEOF
 }
 
+# Reuse the Codex runner's durable-state derivation before every launch.  The
+# e2e flag is also a completed-work signal: Phase 8 may not yet have written
+# its final receipt, but relaunching the full pipeline would repeat finished
+# work.  `COMPLETION_PROOF` is intentionally human-readable for the log.
+completion_proof_present() {
+  local real_state
+  COMPLETION_PROOF=""
+  real_state="$(_leadv2_derive_real_state "$TASK_ID" "$PROJECT_ROOT")"
+  if [[ "$real_state" == "done" ]] || sentinel_present; then
+    COMPLETION_PROOF="Phase-8 completion proof"
+    return 0
+  fi
+  if [[ -f "${TASK_DIR}/e2e-gate-passed.flag" ]]; then
+    COMPLETION_PROOF="E2E gate completion flag"
+    return 0
+  fi
+  return 1
+}
+
+# Print the terminal turn count only when stream-json reports exhaustion of
+# this attempt's configured cap.  Claude emits this as a terminal record with
+# is_error=true and stop_reason=tool_use, so its non-zero process status is
+# not itself evidence of a crash.
+turn_cap_turns() {
+  python3 - "$CLAUDE_MAX_TURNS" "$1" <<'PYEOF'
+import json, sys
+
+cap = int(sys.argv[1])
+turns = None
+for line in sys.argv[2].splitlines():
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    value = record.get("num_turns")
+    if isinstance(value, int) and value >= cap:
+        turns = value
+if turns is not None:
+    print(turns)
+PYEOF
+}
+
 phase67_active() {
   local active phase
   [[ "${LEADV2_PHASE:-}" == "deploy" || "${LEADV2_PHASE:-}" == "verify" ]] && return 0
@@ -236,8 +281,11 @@ PYEOF
   [[ "$phase" == "deploy" || "$phase" == "verify" ]]
 }
 
-if sentinel_present; then
-  log "Phase-8 completion proof already present for ${TASK_ID} — nothing to do"
+# shellcheck source=leadv2-helpers.sh
+source "$SCRIPT_DIR/leadv2-helpers.sh"
+
+if completion_proof_present; then
+  log "${COMPLETION_PROOF} already present for ${TASK_ID} — nothing to do"
   exit 0
 fi
 
@@ -246,24 +294,15 @@ noop_streak=0
 stall_streak=0
 force_close_only=0
 while (( attempt < MAX_ATTEMPTS )); do
-  # Crash-recovery (3bf68affc141): re-derive real state from durable evidence
-  # before trusting this process's own log-diff bookkeeping — catches both a
-  # runner restart between attempts and a same-process success-without-close.
-  if (( attempt > 0 )); then
-    if ! type _leadv2_derive_real_state >/dev/null 2>&1; then
-      # shellcheck source=leadv2-helpers.sh
-      source "$SCRIPT_DIR/leadv2-helpers.sh"
-    fi
-    _real_state="$(_leadv2_derive_real_state "$TASK_ID" "$PROJECT_ROOT")"
-    case "$_real_state" in
-      done)
-        log "crash-recovery: phase8-passed.flag already present for ${TASK_ID} — task complete, skipping further attempts"
-        exit 0
-        ;;
-      close-only)
-        force_close_only=1
-        ;;
-    esac
+  # Do this before every attempt, including attempt zero.  It catches work
+  # completed by a prior runner while this process was waiting to resume.
+  if completion_proof_present; then
+    log "${COMPLETION_PROOF} already present for ${TASK_ID} — skipping attempt ${attempt}"
+    exit 0
+  fi
+  _real_state="$(_leadv2_derive_real_state "$TASK_ID" "$PROJECT_ROOT")"
+  if [[ "$_real_state" == "close-only" ]]; then
+    force_close_only=1
   fi
 
   if [[ "$attempt" -eq 0 ]]; then
@@ -324,14 +363,22 @@ while (( attempt < MAX_ATTEMPTS )); do
     "$CLAUDE_BIN" "${claude_args[@]}" ) >>"$LOGF" 2>&1
   rc=$?
   set -e
+  _attempt_log_slice="$(tail -c "+$((log_size_before + 1))" "$LOGF" 2>/dev/null || true)"
   _receipt_status="failed"
   [[ "$rc" -eq 0 ]] && _receipt_status="turn_completed"
+  _turn_cap_turns="$(turn_cap_turns "$_attempt_log_slice")"
+  if [[ -n "$_turn_cap_turns" ]]; then
+    _receipt_status="turn_cap_exhausted"
+    log "attempt ${attempt} exhausted max_turns (${_turn_cap_turns}/${CLAUDE_MAX_TURNS}) — NOT a crash; next attempt will resume with a fresh turn budget"
+  fi
   _append_provider_receipt "$_receipt_status" "$rc" "$attempt"
-  log "attempt ${attempt} exited rc=${rc}"
+  if [[ -z "$_turn_cap_turns" ]]; then
+    log "attempt ${attempt} exited rc=${rc}"
+  fi
 
-  if sentinel_present; then
+  if completion_proof_present; then
     _append_provider_receipt "complete" "0" "$attempt"
-    log "Phase-8 completion proof observed for ${TASK_ID} — session complete"
+    log "${COMPLETION_PROOF} observed for ${TASK_ID} — session complete"
     exit 0
   fi
 
@@ -340,7 +387,6 @@ while (( attempt < MAX_ATTEMPTS )); do
   # (or we would have exited at line ~303) — the model narrated completion
   # without ever running Phase-8 close. Force a close-only continuation on
   # the next attempt and treat this as progress, not a stall.
-  _attempt_log_slice="$(tail -c "+$((log_size_before + 1))" "$LOGF" 2>/dev/null || true)"
   if printf '%s' "$_attempt_log_slice" | grep -q '"subtype"[[:space:]]*:[[:space:]]*"success"'; then
     force_close_only=1
     log "attempt ${attempt} reported success but phase8-passed.flag missing — forcing close-only continuation"
