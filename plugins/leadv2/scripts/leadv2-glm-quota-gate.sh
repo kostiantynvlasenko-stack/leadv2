@@ -18,8 +18,10 @@
 #       wedges all work on a z.ai blip is worse than no gate. Never 2>/dev/null.
 #   §4  ~60 s cache lives in the python helper (leadv2-quota-read.py).
 #
-# Exit codes: 0 = lane may start (GLM headroom OK); non-zero = do NOT start the
-# GLM lane — reroute / override per the message on stderr.
+# Exit codes: 0 = lane may start; 1 = quota reroute; 2 = peak-hours refusal.
+# Refusals also emit `LEADV2_DISPATCH_REFUSED: <reason>` on stderr.  Launch
+# routers must use that machine-readable marker with these documented exit codes,
+# rather than parsing the explanatory prose below.
 #
 # Env:
 #   GLM_QUOTA_THRESHOLD   reroute threshold pct (default 80; set low to test)
@@ -112,6 +114,7 @@ if (( five_pct >= THRESHOLD || wk_pct >= THRESHOLD )); then
   (( five_pct >= THRESHOLD )) && tripped="5h=${five_pct}% (resets ${five_reset}Z)"
   (( wk_pct >= THRESHOLD )) && tripped="${tripped:+$tripped AND }weekly=${wk_pct}% (resets ${wk_reset}Z)"
   cat >&2 <<EOF
+[glm-quota-gate] LEADV2_DISPATCH_REFUSED: quota_gate
 [glm-quota-gate] REROUTE — GLM quota ≥ ${THRESHOLD}% on: ${tripped}.
   The GLM bucket is low; protect its headroom by running this work elsewhere.
   Fallback preference (SNAPSHOT 2026-07-17 — verify with leadv2-quota-live.sh):
@@ -130,6 +133,7 @@ fi
 if (( in_peak )); then
   if [[ "${GLM_ALLOW_PEAK:-0}" != "1" ]]; then
     cat >&2 <<EOF
+[glm-quota-gate] LEADV2_DISPATCH_REFUSED: peak_hours
 [glm-quota-gate] PEAK HOURS — GLM-5.2 costs 3× during 06:00–10:00 UTC (14:00–18:00 UTC+8).
   Peak ends in ~${mins_until_peak_ends} min (at ${peak_ends_at}). Quota is fine
   (5h=${five_pct}% / weekly=${wk_pct}%) but the 3× cost multiplier is in effect.

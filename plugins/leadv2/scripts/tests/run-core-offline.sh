@@ -42,6 +42,7 @@ run_check "all plugin shell syntax" syntax_all
 run_check "portable temp helper stress" bash "$TEST_DIR/test-leadv2-temp-stress.sh"
 run_check "Claude plugin manifest/components" validate_plugin
 run_check "provider/model router" bash "$TEST_DIR/test-session-route.sh"
+run_check "dispatch refusal fallback chain" bash "$TEST_DIR/test-routing-enforcement-p1.sh"
 run_check "Codex full-cycle runner" bash "$TEST_DIR/test-codex-session-runner.sh"
 run_check "Codex child-session recursion boundary" bash "$TEST_DIR/test-codex-child-session-boundary.sh"
 run_check "autonomous session spawner" bash "$TEST_DIR/test-session-spawner.sh"
