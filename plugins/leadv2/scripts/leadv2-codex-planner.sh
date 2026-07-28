@@ -174,6 +174,26 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
 HANDOFF_DIR="$PROJECT_ROOT/docs/handoff/$TASK_ID"
 mkdir -p "$HANDOFF_DIR"
 
+# A previous async Codex plan for this task is a real app-server lane. Refuse
+# to dispatch a duplicate while its provider says running/queued; codex-guard
+# absence is deliberately irrelevant.
+if [[ -f "$HANDOFF_DIR/codex-plan.json" ]]; then
+  _existing_job="$(python3 - "$HANDOFF_DIR/codex-plan.json" <<'PY' 2>/dev/null || true
+import json, sys
+try: print(json.load(open(sys.argv[1])).get("job_id", ""))
+except Exception: pass
+PY
+)"
+  if [[ -n "$_existing_job" ]]; then
+    _liveness="$(LEADV2_PROJECT_ROOT="$PROJECT_ROOT" CODEX_TASK_SH="${CODEX_TASK_SH:-${_LV2_HELPERS_DIR}/codex-task.sh}" bash "${_LV2_HELPERS_DIR}/leadv2-lane-liveness.sh" --project-root "$PROJECT_ROOT" --job "$_existing_job" --json 2>/dev/null || true)"
+    _verdict="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("jobs") or [{}])[0].get("verdict", "unknown"))' <<<"$_liveness" 2>/dev/null || true)"
+    if [[ "$_verdict" == "running" ]]; then
+      echo "[leadv2-codex-planner] REFUSED: Codex job $_existing_job is still running (authoritative codex-task.sh status); refusing duplicate relaunch." >&2
+      exit 3
+    fi
+  fi
+fi
+
 PROMPT_FILE="/tmp/codex-plan-${TASK_ID}.md"
 
 if [[ "$MODE" == "plan" ]]; then

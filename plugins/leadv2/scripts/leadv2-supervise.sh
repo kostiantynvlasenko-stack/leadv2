@@ -389,14 +389,18 @@ print(json.dumps(d))
   fi
 fi
 
-python3 - "$ACTIVE_YAML" "$HANDOFF_DIR" "$SNAPSHOT" "$JSON_MODE" "$SINCE" "$CP_QUESTIONS_DIR" "${BUS_JSONL:-}" "${BUS_OFFSET_FILE:-}" "$TRUTH_BREACHES_JSON" "$TMUX_WINDOWS_TSV" "$TMUX_PANES_TSV" "$TASKS_YAML_PATH" "$ACTIVE_LOCKFILE" "$TOMBSTONES_FILE" "$OBSERVE_ONLY" "$SCRIPT_DIR" "$PROJECT_ROOT" <<'PY'
+# Lane liveness is provider-authoritative. In particular, codex-guard is a
+# rescue sidecar, never evidence that a Codex app-server job died.
+LANE_LIVENESS_JSON="$(LEADV2_PROJECT_ROOT="$PROJECT_ROOT" bash "${SCRIPT_DIR}/leadv2-lane-liveness.sh" --project-root "$PROJECT_ROOT" --json 2>/dev/null || printf '%s' '{"jobs":[],"availability":"unavailable"}')"
+
+python3 - "$ACTIVE_YAML" "$HANDOFF_DIR" "$SNAPSHOT" "$JSON_MODE" "$SINCE" "$CP_QUESTIONS_DIR" "${BUS_JSONL:-}" "${BUS_OFFSET_FILE:-}" "$TRUTH_BREACHES_JSON" "$TMUX_WINDOWS_TSV" "$TMUX_PANES_TSV" "$TASKS_YAML_PATH" "$ACTIVE_LOCKFILE" "$TOMBSTONES_FILE" "$OBSERVE_ONLY" "$SCRIPT_DIR" "$PROJECT_ROOT" "$LANE_LIVENESS_JSON" <<'PY'
 import sys, os, json, glob, datetime, subprocess
 from collections import deque
 
 (active_yaml, handoff_dir, snapshot_path, json_mode, since, cp_questions_dir,
  bus_jsonl, bus_offset_file, truth_breaches_json, tmux_windows_tsv,
  tmux_panes_tsv, tasks_yaml_path, active_lockfile, tombstones_file,
- observe_only_env, script_dir, project_root) = sys.argv[1:18]
+ observe_only_env, script_dir, project_root, lane_liveness_json) = sys.argv[1:19]
 json_mode = json_mode == "1"
 delta_mode = bool(since)
 
@@ -407,6 +411,10 @@ except Exception:
 truth_probe_status = _truth.get("status", "unavailable")
 truth_probe_reason = _truth.get("reason")
 truth_breaches = _truth.get("breaches") or []
+try:
+    codex_liveness = json.loads(lane_liveness_json)
+except Exception:
+    codex_liveness = {"jobs": [], "availability": "unavailable"}
 
 STUCK_MIN = 25
 CAP_ROWS = 20
@@ -1107,6 +1115,17 @@ for tid, s in sorted(current.items()):
 
 table = table[:CAP_ROWS]
 
+# Codex app-server jobs are first-class lanes even when they have no active.yaml
+# row. Their status/phase comes only from codex-task.sh, never codex-guard/ps.
+for job in codex_liveness.get("jobs", []):
+    status = job.get("verdict", "unknown")
+    started = parse_iso(job.get("started_at"))
+    mins = int((now - started).total_seconds() // 60) if started else "?"
+    table.append({"task_id": f"codex:{job.get('id', '?')}", "phase": job.get("phase", "unknown"),
+                  "minutes_in_phase": mins, "status": status,
+                  "status_reason": f"authoritative {job.get('source', 'codex-task.sh status')}: status={job.get('status', 'unknown')}",
+                  "waiting": False, "where": "codex app-server", "protocol_version": "provider"})
+
 # Dangling control-plane questions — task_id not (or not yet) in active.yaml
 # (e.g. registry lag). Still surface them; never silently drop a pending
 # founder question just because the session table hasn't caught up.
@@ -1275,7 +1294,7 @@ if delta_mode:
             print(f"  {tid}")
     sys.exit(0)
 
-if not current:
+if not current and not codex_liveness.get("jobs"):
     print("net zhivykh sessiy (no live sessions)")
     sys.exit(0)
 
