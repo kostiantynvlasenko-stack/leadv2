@@ -412,10 +412,12 @@ while (( attempt < MAX_ATTEMPTS )); do
     prompt="Continue task ${TASK_ID} as the ALREADY-RUNNING leadv2 child session: execute the current Phase 0..8 work yourself. NEVER invoke leadv2-codex-session-runner.sh, leadv2-session-runner.sh, leadv2-fanout.sh, leadv2-supervise.sh, or any launcher/dispatcher; doing so is self-recursion under your own flock. Use only per-phase helper scripts, never session launchers. Re-check every sentinel and provider receipt before repeating any side effect. Drive it to canonical Phase-8 completion proof; route any founder decision through leadv2-ask.sh. An active.yaml unregister failure is explicitly non-blocking (see leadv2-phase8-close.sh comment '(non-blocking)') -- log it and continue Phase 8 close; do NOT raise a question or stall on it.${_close_only_sentence}"
     cmd=("$CODEX_BIN" exec resume --json --model "$MODEL" -c "model_reasoning_effort=\"$EFFORT\"")
     if [[ "${LEADV2_UNSAFE_AUTOPILOT:-0}" == "1" ]]; then
-      log "UNSAFE_AUTOPILOT receipt: full Codex approval and sandbox bypass enabled"
-      cmd+=(--dangerously-bypass-approvals-and-sandbox)
+      log "UNSAFE_AUTOPILOT receipt: approval and sandbox posture preserved on resume via config"
+      cmd+=( -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' )
     else
-      cmd+=(--sandbox workspace-write)
+      # `codex exec resume` does not accept --sandbox; preserve the normal
+      # workspace-write posture through its accepted config interface.
+      cmd+=( -c 'sandbox_mode="workspace-write"' )
       if phase67_active; then
         cmd+=( -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true' )
       fi
