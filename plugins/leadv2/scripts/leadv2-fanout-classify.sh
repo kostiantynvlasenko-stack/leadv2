@@ -51,7 +51,14 @@ declare -A RISK_GROUPS=(
   [auth]="auth|oauth|login|cookie|session token|credential|api key|app_id"
   [rls]="rls|row level security|row-level security|policy|supabase policy"
   [safety]="safety gate|safety-gate|moderation|content policy|harmful"
-  [publish]="publish|deploy|production deploy|production migration|schema change|ddl|drop table|destructive"
+  # RISK-TAG-FP-01 (2026-07-28): bare "publish"/"deploy" false-fired on NOUN
+  # mentions (publish_slots table, "the legacy comment publisher", "claim/
+  # publish code path") -> non-bypassable HARD collision serialized read-only
+  # lanes. Tightened to require an ACTION context (verb + article/prep/target)
+  # while a genuinely publishing/deploying task must still match (fail-closed
+  # preserved): "publish a comment", "deploy to prod", "publish/deploy now",
+  # "go live", explicit prod-migration/schema-change/destructive-DDL phrases.
+  [publish]="\bpublish(es|ing|ed)? (a |the |your |my |this |that |to |now\b|it\b)|\bdeploy(s|ing|ed)? (a |the |your |my |this |that |to |now\b|it\b)|\bgo[- ]?live\b|\brun the deploy\b|production deploy|production migration|schema change|\bddl\b|drop table|destructive"
   [security]="security|secret|token|payment|billing|pii|gdpr"
   [arch]="architecture|arch redesign|rearchitect|breaking change|irreversible"
 )
