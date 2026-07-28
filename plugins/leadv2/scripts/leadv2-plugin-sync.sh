@@ -271,14 +271,35 @@ _sync_project_root() {
   fi
   local proj_scripts="${root}/.claude/scripts"
   local proj_contracts="${root}/.claude/contracts"
-
+  # Declared unconditionally (not just inside the non-symlink branch below):
+  # the (c2) curated-subset loop further down this function reads ${src}
+  # regardless of which branch (c) took, and this script runs under
+  # `set -euo pipefail` — an unset `local src` only declared inside a
+  # not-taken if-branch would abort the whole sync on any repo whose
+  # .claude/scripts IS a symlink (M-A fix, caught before landing).
   local src="${PLUGIN_ROOT}/scripts/"
-  if [[ "${vendors_scripts}" == "false" ]]; then
-    log_warn "(c): skipping project scripts vendoring for ${root} — vendors_scripts: false (symlink-only architecture)"
+
+  # SYMLINK-AWARE-SYNC-01 (plugin-distribution Stage 2, 2026-07-28): if
+  # proj_scripts is ALREADY a symlink (Stage 3 target: <repo>/.claude/scripts
+  # -> canonical or a shared tree, same pattern already live for
+  # .claude/leadv2/ and .claude/agents/), it is symlink-managed and reading
+  # through it always reflects canonical directly — nothing to rsync. Writing
+  # through it anyway is at best redundant and at worst destructive: rsync
+  # --checksum with no -l/-L declared, run repeatedly as this repo's own
+  # scripts/ tree grows, is one `--delete` addition away from deleting the
+  # symlink and materializing real files in its place, silently restoring the
+  # exact five-copy world this whole task exists to close (team-lead brief,
+  # explicit premise). `-L` tests "is a symlink" even if the link is dangling.
+  if [[ -L "${proj_scripts}" ]]; then
+    log "(c): ${proj_scripts} is a symlink (symlink-managed, Stage 3) — skipping project-scripts sync entirely, nothing to write"
   else
-    log "Syncing -> project scripts (c): ${proj_scripts}"
-    if [[ -d "${src}" ]]; then
-      _rsync_or_dry "project/scripts[${root##*/}]" "${src}" "${proj_scripts}" --recursive "${SYNC_HYGIENE_FILTERS[@]}"
+    if [[ "${vendors_scripts}" == "false" ]]; then
+      log_warn "(c): skipping project scripts vendoring for ${root} — vendors_scripts: false (symlink-only architecture)"
+    else
+      log "Syncing -> project scripts (c): ${proj_scripts}"
+      if [[ -d "${src}" ]]; then
+        _rsync_or_dry "project/scripts[${root##*/}]" "${src}" "${proj_scripts}" --recursive "${SYNC_HYGIENE_FILTERS[@]}"
+      fi
     fi
   fi
 
@@ -343,7 +364,12 @@ _sync_project_root() {
   # that recreated campaign-platform's .claude/scripts/ (1 file) even after
   # the (c) skip above, found live while verifying the C2 fix.
   local harness_src="${PLUGIN_ROOT}/scripts/leadv2-eval-harness.sh"
-  if [[ "${vendors_scripts}" != "false" ]] && [[ -f "${harness_src}" ]] && [[ ! "${DRY_RUN}" == "true" ]]; then
+  # SYMLINK-AWARE-SYNC-01: same guard as (c) above — this cp is a second,
+  # independent write path into proj_scripts and must not fire once it's a
+  # symlink either (a symlinked scripts/ already has the harness via
+  # canonical; `mkdir -p` on an existing symlink is a harmless no-op but the
+  # `cp` would still write a real file INTO the linked-to directory).
+  if [[ "${vendors_scripts}" != "false" ]] && [[ -f "${harness_src}" ]] && [[ ! "${DRY_RUN}" == "true" ]] && [[ ! -L "${proj_scripts}" ]]; then
     mkdir -p "${proj_scripts}"
     cp -p "${harness_src}" "${proj_scripts}/leadv2-eval-harness.sh"
   fi
