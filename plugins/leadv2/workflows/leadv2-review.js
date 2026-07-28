@@ -1,9 +1,9 @@
 export const meta = {
   name: 'leadv2-review',
-  description: 'leadv2 Phase 5 adversarial review: parallel critic + hack-detection + (security) + Codex → dedup → verify blocking → quality score → solutions-archive. Model-pinned.',
+  description: 'leadv2 Phase 5 adversarial review: primary Codex + structural critic cross-check (or full critic fallback) + hack-detection + (security) → dedup → verify blocking → quality score → solutions-archive. Model-pinned.',
   whenToUse: 'leadv2 Phase 5 Review for class >= Standard. Lead invokes instead of hand-rolled Agent+Monitor. Returns one synthesized verdict + quality_score; lead context stays clean.',
   phases: [
-    { title: 'Review', detail: 'parallel critic + hack-detect + security(if safety) + codex-adversarial' },
+    { title: 'Review', detail: 'primary codex-adversarial + structural critic cross-check (full fallback if Codex unavailable) + hack-detect + security(if safety)' },
     { title: 'Verify', detail: 'adversarial refute pass on each blocking finding' },
     { title: 'Reflect', detail: 'quality scoring + write solutions-archive + append signature' },
   ],
@@ -108,15 +108,30 @@ async function synthAgent(prompt, opts = {}) {
   }
   return null
 }
+const isUnavailableResult = (r) => !!(
+  r &&
+  typeof r.summary_for_lead === 'string' &&
+  /unavailable|not logged in|quota|rate.?limit|429|timeout|command not found|missing cli/i.test(r.summary_for_lead)
+)
 
 phase('Review')
 pushLedger('phase_enter', { phase: 'Review' })
-// [COST-LEVERS-01] Codex is the PRIMARY adversarial brain for Review (Lever 3). Agent critic is the fallback when CODEX_ON=false.
-// Codex runs first (unshifted to front) for highest signal-to-token ratio; critic always present as fallback.
+// [COST-LEVERS-01] Codex is the PRIMARY general-purpose adversarial brain for Review.
+// When Codex is expected to run, critic is a deliberately NARROW structural cross-check,
+// mirroring Plan's architect cross-check shape instead of re-reviewing the whole diff.
+// If preflight disabled Codex, critic is the FULL primary reviewer. A post-dispatch Codex
+// failure is handled below by an explicit full-critic fallback. Safety/Heavy only changes
+// model depth and adds the security reviewer; it does NOT silently widen critic into a
+// second full general-purpose review.
+const CRITIC_FULL_BREADTH = !CODEX_ON
+const criticPrompt = CRITIC_FULL_BREADTH
+  ? `FULL adversarial code review of the diff at ${DIFF}; Codex is unavailable, so you are the primary reviewer. Brief: ${MISSION}. Read the diff yourself (git diff ${BASE}). Cover correctness bugs, type/data/RLS gaps, N+1 and performance traps, missing or weak tests, security boundaries, and design-system violations. Severity-tag each. Minimal-diff context only.`
+  : `Cross-check Codex's adversarial review of the diff at ${DIFF}; Codex is the primary general-purpose reviewer, so do NOT repeat a full line-by-line review. Brief: ${MISSION}. Focus ONLY on structural blind spots Codex tends to miss: repository-specific invariants and off-limits, cross-module API/data-contract drift, lifecycle/concurrency/error-path behavior, rollout/backward-compatibility/rollback hazards, and whether tests can actually falsify those invariants. Report a line-level issue only when it proves one of those structural failures; skip style/naming and generic type/RLS/N+1/security checks covered by Codex, hack-detect, or security-auditor. Severity-tag each.`
+log(`Review routing: codex=${CODEX_ON ? 'primary' : 'unavailable'}; critic=${CRITIC_FULL_BREADTH ? 'full-fallback' : 'structural-cross-check'}`)
 const reviewers = [
   () => synthAgent(
-    `Adversarial code review of the diff at ${DIFF}. Brief: ${MISSION}. Read the diff yourself (git diff ${BASE}). Report findings: correctness bugs, type/RLS gaps, N+1, missing tests, design-system violations. Severity-tag each. Minimal-diff context only.`,
-    { label: 'critic', phase: 'Review', agentType: 'critic', model: CRITIC_MODEL, effort: (SAFETY && CRITIC_MODEL !== 'sonnet') ? 'xhigh' : 'high', schema: FINDINGS_SCHEMA }),
+    criticPrompt,
+    { label: CRITIC_FULL_BREADTH ? 'critic-full-fallback' : 'critic-structural-cross-check', phase: 'Review', agentType: 'critic', model: CRITIC_MODEL, effort: (SAFETY && CRITIC_MODEL !== 'sonnet') ? 'xhigh' : 'high', schema: FINDINGS_SCHEMA }),
   () => agent(
     `Run hack-detection on the diff at ${DIFF}: TODO/FIXME band-aids, magic numbers, broad except, hardcoded creds/secrets, silent fallbacks. Return each as a finding (dimension="hack").`,
     { label: 'hack-detect', phase: 'Review', model: 'haiku', effort: 'low', schema: FINDINGS_SCHEMA }),
@@ -138,6 +153,20 @@ if (CODEX_ON) {
   reviewerFamilies.unshift('openai')
 }
 const rawReviewResults = await parallel(reviewers)
+// Preflight can pass and Codex can still fail mid-run (quota exhaustion, login expiry,
+// timeout, or CLI disappearance). The parallel critic above was intentionally narrow, so
+// promote critic to a full review now instead of pretending that cross-check was sufficient.
+if (CODEX_ON) {
+  const codexResult = rawReviewResults[0]
+  if (!codexResult || isUnavailableResult(codexResult)) {
+    log('Review routing: Codex unavailable after dispatch; critic=full-fallback')
+    const fallbackResult = await synthAgent(
+      `FULL adversarial code review of the diff at ${DIFF}; Codex failed after dispatch, so you are now the primary reviewer. Brief: ${MISSION}. Read the diff yourself (git diff ${BASE}). Cover correctness bugs, type/data/RLS gaps, N+1 and performance traps, missing or weak tests, security boundaries, and design-system violations. Severity-tag each. Minimal-diff context only.`,
+      { label: 'critic-full-fallback', phase: 'Review', agentType: 'critic', model: CRITIC_MODEL, effort: (SAFETY && CRITIC_MODEL !== 'sonnet') ? 'xhigh' : 'high', schema: FINDINGS_SCHEMA })
+    rawReviewResults.push(fallbackResult)
+    reviewerFamilies.push('anthropic')
+  }
+}
 const reviewResults = rawReviewResults.filter(Boolean)
 const allFindings = reviewResults.flatMap(r => r.findings || [])
 const seen = new Map()
@@ -186,7 +215,6 @@ if (stall) { verdict = ESCALATE_VERDICT }
 // A reviewer that FAILED still returns a non-null sentinel (e.g. the codex path returns
 // `summary_for_lead="codex unavailable"` with empty findings on exit non-zero) -- that sentinel
 // must NOT count toward family coverage, or a dead Codex silently satisfies the >=2-family bar.
-const isUnavailableResult = (r) => !!(r && typeof r.summary_for_lead === 'string' && /unavailable/i.test(r.summary_for_lead))
 let families = []
 let family_coverage = null
 if (FAMILY_GATE_ON) {
