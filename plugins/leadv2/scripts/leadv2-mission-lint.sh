@@ -89,4 +89,45 @@ print('1' if isinstance(v, str) and v.strip() else '0')
   fi
 fi
 
+# [TE-01, lead-patterns.md] Sibling deliverable in this task dir already hit DELIVERABLE_BLOCKED
+# on a known guard/env signature — re-dispatching without stating what changed repeats the same
+# blocker for zero diff (DEPLOY-CLASS-VERIFY-GATE-01: two sibling `developer` dispatches, ~270K
+# output tokens, zero diff, both walked into the identical known blocker). State lives in sibling
+# deliverable files: per subagent-protocol §5 every subagent writes docs/handoff/<task-id>/<role>.full.md,
+# ending 'DELIVERABLE_BLOCKED: <reason>' when it cannot finish. If a sibling's .full.md carries
+# both DELIVERABLE_BLOCKED and the guard/env signature, this mission must add a
+# '## Retry mitigation' section stating what changed, else exit 7.
+_task_dir="$(dirname "$file")"
+_te01_guard_re='LEADV2_LEAD_GUARD|lead-edit-guard|agent_type.*not (set|found)'
+_te01_hit=""
+for _sib in "${_task_dir}"/*.full.md; do
+  [[ -f "$_sib" ]] || continue
+  if grep -q 'DELIVERABLE_BLOCKED' "$_sib" 2>/dev/null && grep -qE "$_te01_guard_re" "$_sib" 2>/dev/null; then
+    _te01_hit="$_sib"
+    break
+  fi
+done
+if [[ -n "$_te01_hit" ]] && ! grep -q '^## Retry mitigation' "$file" 2>/dev/null; then
+  echo "MISSION_RETRY_INTO_KNOWN_BLOCKER file=$file blocked_sibling=$_te01_hit"
+  echo "→ sibling deliverable $_te01_hit already hit DELIVERABLE_BLOCKED on a guard/env signature (LEADV2_LEAD_GUARD / lead-edit-guard / agent_type not set|found). Add a '## Retry mitigation' section to this mission stating what changed before re-dispatching, else this repeats the blocker for zero diff (TE-01)."
+  exit 7
+fi
+
+# [TE-02, lead-patterns.md] Task dir already has a prior deliverable (.full.md/.summary.md) —
+# this is a 2nd+ dispatch on the same task. Without a manifest of what the prior run already
+# read, the new dispatch tends to re-read the same files (DEPLOY-CLASS-VERIFY-GATE-01: both
+# siblings independently re-read the same ~75KB of infra scripts). Mission must add a
+# '## Files already read' section pointing at what the prior run fetched, else exit 8.
+_te02_hit=""
+for _sib in "${_task_dir}"/*.full.md "${_task_dir}"/*.summary.md; do
+  [[ -f "$_sib" ]] || continue
+  _te02_hit="$_sib"
+  break
+done
+if [[ -n "$_te02_hit" ]] && ! grep -q '^## Files already read' "$file" 2>/dev/null; then
+  echo "MISSION_MISSING_FILES_ALREADY_READ file=$file prior_deliverable=$_te02_hit"
+  echo "→ task dir already has a prior deliverable ($_te02_hit) — this is a 2nd+ dispatch. Add a '## Files already read' section listing what the prior run already fetched, else this mission risks re-reading the same files for zero benefit (TE-02)."
+  exit 8
+fi
+
 exit 0
