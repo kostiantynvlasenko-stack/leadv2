@@ -35,7 +35,7 @@ read_bucket() {  # $1 = bucket name; echoes JSON, never fails (helper exits 0)
 # ── formatting helpers ──────────────────────────────────────────────────────
 fmt_glm() {
   local j="$1"
-  local st s5 w5 sw ww lvl
+  local st s5 w5 sw ww lvl binding
   st=$(printf '%s' "$j" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("status","unknown"))' 2>/dev/null)
   if [[ "$st" != "ok" ]]; then
     local err; err=$(printf '%s' "$j" | python3 -c 'import sys,json;print(str(json.load(sys.stdin).get("error",""))[:70])' 2>/dev/null)
@@ -45,7 +45,8 @@ fmt_glm() {
   lvl=$(printf '%s' "$j" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("level") or "?")' 2>/dev/null)
   s5=$(printf '%s' "$j" | python3 -c 'import sys,json;w=json.load(sys.stdin).get("five_hour") or {};print("%s%% (resets %s)"%(w.get("pct","?"),(w.get("reset_iso") or "?")[:19]))' 2>/dev/null)
   sw=$(printf '%s' "$j" | python3 -c 'import sys,json;w=json.load(sys.stdin).get("weekly") or {};print("%s%% (resets %s)"%(w.get("pct","?"),(w.get("reset_iso") or "?")[:19]))' 2>/dev/null)
-  printf -- 'GLM (z.ai, %s):  5h=%s | weekly=%s\n' "$lvl" "$s5" "$sw"
+  binding=$(printf '%s' "$j" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("binding_window") or "unknown")' 2>/dev/null)
+  printf -- 'GLM (z.ai, %s):  5h=%s | weekly=%s | binding=%s\n' "$lvl" "$s5" "$sw" "$binding"
 }
 
 fmt_codex() {
@@ -63,7 +64,7 @@ fmt_codex() {
 }
 
 fmt_anthropic() {
-  local j="$1" st n
+  local j="$1" st n resolution active
   st=$(printf '%s' "$j" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("status","unknown"))' 2>/dev/null)
   if [[ "$st" != "ok" ]]; then
     local err; err=$(printf '%s' "$j" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(str(d.get("error",""))[:80])' 2>/dev/null)
@@ -73,9 +74,11 @@ fmt_anthropic() {
 import sys,json
 d=json.load(sys.stdin)
 for a in d.get("accounts",[]):
-    print("Anthropic (%s, %s, tier=%s): 5h=%s%% | weekly=%s%%" % (
-        a.get("subscription_type","?"), a.get("entry_suffix","?"), a.get("tier","?"),
+    marker = " ACTIVE" if a.get("active") else ""
+    print("Anthropic (%s%s, subscription=%s, tier=%s): 5h=%s%% | weekly=%s%%" % (
+        a.get("account_label","unknown"), marker, a.get("subscription_type","?"), a.get("tier","?"),
         a.get("five_hour_pct","?"), a.get("seven_day_pct","?")))
+print("Anthropic active account: %s (%s)" % (d.get("active_account","unknown"), d.get("account_resolution","unknown")))
 ' 2>/dev/null
 }
 

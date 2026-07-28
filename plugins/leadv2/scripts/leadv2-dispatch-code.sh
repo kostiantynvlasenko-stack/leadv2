@@ -1008,6 +1008,63 @@ cmd_resolve() {
     *) log_err "unsupported resolved dispatch arm: ${arm}"; exit 1 ;;
   esac
 
+  # ROUTER-QUOTA-DRIVEN-01 (T6): filter candidate_arms by LIVE quota truth
+  # BEFORE the operator-override block below. An arm with zero usable headroom
+  # (leadv2-quota-read.py T1 usable_now = remaining_pct / max(hours_to_reset,1))
+  # is skipped AUTOMATICALLY and returns to rotation on its own the instant its
+  # window resets -- no file to edit, nothing to remember. This is what
+  # replaced the 2026-07-28 incident: Codex at 0 credits still answers
+  # status=completed, so only the quota READER -- never a spawn outcome --
+  # can see it is dry; a hand-maintained exclusion list was the stopgap until
+  # this shipped and is founder-rejected as the permanent answer.
+  # Kill switch: LEADV2_ROUTER_V2_QUOTA_FILTER=0 restores the exact pre-T6
+  # behavior (chain order only; exhaustion undetected until a spawn refusal).
+  if [[ "${LEADV2_ROUTER_V2_QUOTA_FILTER:-1}" != "0" ]]; then
+    local _rv2_bin="${LEADV2_ROUTER_V2_BIN:-${SCRIPT_DIR}/leadv2-router-v2.sh}"
+    if [[ -f "${_rv2_bin}" ]]; then
+      local _rv2_chain _rv2_out _rv2_rc _rv2_eligible
+      _rv2_chain="$(IFS=,; printf '%s' "${candidate_arms[*]}")"
+      _rv2_out="$(bash "${_rv2_bin}" resolve --chain "${_rv2_chain}" --task-id "${sig8}" 2>/dev/null)"
+      _rv2_rc=$?
+      _rv2_eligible="$(printf '%s\n' "${_rv2_out}" | sed -n 's/^eligible=//p')"
+      if [[ ${_rv2_rc} -eq 3 || -z "${_rv2_eligible}" ]]; then
+        emit decision "dispatch_rolled_back reason=all_arms_exhausted task=${sig8} by=router_v2 chain=${_rv2_chain}"
+        log_err "every candidate arm is quota-exhausted (chain='${_rv2_chain}'); refusing to dispatch"
+        exit 4
+      fi
+      local -a _rv2_kept=()
+      IFS=',' read -r -a _rv2_kept <<< "${_rv2_eligible}"
+      candidate_arms=("${_rv2_kept[@]}")
+    fi
+  fi
+
+  # ARM-EXCLUSION-01: take an arm out of service without editing the chain.
+  # Source: $LEADV2_EXCLUDED_ARMS, else ~/.claude/leadv2-excluded-arms (one arm
+  # per line, '#' comments ignored).  This is now an explicit OPERATOR OVERRIDE
+  # applied after the automatic quota filter above -- kept for the "take this
+  # arm out no matter what its quota says" emergency case, not as the primary
+  # exhaustion-detection path.  Revert = delete the file / unset the env var.
+  local _ex_src="${LEADV2_EXCLUDED_ARMS:-}"
+  if [[ -z "${_ex_src}" && -r "${HOME}/.claude/leadv2-excluded-arms" ]]; then
+    _ex_src=$(grep -vE '^\s*(#|$)' "${HOME}/.claude/leadv2-excluded-arms" 2>/dev/null | tr '\n' ' ')
+  fi
+  if [[ -n "${_ex_src//[[:space:],]/}" ]]; then
+    local -a _kept=()
+    local _ex_arm
+    for _ex_arm in "${candidate_arms[@]}"; do
+      if [[ " ${_ex_src//,/ } " == *" ${_ex_arm} "* ]]; then
+        emit decision "arm_excluded by=router model=${_ex_arm} task=${sig8} reason=operator_excluded"
+        continue
+      fi
+      _kept+=("${_ex_arm}")
+    done
+    if [[ ${#_kept[@]} -eq 0 ]]; then
+      log_err "every candidate arm is excluded (excluded='${_ex_src}'); refusing to dispatch"
+      exit 4
+    fi
+    candidate_arms=("${_kept[@]}")
+  fi
+
   local candidate arc
   for candidate in "${candidate_arms[@]}"; do
     [[ "${candidate}" == "codex" ]] && export RESOLVED_CODEX_TIER="${tier:-standard}"

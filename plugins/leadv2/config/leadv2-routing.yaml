@@ -1,0 +1,52 @@
+# Smart routing v2 additions.  The legacy per-phase routing table remains
+# repo-local at .claude/ref/leadv2-routing.yaml; this canonical registry is
+# copied there by plugin sync when v2 is enabled.
+router_v2:
+  # Used only when the current session credential cannot be identified.  The
+  # quota reader reports account_resolution=pinned_unresolved in that case.
+  active_account: max_20x
+
+  # usable_now is remaining percentage-points per hour, not percent used.
+  headroom_weights:
+    - min_usable_now: 8
+      weight: 1.0
+    - min_usable_now: 2
+      weight: 0.7
+    - min_usable_now: 0
+      weight: 0.4
+    - min_usable_now: null
+      weight: 0.2
+
+  # Arms are (channel, model) pairs.  Quota buckets are scopes, so the three
+  # Anthropic arms deliberately share the active Max x20 account bucket.
+  arms:
+    - id: glm
+      channel: glm-coder.sh
+      model: glm-5.2
+      bucket: glm
+      reserve_threshold: 2
+      reserve_allow: [review]
+    - id: codex
+      channel: codex-task.sh
+      model: gpt-5.6-terra
+      bucket: codex
+      reserve_threshold: 2
+      reserve_allow: [review]
+    - id: claude-haiku
+      channel: claude-subsession.sh
+      model: haiku
+      bucket: anthropic:max_20x
+      reserve_threshold: 2
+      reserve_allow: [review]
+    - id: claude-sonnet
+      channel: claude-subsession.sh
+      model: sonnet
+      bucket: anthropic:max_20x
+      reserve_threshold: 2
+      reserve_allow: [review]
+    - id: claude-opus
+      channel: claude-subsession.sh
+      model: opus
+      bucket: anthropic:max_20x
+      reserve_threshold: 2
+      reserve_allow: [review]

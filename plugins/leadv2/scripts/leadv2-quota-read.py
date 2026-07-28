@@ -29,6 +29,9 @@ Env overrides:
   LEADV2_QUOTA_TTL_GLM (60)  LEADV2_QUOTA_TTL_CODEX (120)  LEADV2_QUOTA_TTL_ANTHROPIC (300)
   LEADV2_QUOTA_CACHE_DIR (~/.claude/state/leadv2/quota-cache)
   LEADV2_BURN_DB (~/.claude/burn/history.db)  -- Anthropic rate_limit_info kv secondary signal
+  LEADV2_ANTHROPIC_ACTIVE_SERVICE -- credential service used by this session
+  LEADV2_ANTHROPIC_FORCE_UNRESOLVED=1 -- test the configured-pin fallback
+  LEADV2_ROUTING_CONFIG -- router config containing router_v2.active_account
   CODEX_HOME (~/.codex)  ZAI_AUTH_TOKEN  LEADV2_ZAI_ENV (~/.claude/secrets/zai.env)
 """
 import datetime, json, os, subprocess, sys, tempfile, time, urllib.request, urllib.error
@@ -90,9 +93,59 @@ def http_json(url, headers=None, method="GET", data=None, timeout=15):
 
 
 def unknown(provider, error, **extra):
-    d = {"provider": provider, "status": "unknown", "error": error, "fetched_at": iso_now()}
+    d = {"provider": provider, "status": "unknown", "error": error,
+         "usable_now": None, "binding_window": None, "fetched_at": iso_now()}
     d.update(extra)
     return d
+
+
+def _parse_iso(value):
+    """Return an aware UTC datetime for a provider reset timestamp, or None."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_window(used_pct, reset_iso, now=None):
+    """Add router-v2 quota truth without changing a provider's source fields.
+
+    Provider quota APIs report usage; the selector needs how much usable capacity
+    remains per hour.  A missing or malformed value remains unknown, never zero.
+    """
+    try:
+        used = float(used_pct)
+    except (TypeError, ValueError):
+        used = None
+    reset = _parse_iso(reset_iso)
+    if used is None or reset is None:
+        return {"remaining_pct": None, "hours_to_reset": None, "usable_now": None}
+    current = now or datetime.datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    hours = (reset - current).total_seconds() / 3600.0
+    remaining = max(0.0, min(100.0, 100.0 - used))
+    return {"remaining_pct": remaining,
+            "hours_to_reset": hours,
+            "usable_now": remaining / max(hours, 1.0)}
+
+
+def with_window_truth(window, used_key, now=None):
+    """Return a copy of a provider window enriched with normalized quota truth."""
+    if not isinstance(window, dict):
+        return None
+    out = dict(window)
+    out.update(normalize_window(out.get(used_key), out.get("reset_iso"), now=now))
+    return out
+
+
+def binding_window(windows):
+    """Name the lowest known usable-now window; unknown is deliberately not zero."""
+    known = [(name, value.get("usable_now")) for name, value in windows.items()
+             if isinstance(value, dict) and value.get("usable_now") is not None]
+    return min(known, key=lambda item: item[1])[0] if known else None
 
 
 # ── GLM ─────────────────────────────────────────────────────────────────────
@@ -144,14 +197,16 @@ def read_glm():
     def win(l):
         if not l:
             return None
-        return {"pct": l.get("percentage"),
+        return with_window_truth({"pct": l.get("percentage"),
                 "reset_epoch_ms": l.get("nextResetTime"),
                 "reset_iso": iso_from_ms(l.get("nextResetTime")),
-                "unit": l.get("unit"), "number": l.get("number")}
+                "unit": l.get("unit"), "number": l.get("number")}, "pct")
 
+    five_hour_window, weekly_window = win(five_hour), win(weekly)
     out = {"provider": "glm", "status": "ok",
            "level": (doc.get("data") or {}).get("level"), "fetched_at": iso_now(),
-           "five_hour": win(five_hour), "weekly": win(weekly)}
+           "five_hour": five_hour_window, "weekly": weekly_window,
+           "binding_window": binding_window({"five_hour": five_hour_window, "weekly": weekly_window})}
     if search:
         out["search_credits"] = {"percentage": search.get("percentage"),
                                  "usage": search.get("usage"),
@@ -229,21 +284,22 @@ def read_codex():
     sw = rl.get("secondary_window")
     windows = []
     if pw:
-        windows.append({"kind": "primary", "used_percent": pw.get("used_percent"),
+        windows.append(with_window_truth({"kind": "primary", "used_percent": pw.get("used_percent"),
                         "limit_window_seconds": pw.get("limit_window_seconds"),
                         "reset_epoch": pw.get("reset_at"),
                         "reset_iso": iso_from_epoch(pw.get("reset_at")),
-                        "limit_reached": rl.get("limit_reached")})
+                        "limit_reached": rl.get("limit_reached")}, "used_percent"))
     if sw:
-        windows.append({"kind": "secondary", "used_percent": sw.get("used_percent"),
+        windows.append(with_window_truth({"kind": "secondary", "used_percent": sw.get("used_percent"),
                         "limit_window_seconds": sw.get("limit_window_seconds"),
                         "reset_epoch": sw.get("reset_at"),
-                        "reset_iso": iso_from_epoch(sw.get("reset_at"))})
+                        "reset_iso": iso_from_epoch(sw.get("reset_at"))}, "used_percent"))
     cr = u.get("credits") or {}
     return {"provider": "codex", "status": "ok", "plan_type": u.get("plan_type"),
             "fetched_at": iso_now(), "refreshed": True, "wrote_back": wrote_back,
             "limit_reached": rl.get("limit_reached"), "allowed": rl.get("allowed"),
             "windows": windows,
+            "binding_window": binding_window({w["kind"]: w for w in windows}),
             "credits": {"has_credits": cr.get("has_credits"), "balance": cr.get("balance")}}
 
 
@@ -287,9 +343,85 @@ def _anthropic_kv():
         return None
 
 
+def configured_active_account():
+    """Read only the small scalar needed before the v2 router exists.
+
+    PyYAML is intentionally not a runtime dependency of this credential reader;
+    the config syntax here is the top-level scalar in router_v2.
+    """
+    config = os.environ.get("LEADV2_ROUTING_CONFIG",
+                            os.path.join(os.path.dirname(__file__), "..", "config",
+                                         "leadv2-routing.yaml"))
+    try:
+        in_router_v2 = False
+        with open(config) as fh:
+            for raw in fh:
+                if raw.strip() == "router_v2:":
+                    in_router_v2 = True
+                    continue
+                if in_router_v2:
+                    if raw and not raw[0].isspace() and raw.strip() and not raw.lstrip().startswith("#"):
+                        break
+                    stripped = raw.strip()
+                    if stripped.startswith("active_account:"):
+                        return stripped.split(":", 1)[1].strip().strip("'\"") or "max_20x"
+    except OSError:
+        pass
+    return "max_20x"
+
+
+def account_label(service, suffix, subscription_type, tier, active_pin):
+    """Produce a stable, human-readable account label without exposing IDs."""
+    # The unsuffixed service is the credential store Claude Code itself uses.
+    # Its configuration pin makes the expected active account explicit.
+    if service == "Claude Code-credentials":
+        return active_pin
+    candidates = " ".join(str(v or "") for v in (suffix, subscription_type, tier)).lower()
+    compact = candidates.replace("-", "_").replace(" ", "_")
+    if "max_20" in compact or "20x" in compact:
+        return "max_20x"
+    if "max_5" in compact or "5x" in compact or "team" in compact:
+        return "max_5x"
+    return str(suffix or "unknown")
+
+
+def resolve_active_account(accounts, active_pin):
+    """Mark exactly one account as active and expose how it was resolved.
+
+    A running session can provide its credential service explicitly.  In normal
+    Claude Code operation the unsuffixed credential service is that session's
+    service.  If neither is available, the config pin is used visibly rather
+    than silently guessing from the most-used account.
+    """
+    forced = os.environ.get("LEADV2_ANTHROPIC_FORCE_UNRESOLVED") == "1"
+    requested = os.environ.get("LEADV2_ANTHROPIC_ACTIVE_SERVICE") or \
+        os.environ.get("CLAUDE_CODE_CREDENTIALS_SERVICE")
+    if not forced:
+        if requested:
+            selected = next((a for a in accounts if a.get("service") == requested), None)
+            if selected:
+                selected["active"] = True
+                return "session_credential"
+        selected = next((a for a in accounts if a.get("service") == "Claude Code-credentials"), None)
+        if selected:
+            selected["active"] = True
+            return "session_credential"
+
+    selected = next((a for a in accounts if a.get("account_label") == active_pin), None)
+    if selected is None:
+        # A pin selects an account label, not a quota value.  If an old keychain
+        # entry has no recognizable label, retain fail-open behavior while making
+        # the unresolved provenance explicit for downstream journalling.
+        selected = accounts[0] if accounts else None
+    if selected:
+        selected["active"] = True
+    return "pinned_unresolved"
+
+
 def read_anthropic():
     now_ms = int(time.time() * 1000)
     accounts = []
+    active_pin = configured_active_account()
     for sv in sorted(_keychain_services()):
         blob = _read_keychain(sv)
         if not isinstance(blob, dict):
@@ -316,17 +448,28 @@ def read_anthropic():
         suffix = "default" if sv == "Claude Code-credentials" else sv.rsplit("-", 1)[-1]
         acct = {"entry_suffix": suffix, "service": sv,
                 "subscription_type": o.get("subscriptionType"),
-                "tier": o.get("rateLimitTier"), "http": code}
+                "tier": o.get("rateLimitTier"), "http": code,
+                "account_label": account_label(sv, suffix, o.get("subscriptionType"),
+                                               o.get("rateLimitTier"), active_pin),
+                "active": False}
         if code == 200:
             try:
                 u = json.loads(body)
                 fh = u.get("five_hour") or {}
                 sd = u.get("seven_day") or {}
+                fh_window = with_window_truth({"pct": fh.get("utilization"),
+                                               "reset_iso": fh.get("resets_at")}, "pct")
+                sd_window = with_window_truth({"pct": sd.get("utilization"),
+                                               "reset_iso": sd.get("resets_at")}, "pct")
                 acct.update({"status": "ok",
                              "five_hour_pct": fh.get("utilization"),
                              "five_hour_reset_iso": fh.get("resets_at"),
                              "seven_day_pct": sd.get("utilization"),
                              "seven_day_reset_iso": sd.get("resets_at"),
+                             "five_hour": fh_window,
+                             "seven_day": sd_window,
+                             "binding_window": binding_window({"five_hour": fh_window,
+                                                               "seven_day": sd_window}),
                              "limits": u.get("limits")})
             except Exception as ex:
                 acct.update({"status": "unknown", "error": "parse: %s" % ex})
@@ -348,10 +491,67 @@ def read_anthropic():
             out["note"] = ("reporting the last rate_limit_info captured into history.db kv "
                            "(rate_limit_anthropic) as a fallback signal")
         return out
-    return {"provider": "anthropic", "status": "ok", "accounts": accounts, "fetched_at": iso_now()}
+    resolution = resolve_active_account(accounts, active_pin)
+    active = next((a for a in accounts if a.get("active")), None)
+    return {"provider": "anthropic", "status": "ok", "accounts": accounts,
+            "active_account": active.get("account_label") if active else active_pin,
+            "account_resolution": resolution,
+            # This is intentionally pipe-friendly for the router's future journal event.
+            "account_resolution_journal": "account=%s" % resolution,
+            "binding_window": active.get("binding_window") if active else None,
+            "fetched_at": iso_now()}
 
 
 READERS = {"glm": read_glm, "codex": read_codex, "anthropic": read_anthropic}
+
+
+def normalize_payload(obj):
+    """Upgrade a cached pre-v2 payload in memory before a consumer sees it."""
+    if not isinstance(obj, dict):
+        return obj
+    if obj.get("status") != "ok":
+        obj.setdefault("usable_now", None)
+        obj.setdefault("binding_window", None)
+        return obj
+    provider = obj.get("provider")
+    if provider == "glm":
+        for name in ("five_hour", "weekly"):
+            obj[name] = with_window_truth(obj.get(name), "pct")
+        obj["binding_window"] = binding_window({name: obj.get(name)
+                                                 for name in ("five_hour", "weekly")})
+    elif provider == "codex":
+        windows = []
+        for window in obj.get("windows") or []:
+            enriched = with_window_truth(window, "used_percent")
+            if enriched:
+                windows.append(enriched)
+        obj["windows"] = windows
+        obj["binding_window"] = binding_window({w.get("kind", "unknown"): w for w in windows})
+    elif provider == "anthropic":
+        accounts = obj.get("accounts") or []
+        pin = configured_active_account()
+        for account in accounts:
+            account["account_label"] = account.get("account_label") or account_label(
+                account.get("service"), account.get("entry_suffix"), account.get("subscription_type"),
+                account.get("tier"), pin)
+            account["five_hour"] = with_window_truth(
+                account.get("five_hour") or {"pct": account.get("five_hour_pct"),
+                                               "reset_iso": account.get("five_hour_reset_iso")}, "pct")
+            account["seven_day"] = with_window_truth(
+                account.get("seven_day") or {"pct": account.get("seven_day_pct"),
+                                               "reset_iso": account.get("seven_day_reset_iso")}, "pct")
+            account["binding_window"] = binding_window({"five_hour": account["five_hour"],
+                                                        "seven_day": account["seven_day"]})
+        if len([a for a in accounts if a.get("active")]) != 1:
+            for account in accounts:
+                account["active"] = False
+            obj["account_resolution"] = resolve_active_account(accounts, pin)
+        obj.setdefault("account_resolution", "session_credential")
+        obj["account_resolution_journal"] = "account=%s" % obj["account_resolution"]
+        active = next((a for a in accounts if a.get("active")), None)
+        obj["active_account"] = active.get("account_label") if active else pin
+        obj["binding_window"] = active.get("binding_window") if active else None
+    return obj
 
 
 def main():
@@ -363,9 +563,11 @@ def main():
     if "--no-cache" not in args:
         cached = cache_get(provider)
         if cached is not None:
+            cached = normalize_payload(cached)
+            cache_put(provider, cached)
             print(json.dumps(cached))
             return
-    obj = READERS[provider]()
+    obj = normalize_payload(READERS[provider]())
     obj.setdefault("provider", provider)
     obj.setdefault("fetched_at", iso_now())
     cache_put(provider, obj)
