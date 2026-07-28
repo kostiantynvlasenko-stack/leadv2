@@ -298,7 +298,23 @@ _sync_project_root() {
     else
       log "Syncing -> project scripts (c): ${proj_scripts}"
       if [[ -d "${src}" ]]; then
-        _rsync_or_dry "project/scripts[${root##*/}]" "${src}" "${proj_scripts}" --recursive "${SYNC_HYGIENE_FILTERS[@]}"
+        # PER-FILE-SYMLINK-AWARE-SYNC-01 (Stage 3 real mechanism, 2026-07-28):
+        # .claude/scripts/ is a MIXED directory in every repo (repo-native
+        # tooling living alongside vendored plugin files), so Stage 3 links
+        # individual canonical-named files, not the whole directory — the
+        # directory-level `-L` guard above never fires under that layout.
+        # rsync's default write path (write-temp + rename-over-target) does
+        # NOT follow a destination symlink; it replaces the directory entry,
+        # silently turning a per-file symlink back into a real file with
+        # every sync run. Scan the destination for EXISTING symlinks first
+        # and --exclude each one by relative path so rsync skips it entirely
+        # (leaves the symlink exactly as-is) instead of clobbering it.
+        local -a _symlink_excludes=()
+        while IFS= read -r _sl; do
+          [[ -z "${_sl}" ]] && continue
+          _symlink_excludes+=(--exclude="${_sl}")
+        done < <(cd "${proj_scripts}" 2>/dev/null && find . -type l 2>/dev/null | sed 's|^\./||')
+        _rsync_or_dry "project/scripts[${root##*/}]" "${src}" "${proj_scripts}" --recursive "${SYNC_HYGIENE_FILTERS[@]}" "${_symlink_excludes[@]}"
       fi
     fi
   fi
@@ -369,7 +385,10 @@ _sync_project_root() {
   # symlink either (a symlinked scripts/ already has the harness via
   # canonical; `mkdir -p` on an existing symlink is a harmless no-op but the
   # `cp` would still write a real file INTO the linked-to directory).
-  if [[ "${vendors_scripts}" != "false" ]] && [[ -f "${harness_src}" ]] && [[ ! "${DRY_RUN}" == "true" ]] && [[ ! -L "${proj_scripts}" ]]; then
+  # PER-FILE-SYMLINK-AWARE-SYNC-01: also skip if the harness file ITSELF is a
+  # per-file symlink (proj_scripts as a whole is real/mixed under Stage 3;
+  # only the one destination file matters here).
+  if [[ "${vendors_scripts}" != "false" ]] && [[ -f "${harness_src}" ]] && [[ ! "${DRY_RUN}" == "true" ]] && [[ ! -L "${proj_scripts}" ]] && [[ ! -L "${proj_scripts}/leadv2-eval-harness.sh" ]]; then
     mkdir -p "${proj_scripts}"
     cp -p "${harness_src}" "${proj_scripts}/leadv2-eval-harness.sh"
   fi
