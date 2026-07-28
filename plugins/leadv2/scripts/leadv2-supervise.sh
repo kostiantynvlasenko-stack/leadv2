@@ -262,6 +262,12 @@ ACTIVE_LOCKFILE="${ACTIVE_YAML}.lock"
 # additionally lets a caller force observe-only at ANY time (verification.md
 # canary command uses it).
 OBSERVE_ONLY="${LEADV2_SUPERVISE_OBSERVE_ONLY:-0}"
+# A pending founder decision must not blend into routine supervision forever.
+# This is deliberately a supervisor surface (not a second queue): after this
+# age it emits one fresh URGENT event, even if its original delivery happened
+# while the supervising lead was mid-turn.
+QUESTION_ESCALATE_S="${LEADV2_QUESTION_ESCALATE_S:-300}"
+[[ "$QUESTION_ESCALATE_S" =~ ^[0-9]+$ ]] || QUESTION_ESCALATE_S=300
 
 # SUPERVISOR-RETRO-01 item 3: run the phase reconciliation backfill from the
 # supervisor heartbeat (this script IS the repeated /leadv2 heartbeat poll —
@@ -393,14 +399,15 @@ fi
 # rescue sidecar, never evidence that a Codex app-server job died.
 LANE_LIVENESS_JSON="$(LEADV2_PROJECT_ROOT="$PROJECT_ROOT" bash "${SCRIPT_DIR}/leadv2-lane-liveness.sh" --project-root "$PROJECT_ROOT" --json 2>/dev/null || printf '%s' '{"jobs":[],"availability":"unavailable"}')"
 
-python3 - "$ACTIVE_YAML" "$HANDOFF_DIR" "$SNAPSHOT" "$JSON_MODE" "$SINCE" "$CP_QUESTIONS_DIR" "${BUS_JSONL:-}" "${BUS_OFFSET_FILE:-}" "$TRUTH_BREACHES_JSON" "$TMUX_WINDOWS_TSV" "$TMUX_PANES_TSV" "$TASKS_YAML_PATH" "$ACTIVE_LOCKFILE" "$TOMBSTONES_FILE" "$OBSERVE_ONLY" "$SCRIPT_DIR" "$PROJECT_ROOT" "$LANE_LIVENESS_JSON" <<'PY'
+python3 - "$ACTIVE_YAML" "$HANDOFF_DIR" "$SNAPSHOT" "$JSON_MODE" "$SINCE" "$CP_QUESTIONS_DIR" "${BUS_JSONL:-}" "${BUS_OFFSET_FILE:-}" "$TRUTH_BREACHES_JSON" "$TMUX_WINDOWS_TSV" "$TMUX_PANES_TSV" "$TASKS_YAML_PATH" "$ACTIVE_LOCKFILE" "$TOMBSTONES_FILE" "$OBSERVE_ONLY" "$SCRIPT_DIR" "$PROJECT_ROOT" "$LANE_LIVENESS_JSON" "$QUESTION_ESCALATE_S" <<'PY'
 import sys, os, json, glob, datetime, subprocess
 from collections import deque
 
 (active_yaml, handoff_dir, snapshot_path, json_mode, since, cp_questions_dir,
  bus_jsonl, bus_offset_file, truth_breaches_json, tmux_windows_tsv,
  tmux_panes_tsv, tasks_yaml_path, active_lockfile, tombstones_file,
- observe_only_env, script_dir, project_root, lane_liveness_json) = sys.argv[1:19]
+ observe_only_env, script_dir, project_root, lane_liveness_json,
+ question_escalate_s_raw) = sys.argv[1:20]
 json_mode = json_mode == "1"
 delta_mode = bool(since)
 
@@ -418,6 +425,10 @@ except Exception:
 
 STUCK_MIN = 25
 CAP_ROWS = 20
+try:
+    QUESTION_ESCALATE_S = max(0, int(question_escalate_s_raw))
+except (TypeError, ValueError):
+    QUESTION_ESCALATE_S = 300
 
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1014,6 +1025,7 @@ if cp_questions_dir and os.path.isdir(cp_questions_dir):
             "question": question_text,
             "summary_for_lead": qd.get("summary_for_lead") or question_text[:60],
             "options": opt_labels,
+            "asked_at": qd.get("asked_at"),
             # D-a dual-read tagging (SUPERVISE-V2-01 item 4): control-plane
             # store has no worktree-local sibling file — legacy_path is null.
             "store": "control-plane",
@@ -1060,6 +1072,7 @@ for tid, s in sorted(current.items()):
                 pass
             open_qs.append({"qid": qid, "task_id": tid, "question": question,
                              "summary_for_lead": summary, "options": options,
+                             "asked_at": qd.get("created_at"),
                              # D-a dual-read tagging: this item came from the
                              # legacy worktree-local handoff store — the
                              # answer dispatcher needs legacy_path to wake
@@ -1133,10 +1146,20 @@ for q in cp_pending:
     if q["task_id"] not in current:
         waiting_items.append(q)
 
+# A question can be delivered while the lead is busy.  Keep it queued in the
+# same supervisor stream and emit one additional, visibly escalated event
+# after a short bounded age; never manufacture an answer or discard it.
+for q in waiting_items:
+    asked = parse_iso(q.get("asked_at"))
+    age_s = max(0, int((now - asked).total_seconds())) if asked else 0
+    q["age_seconds"] = age_s
+    q["escalated"] = bool(asked and age_s >= QUESTION_ESCALATE_S)
+
 # ── Delta / event-key bookkeeping ───────────────────────────────────────────
 current_events = set()
 for q in waiting_items:
-    current_events.add(f"waiting:{q['task_id']}:{q['qid']}")
+    suffix = ":escalated" if q.get("escalated") else ""
+    current_events.add(f"waiting:{q['task_id']}:{q['qid']}{suffix}")
 for st in stuck_items:
     current_events.add(f"stuck:{st['task_id']}:{'|'.join(st['reasons'])}")
 for tid in closed_now:
@@ -1178,7 +1201,8 @@ except Exception as e:
 
 # ── Filter output items to only the ones whose event_key is in new_events ──
 def event_key_waiting(q):
-    return f"waiting:{q['task_id']}:{q['qid']}"
+    suffix = ":escalated" if q.get("escalated") else ""
+    return f"waiting:{q['task_id']}:{q['qid']}{suffix}"
 
 def event_key_stuck(st):
     return f"stuck:{st['task_id']}:{'|'.join(st['reasons'])}"

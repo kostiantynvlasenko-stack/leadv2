@@ -6,7 +6,7 @@
 #
 # Exit codes:
 #   0 — answer recorded successfully
-#   3 — invalid option (not ^[a-z]$ or not in pending YAML options list)
+#   3 — invalid option (not in pending YAML options list)
 #   4 — question already answered (concurrent write or duplicate call)
 #   5 — pending question file not found
 
@@ -55,12 +55,6 @@ fi
 if [[ -z "$QID" ]] || [[ -z "$OPTION" ]]; then
   printf -- 'Ошибка: qid и option обязательны\n' >&2
   usage
-fi
-
-# Validate option: must be single lowercase letter ^[a-z]$
-if [[ ! "$OPTION" =~ ^[a-z]$ ]]; then
-  printf -- 'Ошибка: опция должна быть одной буквой (a-z)\n' >&2
-  exit 3
 fi
 
 # Resolve paths

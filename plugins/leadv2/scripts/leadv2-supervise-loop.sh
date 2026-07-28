@@ -222,7 +222,11 @@ if not isinstance(d, dict):
 events = []
 for q in (d.get("requires_founder") or d.get("questions") or []):
     summary = (q.get("summary_for_lead") or q.get("question") or "")[:100]
-    events.append(f"QUESTION {q.get('task_id', '?')} qid={q.get('qid', '?')} \"{summary}\"")
+    options = ",".join(str(o) for o in (q.get("options") or []))[:80]
+    if q.get("escalated"):
+        events.append(f"QUESTION_ESCALATED {q.get('task_id', '?')} qid={q.get('qid', '?')} age={q.get('age_seconds', '?')}s options={options} \"{summary}\"")
+    else:
+        events.append(f"QUESTION {q.get('task_id', '?')} qid={q.get('qid', '?')} options={options} \"{summary}\"")
 # forward-compat: 'dead' key does not exist until item 4 lands corroborated
 # death detection in leadv2-supervise.sh; read defensively either way.
 for st in (d.get("dead") or []):

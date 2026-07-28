@@ -203,7 +203,7 @@ test_7_control_plane_failure_fallback() {
   # BLOCKS on the legacy poll loop until we answer it from the side below.
   LEADV2_STATE_ROOT="$bad_state" LEADV2_PROJECT_ROOT="$work_root" PROJECT_ROOT="$work_root" \
     LEADV2_ASK_POLL_INTERVAL=1 \
-    bash "$ASK_SH" "$task_id" "Pick one" --option "a|Alpha" --option "b|Beta" \
+    bash "$ASK_SH" "$task_id" "Pick one" --option "staging|Use staging" --option "production|Use production" \
     --phase build --timeout 15 \
     >"${TMP_DIR}/ask7.out" 2>"${TMP_DIR}/ask7.err" &
   local ask_pid=$!
@@ -226,11 +226,11 @@ test_7_control_plane_failure_fallback() {
   local legacy_qid; legacy_qid="$(basename "$got_pending")"
   legacy_qid="${legacy_qid%-pending.yaml}"
 
-  # Answer it via leadv2-reply.sh against the SAME PROJECT_ROOT the ask used
-  # (option labels are single lowercase letters because reply enforces ^[a-z]$).
+  # Word labels are the real question contract; this protects the legacy
+  # answer path from reintroducing single-letter-only validation.
   local reply_rc
   LEADV2_PROJECT_ROOT="$work_root" \
-    bash "$REPLY_SH" --task-id "$task_id" "$legacy_qid" "b" >"${TMP_DIR}/reply7.out" 2>&1 && reply_rc=0 || reply_rc=$?
+    bash "$REPLY_SH" --task-id "$task_id" "$legacy_qid" "production" >"${TMP_DIR}/reply7.out" 2>&1 && reply_rc=0 || reply_rc=$?
 
   # Wait for the ask poll loop to observe the answer and exit (bounded by the
   # 15s --timeout even if the pickup somehow fails).
@@ -238,10 +238,10 @@ test_7_control_plane_failure_fallback() {
   local chosen; chosen="$(cat "${TMP_DIR}/ask7.out" 2>/dev/null || true)"
   chmod 700 "${bad_state}/questions" 2>/dev/null || true
 
-  if [[ "$reply_rc" -eq 0 && "$chosen" == "b" ]]; then
-    pass "Test 7: fallback pending written, reply answered, ask poll returned chosen=b (no crash)"
+  if [[ "$reply_rc" -eq 0 && "$chosen" == "production" ]]; then
+    pass "Test 7: word-label reply answered and ask poll returned chosen=production (no crash)"
   else
-    fail "Test 7: reply_rc=$reply_rc chosen='$chosen' (expected b). err=$(head -c 200 "${TMP_DIR}/ask7.err" 2>/dev/null)"
+    fail "Test 7: reply_rc=$reply_rc chosen='$chosen' (expected production). err=$(head -c 200 "${TMP_DIR}/ask7.err" 2>/dev/null)"
   fi
 }
 
