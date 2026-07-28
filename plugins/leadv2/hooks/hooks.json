@@ -88,6 +88,12 @@
             "timeout": 5,
             "continueOnBlock": true,
             "statusMessage": "Turn-count compact warner..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-idle-notification-filter.sh\"",
+            "timeout": 5,
+            "statusMessage": "Idle-notification filter (suppress content-free teammate wakes)..."
           }
         ]
       }
@@ -407,6 +413,12 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-auto-status.sh\""
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-loop-detect-hook.sh\"",
+            "timeout": 5,
+            "statusMessage": "Tool-cap loop guard (record executed call)..."
           }
         ]
       },
