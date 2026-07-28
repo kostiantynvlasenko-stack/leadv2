@@ -31,6 +31,21 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd
 
 log() { printf -- '[%s] leadv2-cost-flush: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 
+# PROVIDER-COL-01: mirrors _cost_provider_for_model in claude-subsession.sh.
+# This script only ever flushes markers left by claude-subsession.sh (Claude
+# CLI sessions), so every row it writes is provider=claude — derived, not
+# hardcoded, so a future non-Claude model string fails loud instead of lying.
+_cost_provider_for_model() {
+  local model_lc
+  model_lc="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$model_lc" in
+    opus*|sonnet*|haiku*|fable*|claude*) printf 'claude' ;;
+    glm*) printf 'glm' ;;
+    codex*|gpt*) printf 'codex' ;;
+    *) printf 'claude' ;;
+  esac
+}
+
 flush_marker() {
   local marker_file="$1"
   [[ -f "$marker_file" ]] || return 0
@@ -153,8 +168,10 @@ sys.exit(0 if any(str(r.get('session_id','')) == sid for r in rows) else 1)
         printf -- '# leadv2 cost telemetry — appended by leadv2-cost-flush.sh\n' > "$costs_file"
       fi
 
-      printf -- '- role: %s\n  model: %s\n  session_id: %s\n  input_tokens: %s\n  output_tokens: %s\n  cost_usd: %s\n  duration_sec: %s\n  timestamp: %s\n  flushed_post_hoc: true\n' \
-        "$role" "$model" "$session_id" \
+      local provider_val
+      provider_val="$(_cost_provider_for_model "$model")"
+      printf -- '- role: %s\n  model: %s\n  provider: %s\n  session_id: %s\n  input_tokens: %s\n  output_tokens: %s\n  cost_usd: %s\n  duration_sec: %s\n  timestamp: %s\n  flushed_post_hoc: true\n' \
+        "$role" "$model" "$provider_val" "$session_id" \
         "$input_tokens" "$output_tokens" "$cost_usd" \
         "$duration_sec" "$timestamp" >> "$costs_file"
 
@@ -209,23 +226,33 @@ except Exception:
   fi
 
   ACTUAL_USD="0.0"
+  PROVIDER_BREAKDOWN=""
   NOTE_FIELD=""
   if [[ -f "$COSTS_FILE" ]]; then
-    ACTUAL_USD=$(python3 - <<PYEOF
+    # PROVIDER-COL-01: rows written before this change have no `provider` key —
+    # backfill default is 'claude' (this ledger has only ever recorded Claude
+    # CLI sessions), so old and new rows both roll up correctly.
+    read -r ACTUAL_USD PROVIDER_BREAKDOWN <<<"$(python3 - <<PYEOF
 import sys, yaml
 from pathlib import Path
 try:
     rows = yaml.safe_load(Path("$COSTS_FILE").read_text()) or []
     if isinstance(rows, list):
-        total = sum(float(r.get("cost_usd", 0)) for r in rows if isinstance(r, dict))
-        print(f"{total:.6f}")
+        cost_rows = [r for r in rows if isinstance(r, dict) and "cost_usd" in r]
+        total = sum(float(r.get("cost_usd", 0)) for r in cost_rows)
+        by_provider = {}
+        for r in cost_rows:
+            prov = r.get("provider") or "claude"
+            by_provider[prov] = by_provider.get(prov, 0.0) + float(r.get("cost_usd", 0))
+        breakdown = ",".join(f"{p}={v:.6f}" for p, v in sorted(by_provider.items())) or "-"
+        print(f"{total:.6f} {breakdown}")
     else:
-        print("0.0")
+        print("0.0 -")
 except Exception as e:
-    print("0.0", file=sys.stderr)
-    print("0.0")
+    print("0.0 -", file=sys.stderr)
+    print("0.0 -")
 PYEOF
-) || ACTUAL_USD="0.0"
+)" || { ACTUAL_USD="0.0"; PROVIDER_BREAKDOWN="-"; }
   else
     NOTE_FIELD='  note: "cost data unavailable — costs.yaml missing"'
   fi
@@ -245,6 +272,11 @@ PYEOF
         printf -- '  error_usd: %s\n' "$ERROR_USD"
         printf -- '  timestamp: '"'"'%s'"'"'\n' "$TS"
         printf -- '  source: cost_aggregator\n'
+        # PROVIDER-COL-01: per-provider split so cross-provider cost questions
+        # (e.g. does GLM work also burn Claude quota) are answerable per task.
+        if [[ -n "$PROVIDER_BREAKDOWN" && "$PROVIDER_BREAKDOWN" != "-" ]]; then
+          printf -- '  actual_usd_by_provider: "%s"\n' "$PROVIDER_BREAKDOWN"
+        fi
         if [[ -n "${NOTE_FIELD:-}" ]]; then
           printf -- '%s\n' "$NOTE_FIELD"
         fi

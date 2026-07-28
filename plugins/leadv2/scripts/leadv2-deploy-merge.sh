@@ -21,6 +21,16 @@
 #      by render-close.sh AND the daemon/lane-queue release path) see it even
 #      in a fresh process/session — a failed ff-only merge can no longer be
 #      lying-green closed.
+#
+# DEPLOY-CLASS-VERIFY-GATE-01 (D4): after a successful deploy_rc==0, ALWAYS
+# writes a machine-checkable deploy-verify artifact (schema_version:1 YAML)
+# to the control plane (worktree-independent) + a docs/handoff/<id>/ mirror.
+# Calls the optional per-repo .claude/leadv2-overrides/deploy-verify.sh hook
+# (stdout line protocol); hook absent -> artifact still written with
+# targets: [] + producer_gap so leadv2-deploy-verify-check.sh fails-closed
+# with an actionable message instead of silently skipping verification. No
+# VPS host/service-name/path ever enters this shared script — those live
+# only inside the per-repo hook.
 set -euo pipefail
 
 : "${LEADV2_TASK_ID:?LEADV2_TASK_ID must be set}"
@@ -142,4 +152,160 @@ else
   exit 1
 fi
 [[ $deploy_rc -eq 0 ]] || { echo "Deploy failed (exit $deploy_rc)" >&2; exit 1; }
+
+# ── D4: deploy-verify artifact producer (DEPLOY-CLASS-VERIFY-GATE-01) ───────
+# Always runs after a successful deploy — this is the fix for the hollow
+# close: a deploy that never produced this artifact now fails-closed at
+# leadv2-phase8-assert.sh's A8 / leadv2-phase8-e2e-gate.sh's D6 block.
+DEPLOY_VERIFY_HOOK="${CLAUDE_PROJECT_ROOT:-$PWD}/.claude/leadv2-overrides/deploy-verify.sh"
+HOOK_STDOUT_FILE="$(mktemp)"
+trap 'rm -f "$HOOK_STDOUT_FILE"' EXIT
+PRODUCER_GAP=""
+if [[ -x "$DEPLOY_VERIFY_HOOK" ]]; then
+  # critic2 #5: repo-agnostic backstop timeout -- the per-repo hook (SSH +
+  # prod host roster) should time out its own ssh calls, but a hung remote
+  # or an override that forgets its own timeout must not stall Phase 6 (and
+  # every close behind it) indefinitely.
+  LEAD_V2_TASK_ID="$LEADV2_TASK_ID" LEAD_V2_COMMIT="$COMMIT" timeout 90 bash "$DEPLOY_VERIFY_HOOK" > "$HOOK_STDOUT_FILE" 2>&1 || true
+else
+  PRODUCER_GAP="no .claude/leadv2-overrides/deploy-verify.sh hook found -- add one to enable real deploy verification"
+  echo "leadv2-deploy-merge: WARN: ${PRODUCER_GAP}" >&2
+  : > "$HOOK_STDOUT_FILE"
+fi
+
+# critic1 H1: this command substitution and the python3 write below run
+# after deploy_rc==0 (a SUCCESSFUL deploy) under inherited set -euo
+# pipefail. Any failure here (state-path mkdir/permission issue, missing
+# PyYAML) must never be reported as a generic "deploy failed" -- it is a
+# distinct, less severe outcome (the deploy landed; only the verification
+# receipt did not).
+ARTIFACT_WRITE_OK=1
+CONTROL_PLANE_ARTIFACT="$(
+  PROJECT_ROOT="$LEADV2_PROJECT_ROOT" \
+    "${SCRIPT_DIR}/leadv2-state-path.sh" --no-link "deploy-verify/${LEADV2_TASK_ID}.yaml"
+)" || ARTIFACT_WRITE_OK=0
+HANDOFF_ARTIFACT="${LEADV2_HANDOFF_DIR}/${LEADV2_TASK_ID}/deploy-verify.yaml"
+
+if [[ "$ARTIFACT_WRITE_OK" -eq 1 ]]; then
+if ! python3 - "$CONTROL_PLANE_ARTIFACT" "$HANDOFF_ARTIFACT" "$LEADV2_TASK_ID" "$COMMIT" "$PRODUCER_GAP" "$HOOK_STDOUT_FILE" <<'PYEOF'
+import os, sys, tempfile
+from datetime import datetime, timezone
+
+control_path, handoff_path, task_id, target_commit, producer_gap, hook_out_file = sys.argv[1:7]
+producer_gap = producer_gap or None
+
+# ── parse the hook's dumb stdout line protocol ───────────────────────────
+# TARGET name=<label> / DEPLOYED_SHA=<40hex> / PREVIOUS_SHA=<40hex|-> /
+# PROBE_CMD=<str> / PROBE_EXIT=<int> -- one block per target.
+targets = []
+cur = {}
+
+def flush():
+    global cur
+    if cur:
+        targets.append(cur)
+    cur = {}
+
+with open(hook_out_file, encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        line = line.rstrip("\n")
+        if line.startswith("TARGET "):
+            flush()
+            _, _, kv = line.partition(" ")
+            k, _, v = kv.partition("=")
+            cur = {"name": v}
+        elif line.startswith("DEPLOYED_SHA="):
+            cur["deployed_sha"] = line.split("=", 1)[1]
+        elif line.startswith("PREVIOUS_SHA="):
+            v = line.split("=", 1)[1]
+            cur["previous_sha"] = None if v == "-" else v
+        elif line.startswith("PROBE_CMD="):
+            cur.setdefault("probe", {})["cmd"] = line.split("=", 1)[1]
+        elif line.startswith("PROBE_EXIT="):
+            try:
+                exit_code = int(line.split("=", 1)[1])
+            except ValueError:
+                exit_code = 1
+            cur.setdefault("probe", {})["exit_code"] = exit_code
+    flush()
+
+now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+final_targets = []
+for t in targets:
+    if "name" not in t:
+        continue
+    probe = t.get("probe", {})
+    exit_code = probe.get("exit_code", 1)
+    final_targets.append({
+        "name": t["name"],
+        # critic2 #6: never drop a target whose probe failed to observe a
+        # sha (unreachable/deleted host) -- keep it with deployed_sha: None,
+        # which can never match target_commit, so the gate fails it instead
+        # of silently shrinking "PASS: N target(s)" below the real roster.
+        "deployed_sha": t.get("deployed_sha"),
+        "previous_sha": t.get("previous_sha"),
+        "sha_advanced": t.get("previous_sha") != t.get("deployed_sha"),
+        "probe": {
+            "cmd": probe.get("cmd", ""),
+            "exit_code": exit_code,
+            "observed_at": now_iso,
+            "result": "pass" if exit_code == 0 else "fail",
+        },
+    })
+
+if not final_targets and not producer_gap:
+    producer_gap = "hook produced no parseable TARGET lines"
+
+_skip_flag = os.environ.get("LEADV2_SKIP_DEPLOY_VERIFY", "")
+_skip_reason = os.environ.get("LEADV2_SKIP_DEPLOY_VERIFY_REASON", "").strip()
+_bypassed = _skip_flag == "1"
+_bypass_reason = _skip_reason if (_bypassed and _skip_reason) else None
+
+payload = {
+    "schema_version": 1,
+    "task_id": task_id,
+    "verified_at": now_iso,
+    "target_commit": target_commit,
+    "producer": "leadv2-deploy-merge.sh",
+    "producer_gap": producer_gap,
+    "targets": final_targets,
+    "bypassed": _bypassed,
+    "bypass_reason": _bypass_reason,
+}
+
+def atomic_write(path, data):
+    import yaml
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".deploy-verify.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(data, fh, sort_keys=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+atomic_write(control_path, payload)
+atomic_write(handoff_path, payload)
+print(f"[leadv2-deploy-merge] deploy-verify artifact written: {control_path} (+ mirror {handoff_path})")
+PYEOF
+then
+  ARTIFACT_WRITE_OK=0
+fi
+fi
+
+rm -f "$HOOK_STDOUT_FILE"
+trap - EXIT
+
+if [[ "$ARTIFACT_WRITE_OK" -eq 0 ]]; then
+  echo "ARTIFACT_WRITE_FAILED: deploy succeeded (commit $COMMIT) but the deploy-verify artifact could not be written -- re-run leadv2-deploy-verify-check.sh manually once the underlying issue (state-path/permissions/PyYAML) is fixed" >&2
+  exit 3
+fi
+
 echo "Deploy complete (commit $COMMIT)"

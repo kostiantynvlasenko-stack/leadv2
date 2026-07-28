@@ -18,6 +18,13 @@
 #   PE_SKIP_TESTS=1 leadv2-phase8-e2e-gate.sh <task_id>
 #   -> sentinel IS written but with bypassed: true (visible, not silent —
 #      "every decision is explainable" per CLAUDE.md non-negotiables).
+#
+# DEPLOY-CLASS-VERIFY-GATE-01 (D6): when the task classifies as `deploy`,
+# a deploy-verify check MUST pass BEFORE this reaches PE_SKIP_TESTS or the
+# normal test run — inserted above both so neither can bypass it. Bypass
+# for THIS check is a separate, explicit env pair:
+#   LEADV2_SKIP_DEPLOY_VERIFY=1 LEADV2_SKIP_DEPLOY_VERIFY_REASON="..."
+#   -> empty reason still fails-closed (a reasonless bypass is a silent one).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,9 +55,57 @@ if ! flock -n 9; then
   exit 1
 fi
 
+# ── D6: deploy-class verify gate (DEPLOY-CLASS-VERIFY-GATE-01) ──────────────
+# Runs BEFORE the PE_SKIP_TESTS branch so that bypass cannot skip deploy
+# verification. When the classifier says `deploy`, requires
+# leadv2-deploy-verify-check.sh to pass before the sentinel is written.
+# If the classifier itself is absent (not yet vendored here), classification
+# degrades to `code` -- never a false-RED for repos mid-propagation.
+DEPLOY_VERIFIED="false"
+DEPLOY_VERIFY_BYPASSED="false"
+DEPLOY_VERIFY_BYPASS_REASON=""
+
+CLASSIFIER="${SCRIPT_DIR}/leadv2-deploy-classify.sh"
+if [[ -f "$CLASSIFIER" ]]; then
+  CLASSIFICATION="$(bash "$CLASSIFIER" "$TASK_ID" 2>/dev/null || echo code)"
+else
+  CLASSIFICATION="code"
+fi
+
+if [[ "$CLASSIFICATION" == "deploy" ]]; then
+  if [[ "${LEADV2_SKIP_DEPLOY_VERIFY:-}" == "1" ]]; then
+    if [[ -z "${LEADV2_SKIP_DEPLOY_VERIFY_REASON:-}" ]]; then
+      echo "leadv2-phase8-e2e-gate: LEADV2_SKIP_DEPLOY_VERIFY=1 requires a non-empty LEADV2_SKIP_DEPLOY_VERIFY_REASON -- fail-closed" >&2
+      rm -f "$SENTINEL"
+      exit 1
+    fi
+    DEPLOY_VERIFY_BYPASSED="true"
+    DEPLOY_VERIFY_BYPASS_REASON="${LEADV2_SKIP_DEPLOY_VERIFY_REASON}"
+    echo "leadv2-phase8-e2e-gate: deploy-verify BYPASSED -- ${DEPLOY_VERIFY_BYPASS_REASON}" >&2
+  else
+    DEPLOY_CHECK="${SCRIPT_DIR}/leadv2-deploy-verify-check.sh"
+    if [[ ! -f "$DEPLOY_CHECK" ]]; then
+      echo "leadv2-phase8-e2e-gate: task classified deploy but leadv2-deploy-verify-check.sh not found (${DEPLOY_CHECK}) -- fail-closed" >&2
+      rm -f "$SENTINEL"
+      exit 1
+    fi
+    dv_out=""
+    dv_rc=0
+    dv_out=$(bash "$DEPLOY_CHECK" "$TASK_ID" 2>&1) || dv_rc=$?
+    if [[ $dv_rc -eq 0 ]]; then
+      DEPLOY_VERIFIED="true"
+      echo "leadv2-phase8-e2e-gate: deploy-verify PASS -- ${dv_out}" >&2
+    else
+      echo "leadv2-phase8-e2e-gate: deploy-verify FAIL (exit ${dv_rc}) -- ${dv_out}" >&2
+      rm -f "$SENTINEL"
+      exit 1
+    fi
+  fi
+fi
+
 if [[ "${PE_SKIP_TESTS:-}" == "1" ]]; then
-  printf 'e2e-gate-passed: %s\nasserted_at: %s\nscope: changed\nbypassed: true\n' \
-    "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$SENTINEL"
+  printf 'e2e-gate-passed: %s\nasserted_at: %s\nscope: changed\nbypassed: true\ndeploy_verified: %s\ndeploy_verify_bypassed: %s\ndeploy_verify_bypass_reason: %s\n' \
+    "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DEPLOY_VERIFIED" "$DEPLOY_VERIFY_BYPASSED" "$DEPLOY_VERIFY_BYPASS_REASON" > "$SENTINEL"
   echo "leadv2-phase8-e2e-gate: BYPASSED via PE_SKIP_TESTS=1 (sentinel marked bypassed:true)" | tee "$LOG" >&2
   exit 0
 fi
@@ -59,8 +114,8 @@ rc=0
 bash "${PROJECT_ROOT}/tests/run-all.sh" --scope changed > "$LOG" 2>&1 || rc=$?
 
 if [[ $rc -eq 0 ]]; then
-  printf 'e2e-gate-passed: %s\nasserted_at: %s\nscope: changed\nbypassed: false\n' \
-    "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$SENTINEL"
+  printf 'e2e-gate-passed: %s\nasserted_at: %s\nscope: changed\nbypassed: false\ndeploy_verified: %s\ndeploy_verify_bypassed: %s\ndeploy_verify_bypass_reason: %s\n' \
+    "$TASK_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DEPLOY_VERIFIED" "$DEPLOY_VERIFY_BYPASSED" "$DEPLOY_VERIFY_BYPASS_REASON" > "$SENTINEL"
   echo "leadv2-phase8-e2e-gate: PASS — sentinel written: ${SENTINEL}" >&2
   exit 0
 else

@@ -99,6 +99,23 @@ _clear_force_model() {
   unset LEADV2_FORCE_MODEL_TASK
 }
 
+# PROVIDER-COL-01: costs.yaml has no provider column, so no cross-provider
+# cost question is answerable (incl. "does GLM work also burn Claude quota").
+# This script only ever launches Claude-family sessions (opus/sonnet/haiku/
+# fable) via the `claude` CLI, so every row it writes is provider=claude —
+# derived here (not hardcoded inline) so a future model string that isn't
+# Claude-family fails loud instead of silently mislabeling.
+_cost_provider_for_model() {
+  local model_lc
+  model_lc="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$model_lc" in
+    opus*|sonnet*|haiku*|fable*|claude*) printf 'claude' ;;
+    glm*) printf 'glm' ;;
+    codex*|gpt*) printf 'codex' ;;
+    *) printf 'claude' ;;  # this script only spawns Claude CLI sessions — safe default
+  esac
+}
+
 # H1/H4: every costs.yaml writer in this file funnels through here — a single
 # flock -x -w N (bounded, never unbounded) on the SAME .cost-flush.lock the
 # router reads under -s. On lock timeout: log + skip, NEVER write unlocked
@@ -453,13 +470,17 @@ PYEOF
     fi
   fi
   local checksum_val="${derived_checksum:-null}"
+  local provider_val
+  provider_val="$(_cost_provider_for_model "$model")"
 
   # H4 fix-round-1: locked append (was a bare >> with a separate unlocked
   # header-creation check — both folded into _costs_append's single critical
   # section now, closing the header-creation TOCTOU too).
+  # PROVIDER-COL-01: provider field added so cost rows are groupable across
+  # Claude/GLM/Codex spend, not just role/model within one provider.
   local _row
-  _row=$(printf -- '- role: %s\n  model: %s\n  session_id: %s\n  input_tokens: %s\n  output_tokens: %s\n  cost_usd: %s\n  duration_sec: %s\n  timestamp: %s\n  cache_hit_rate: %s\n  prompt_prefix_checksum: %s\n' \
-    "$role" "$model" "$session_id" \
+  _row=$(printf -- '- role: %s\n  model: %s\n  provider: %s\n  session_id: %s\n  input_tokens: %s\n  output_tokens: %s\n  cost_usd: %s\n  duration_sec: %s\n  timestamp: %s\n  cache_hit_rate: %s\n  prompt_prefix_checksum: %s\n' \
+    "$role" "$model" "$provider_val" "$session_id" \
     "$input_tokens" "$output_tokens" "$cost_usd" \
     "$duration_sec" "$timestamp" \
     "${cache_hit_rate_val:-null}" "$checksum_val")
