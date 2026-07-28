@@ -310,6 +310,13 @@
           },
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-shared-script-warn.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "Checking for shared per-file-symlinked plugin script..."
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-verdict-format-guard.sh\"",
             "timeout": 5,
             "statusMessage": "Checking verdict YAML format..."
@@ -353,6 +360,13 @@
           },
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-shared-script-warn.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "Checking for shared per-file-symlinked plugin script..."
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-verdict-format-guard.sh\"",
             "timeout": 5,
             "statusMessage": "Checking verdict YAML format..."
@@ -386,6 +400,13 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-lead-edit-guard.sh\"",
             "timeout": 5,
             "statusMessage": "leadv2 lead-edit guard..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-shared-script-warn.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "Checking for shared per-file-symlinked plugin script..."
           },
           {
             "type": "command",
