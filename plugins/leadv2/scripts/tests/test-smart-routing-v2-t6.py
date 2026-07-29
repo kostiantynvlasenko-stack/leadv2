@@ -20,12 +20,6 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
 ROUTER_PY_PATH = SCRIPTS / "leadv2-router-v2.py"
 ROUTER_SH_PATH = SCRIPTS / "leadv2-router-v2.sh"
-ROUTING_YAML_PATH = SCRIPTS.parent / "config" / "leadv2-routing.yaml"
-if not ROUTING_YAML_PATH.exists():
-    # Vendored copies live at <repo>/.claude/scripts/, while their shared
-    # registry stays at <repo>/.claude/ref/.  Canonical uses plugins/leadv2/
-    # config instead; keep this acceptance test repo-generic.
-    ROUTING_YAML_PATH = SCRIPTS.parent / "ref" / "leadv2-routing.yaml"
 
 spec = importlib.util.spec_from_file_location("router_v2", ROUTER_PY_PATH)
 router_v2 = importlib.util.module_from_spec(spec)
@@ -196,6 +190,7 @@ class SelectionAndReserveTests(unittest.TestCase):
             estimate_file = tmp / "estimate.json"
             samples_file = tmp / "samples.json"
             weights_file = tmp / "weights.json"
+            routing_file = tmp / "routing.yaml"
             quota_file.write_text(json.dumps({"glm": glm_bucket(), "codex": codex_bucket(50),
                                               "anthropic": anthropic_bucket(99, 99)}))
             l1_file.write_text(json.dumps({"eligible": ["codex", "claude-sonnet"],
@@ -203,8 +198,9 @@ class SelectionAndReserveTests(unittest.TestCase):
             estimate_file.write_text(json.dumps(self.estimate()))
             samples_file.write_text(json.dumps({"glm": 1.0, "codex": .01, "claude-sonnet": .01}))
             weights_file.write_text(json.dumps(self.WEIGHTS))
+            routing_file.write_text(json.dumps({"router_v2": {"arms": self.ARMS}}))
             proc = subprocess.run([
-                "bash", str(ROUTER_SH_PATH), "resolve", "--routing-yaml", str(ROUTING_YAML_PATH),
+                "bash", str(ROUTER_SH_PATH), "resolve", "--routing-yaml", str(routing_file),
                 "--quota-json", str(quota_file), "--l1-json", str(l1_file),
                 "--estimate-json", str(estimate_file), "--samples-json", str(samples_file),
                 "--headroom-weights-json", str(weights_file),
