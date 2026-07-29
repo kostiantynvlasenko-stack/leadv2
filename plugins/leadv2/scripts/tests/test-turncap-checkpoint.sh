@@ -17,6 +17,13 @@ fail() { FAIL=$((FAIL + 1)); printf '[TEST] FAIL: %s\n' "$1"; }
 
 if bash -n "$COMMIT_SCRIPT"; then pass "commit-script syntax"; else fail "commit-script syntax"; fi
 if bash -n "$HOOK"; then pass "hook syntax"; else fail "hook syntax"; fi
+if grep -Fq 'TAIL_AT=$(( CAP - RESERVE ))' "$HOOK" \
+  && grep -Fq 'EARLY_AT=$(( CAP - RESERVE * 2 ))' "$HOOK" \
+  && ! grep -Eq '(^|[^0-9])55([^0-9]|$)' "$HOOK"; then
+  pass "checkpoint warnings are derived from the effective cap, not a literal turn 55"
+else
+  fail "checkpoint warning thresholds must derive from CAP without a literal turn 55"
+fi
 
 mk_repo() {
   local repo="$1"

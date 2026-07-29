@@ -323,9 +323,9 @@ STREAM_OUT="$HANDOFF_DIR/${ROLE}.stream.jsonl"
 
 # Turn cap — captured once so the spawn arg and the post-run truncation detector
 # (SUBSESSION-MAXTURNS-TRUNCATION-01) compare against the SAME value. Default
-# raised 25 → 60: real builds routinely needed >25 turns and died silently at the
+# raised 25 → 110: real builds routinely needed >60 turns and died silently at the
 # cap (caller saw rc=0 on a half-written file). Override: LEADV2_SUBSESSION_MAX_TURNS.
-MAX_TURNS="${LEADV2_SUBSESSION_MAX_TURNS:-60}"
+MAX_TURNS="${LEADV2_SUBSESSION_MAX_TURNS:-110}"
 
 CLAUDE_ARGS=(
   -p "$FINAL_PROMPT"
