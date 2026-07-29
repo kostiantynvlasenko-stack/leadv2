@@ -270,6 +270,8 @@ for q in (d.get("requires_founder") or d.get("questions") or []):
 for st in (d.get("dead") or []):
     reasons = "; ".join(st.get("reasons", []))[:100]
     events.append(f"DEAD {st.get('task_id', '?')} {reasons}")
+for item in (d.get("degraded") or []):
+    events.append(f"DEGRADED {item.get('task_id', '?')} architect_prepass={item.get('reason', '?')} dispatched_raw_mission")
 for st in (d.get("stuck") or []):
     reasons = "; ".join(st.get("reasons", []))[:100]
     events.append(f"STUCK {st.get('task_id', '?')} {reasons}")
@@ -334,8 +336,6 @@ def receipt_proof(receipts, provider):
 lines = []
 for row in table:
     tid = row.get("task_id", "?")
-    if tid in dead_ids:
-        continue  # dead lanes are never part of the N-lane pulse (D-d)
     phase = row.get("phase", "?")
     age = row.get("minutes_in_phase", "?")
     if tid in waiting_ids:

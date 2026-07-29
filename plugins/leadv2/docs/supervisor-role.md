@@ -84,6 +84,12 @@ the dispatch funnel; the supervisor does not claim work manually.
   and what's been live-verified — not just "done."
 - A status is a claim backed by evidence (commit sha, live-verify output,
   deploy confirmation), not a summary of intent.
+- The lane view is reactive: request it from the collector at the moment it is
+  needed. It must render every running and terminal lane separately. A dead,
+  cancelled, or never-started lane includes its recorded reason; it is never
+  subtracted from the count. Elapsed time is measured from the lane/job
+  `startedAt`/`createdAt`, never from a heartbeat. “Nothing landed” is allowed
+  only when no lane landed and no lane died, was cancelled, or never started.
 
 ## Where this file lives
 

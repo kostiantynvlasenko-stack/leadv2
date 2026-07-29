@@ -1079,8 +1079,10 @@ for tid, s in sorted(current.items()):
     status, status_reason = pulse_verdict(tid, s)
     started_at = parse_iso(s.get("started_at"))
     last_pulse = parse_iso(s.get("last_pulse_at"))
-    ref_ts = last_pulse or started_at
-    minutes = int((now - ref_ts).total_seconds() // 60) if ref_ts else None
+    # A lane's elapsed time is its wall-clock lifetime, not the age of its
+    # most recent heartbeat.  The latter made a 28-minute job look 6 minutes
+    # old after a pulse and is not a truthful status metric.
+    minutes = max(0, int((now - started_at).total_seconds() // 60)) if started_at else None
 
     # waiting-for-answer: open questions-async pending files with no sibling answered
     open_qs = list(legacy_by_task.get(tid, []))
@@ -1132,6 +1134,27 @@ for tid, s in sorted(current.items()):
 
 table = table[:CAP_ROWS]
 
+# Tombstones are durable terminal lanes, not bookkeeping to hide from the
+# status count.  Keep the latest death per task as its own row even after the
+# active registry has been pruned.
+terminal_by_task = {}
+try:
+    with open(tombstones_file, encoding="utf-8") as fh:
+        for item in (yaml.safe_load(fh) or []):
+            if isinstance(item, dict) and item.get("task_id"):
+                terminal_by_task[item["task_id"]] = item
+except Exception:
+    pass
+for tid, item in sorted(terminal_by_task.items()):
+    state = item.get("last_state") or {}
+    started = parse_iso(state.get("started_at"))
+    mins = max(0, int((now - started).total_seconds() // 60)) if started else "?"
+    reason = "; ".join(str(x) for x in (item.get("reasons") or [])) or "terminal lane recorded without a reason"
+    table.append({"task_id": tid, "phase": state.get("phase") or "never-started",
+                  "minutes_in_phase": mins, "status": "dead", "status_reason": reason,
+                  "waiting": False, "where": state.get("where") or "terminal record",
+                  "protocol_version": state.get("protocol_version", "terminal")})
+
 # Codex app-server jobs are first-class lanes even when they have no active.yaml
 # row. Their status/phase comes only from codex-task.sh, never codex-guard/ps.
 for job in codex_liveness.get("jobs", []):
@@ -1140,7 +1163,7 @@ for job in codex_liveness.get("jobs", []):
     mins = int((now - started).total_seconds() // 60) if started else "?"
     table.append({"task_id": f"codex:{job.get('id', '?')}", "phase": job.get("phase", "unknown"),
                   "minutes_in_phase": mins, "status": status,
-                  "status_reason": f"authoritative {job.get('source', 'codex-task.sh status')}: status={job.get('status', 'unknown')}",
+                  "status_reason": f"authoritative {job.get('source', 'codex-task.sh status')}: status={job.get('status', 'unknown')}" + (f"; {job.get('reason')}" if job.get('reason') else ""),
                   "waiting": False, "where": "codex app-server", "protocol_version": "provider"})
 
 # Dangling control-plane questions — task_id not (or not yet) in active.yaml
@@ -1165,6 +1188,28 @@ for q in waiting_items:
     q["age_seconds"] = age_s
     q["escalated"] = bool(asked and age_s >= QUESTION_ESCALATE_S)
 
+# Dispatch prepass degradation is operational news.  Journal it into the
+# same event stream as questions so the supervisor sees a raw-mission launch
+# instead of inferring that the quality gate succeeded.
+degraded_items = []
+tasks_dir = os.path.join(os.path.dirname(active_yaml), "tasks")
+try:
+    for name in (os.listdir(tasks_dir) if os.path.isdir(tasks_dir) else []):
+        if not name.startswith("dispatch-"):
+            continue
+        journal = os.path.join(tasks_dir, name, "journal.md")
+        if not os.path.isfile(journal):
+            continue
+        with open(journal, encoding="utf-8") as fh:
+            lines = fh.readlines()
+        for line in reversed(lines):
+            if "architect_prepass" in line and "status=degraded" in line:
+                reason = line.split("reason=", 1)[1].split()[0] if "reason=" in line else "no_design"
+                degraded_items.append({"task_id": name, "reason": reason})
+                break
+except Exception as e:
+    warnings.append(f"degraded dispatch scan unavailable: {e.__class__.__name__}")
+
 # ── Delta / event-key bookkeeping ───────────────────────────────────────────
 current_events = set()
 for q in waiting_items:
@@ -1184,6 +1229,8 @@ for tid in closed_now:
 # violating the pulse ceiling ("unchanged poll -> zero bytes appended").
 for d in dead_now:
     current_events.add(f"dead:{d['task_id']}:{'|'.join(d['reasons'])}")
+for item in degraded_items:
+    current_events.add(f"degraded:{item['task_id']}:{item['reason']}")
 
 new_events = current_events - prev_reported if delta_mode else current_events
 
@@ -1220,6 +1267,9 @@ def event_key_stuck(st):
 def event_key_dead(d):
     return f"dead:{d['task_id']}:{'|'.join(d['reasons'])}"
 
+def event_key_degraded(item):
+    return f"degraded:{item['task_id']}:{item['reason']}"
+
 out_waiting = [q for q in waiting_items if event_key_waiting(q) in new_events] if delta_mode else waiting_items
 out_stuck = [st for st in stuck_items if event_key_stuck(st) in new_events] if delta_mode else stuck_items
 out_closed = [tid for tid in closed_now if f"closed:{tid}" in new_events] if delta_mode else closed_now
@@ -1227,6 +1277,7 @@ out_closed = [tid for tid in closed_now if f"closed:{tid}" in new_events] if del
 # call always reports the complete live dead_now state; a delta call only
 # reports a dead_now entry whose event_key is NEW since the last snapshot.
 out_dead = [d for d in dead_now if event_key_dead(d) in new_events] if delta_mode else dead_now
+out_degraded = [item for item in degraded_items if event_key_degraded(item) in new_events] if delta_mode else degraded_items
 
 # ── SESSION-HANDOFF-01: bounded resume object (full calls only) ────────────
 # Rides this mandatory first --json call the leadv2-supervise skill already
@@ -1295,6 +1346,7 @@ if json_mode:
         # per liveness change, never once per 5s poll while the state is
         # unchanged (pulse-ceiling violation otherwise).
         "dead": out_dead,
+        "degraded": out_degraded,
         "observe_only": observe_only,
         "reconcile_cycle": reconcile_cycle,
         # SESSION-HANDOFF-01: bounded <supervisor-handoff> restore block —

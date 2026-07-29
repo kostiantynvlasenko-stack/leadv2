@@ -53,7 +53,9 @@ try:
         out["jobs"].append({"id": job.get("id", "?"), "status": status,
                             "phase": phase, "verdict": verdict,
                             "started_at": job.get("startedAt") or job.get("createdAt"),
-                            "updated_at": job.get("updatedAt"), "source": "codex-task.sh status"})
+                            "updated_at": job.get("updatedAt"),
+                            "reason": job.get("reason") or job.get("error") or job.get("message"),
+                            "source": "codex-task.sh status"})
     out["availability"] = "authoritative" if isinstance(payload, dict) else "unavailable"
 except Exception:
     pass

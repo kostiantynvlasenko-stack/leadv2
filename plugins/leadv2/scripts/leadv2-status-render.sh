@@ -111,7 +111,13 @@ else:
             phase = row.get('phase', '?')
             status = row.get('status', '?')
             waiting = 'waiting' if row.get('waiting') else ''
-            lines.append(f'    {tid:<28} {phase:<14} {status:<8} {waiting}')
+            reason = row.get('status_reason') or ''
+            lines.append(f'    {tid:<28} {phase:<14} {status:<10} {waiting} {reason}')
+    degraded = data.get('degraded') if isinstance(data, dict) else None
+    if isinstance(degraded, list) and degraded:
+        lines.append(f'  DEGRADED DISPATCHES ({len(degraded)}):')
+        for item in degraded[:20]:
+            lines.append(f"    {item.get('task_id','?')}: architect prepass {item.get('reason','?')}; raw mission dispatched")
     else:
         lines.append('  LANES: (unexpected shape — see raw snapshot)')
     questions = data.get('requires_founder') if isinstance(data, dict) else None
