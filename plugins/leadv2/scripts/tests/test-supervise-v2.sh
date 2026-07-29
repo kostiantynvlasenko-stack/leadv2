@@ -672,6 +672,66 @@ json.dump({'pid': $$, 'pid_birth': '$birth', 'started_at': '2020-01-01T00:00:00Z
   fi
 }
 
+# ── Test 11: ST-1 legacy questions scan is global ──────────────────────────
+
+test_11_global_legacy_question_scan() {
+  log "Test 11: ST-1 global legacy question scan surfaces registered and unregistered lanes, skips answered"
+
+  local repo state active_path loop_log registered_count unregistered_count answered_count
+  read -r repo state < <(_new_fixture)
+  active_path="$(_active_yaml "$repo" "$state")"
+  mkdir -p "$(dirname "$active_path")"
+  cat > "$active_path" <<YAML
+sessions:
+  - task_id: REGISTERED
+    session_id: st1-registered
+    started_at: "2026-01-01T00:00:00Z"
+    phase: build
+    pid: $$
+    pid_birth: null
+    protocol_version: 2
+    backend: workflow
+    last_pulse_at: "2026-01-01T00:00:00Z"
+    stale: false
+YAML
+  mkdir -p "$repo/docs/handoff/REGISTERED/questions-async" \
+    "$repo/docs/handoff/UNREGISTERED/questions-async" \
+    "$repo/docs/handoff/ANSWERED/questions-async"
+  cat > "$repo/docs/handoff/REGISTERED/questions-async/q-registered-pending.yaml" <<'YAML'
+question: Registered lane question
+summary_for_lead: registered legacy question
+options:
+  - label: continue
+YAML
+  cat > "$repo/docs/handoff/UNREGISTERED/questions-async/q-unregistered-pending.yaml" <<'YAML'
+question: Unregistered lane question
+summary_for_lead: unregistered legacy question
+options:
+  - label: deploy
+YAML
+  cat > "$repo/docs/handoff/ANSWERED/questions-async/q-answered-pending.yaml" <<'YAML'
+question: Answered lane question
+summary_for_lead: answered legacy question
+YAML
+  : > "$repo/docs/handoff/ANSWERED/questions-async/q-answered-answered.yaml"
+
+  loop_log="$(LEADV2_PROJECT_ROOT="$repo" LEADV2_STATE_ROOT="$state" \
+    PROJECT_ROOT="$repo" bash "$STATE_PATH_SH" supervise-loop.log)"
+  timeout 20 env LEADV2_PROJECT_ROOT="$repo" CLAUDE_PROJECT_DIR="$repo" LEADV2_STATE_ROOT="$state" \
+    LEADV2_SUPERVISE_EVENT_POLL_S=0 LEADV2_SUPERVISE_LOOP_MAX_CYCLES=1 \
+    LEADV2_BACKLOG_PUMP=0 bash "$LOOP_SH" >/dev/null 2>&1 \
+    || { fail "Test 11: event poll exited nonzero"; return; }
+
+  registered_count="$(grep -c 'SUPERVISE-URGENT] QUESTION REGISTERED qid=q-registered' "$loop_log" 2>/dev/null || true)"
+  unregistered_count="$(grep -c 'SUPERVISE-URGENT] QUESTION UNREGISTERED qid=q-unregistered' "$loop_log" 2>/dev/null || true)"
+  answered_count="$(grep -c 'SUPERVISE-URGENT] QUESTION ANSWERED qid=q-answered' "$loop_log" 2>/dev/null || true)"
+  if [[ "$registered_count" -eq 1 && "$unregistered_count" -eq 1 && "$answered_count" -eq 0 ]]; then
+    pass "Test 11: one event poll surfaces registered + unregistered legacy questions, skips answered sibling"
+  else
+    fail "Test 11: registered=$registered_count unregistered=$unregistered_count answered=$answered_count log=$(cat "$loop_log" 2>/dev/null)"
+  fi
+}
+
 # ── Test 6: bash -n syntax on all three scripts ─────────────────────────────
 
 test_6_syntax() {
@@ -699,6 +759,9 @@ case "${LEADV2_SUPERVISE_TEST_ONLY:-all}" in
   ensure)
     test_10_ensure_atomic_attach
     ;;
+  st1)
+    test_11_global_legacy_question_scan
+    ;;
   all)
     test_6_syntax
     test_1_loop_cadence_ceiling
@@ -709,6 +772,7 @@ case "${LEADV2_SUPERVISE_TEST_ONLY:-all}" in
     test_7_and_condition_death_matrix
     test_8_tombstone_failure_keeps_row
     test_9_dead_event_dedup
+    test_11_global_legacy_question_scan
     test_10_ensure_atomic_attach
     ;;
   *)

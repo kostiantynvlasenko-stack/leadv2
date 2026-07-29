@@ -1036,6 +1036,39 @@ cp_by_task = {}
 for q in cp_pending:
     cp_by_task.setdefault(q["task_id"], []).append(q)
 
+# ── Legacy handoff questions (global scan) ──────────────────────────────────
+# Out-of-pipeline lanes do not register in active.yaml, so scan every handoff
+# task rather than only the task ids present in the live-session registry.
+legacy_pending = []
+for pf in sorted(glob.glob(os.path.join(handoff_dir, "*", "questions-async", "*-pending.yaml"))):
+    qdir = os.path.dirname(pf)
+    qid = os.path.basename(pf)[:-len("-pending.yaml")]
+    answered = os.path.join(qdir, f"{qid}-answered.yaml")
+    if os.path.isfile(answered):
+        continue
+    task_id = os.path.basename(os.path.dirname(qdir))
+    question = ""
+    options = []
+    summary = ""
+    qd = {}
+    try:
+        import yaml
+        with open(pf, encoding="utf-8") as fh:
+            qd = yaml.safe_load(fh) or {}
+        question = qd.get("question", "")
+        summary = qd.get("summary_for_lead", "")
+        options = [o.get("label", "") for o in (qd.get("options") or []) if isinstance(o, dict)]
+    except Exception:
+        pass
+    legacy_pending.append({"qid": qid, "task_id": task_id, "question": question,
+                           "summary_for_lead": summary, "options": options,
+                           "asked_at": qd.get("created_at"),
+                           "store": "legacy-handoff", "legacy_path": pf})
+
+legacy_by_task = {}
+for q in legacy_pending:
+    legacy_by_task.setdefault(q["task_id"], []).append(q)
+
 # ── Table + waiting + stuck (only for currently-live sessions) ─────────────
 table = []
 waiting_items = []
@@ -1050,36 +1083,7 @@ for tid, s in sorted(current.items()):
     minutes = int((now - ref_ts).total_seconds() // 60) if ref_ts else None
 
     # waiting-for-answer: open questions-async pending files with no sibling answered
-    qdir = os.path.join(handoff_dir, tid, "questions-async")
-    open_qs = []
-    if os.path.isdir(qdir):
-        for pf in sorted(glob.glob(os.path.join(qdir, "*-pending.yaml"))):
-            qid = os.path.basename(pf)[:-len("-pending.yaml")]
-            answered = os.path.join(qdir, f"{qid}-answered.yaml")
-            if os.path.isfile(answered):
-                continue
-            question = ""
-            options = []
-            summary = ""
-            try:
-                import yaml
-                with open(pf, encoding="utf-8") as fh:
-                    qd = yaml.safe_load(fh) or {}
-                question = qd.get("question", "")
-                summary = qd.get("summary_for_lead", "")
-                options = [o.get("label", "") for o in (qd.get("options") or []) if isinstance(o, dict)]
-            except Exception:
-                pass
-            open_qs.append({"qid": qid, "task_id": tid, "question": question,
-                             "summary_for_lead": summary, "options": options,
-                             "asked_at": qd.get("created_at"),
-                             # D-a dual-read tagging: this item came from the
-                             # legacy worktree-local handoff store — the
-                             # answer dispatcher needs legacy_path to wake
-                             # the exact old poller (leadv2-reply.sh), never
-                             # leadv2-answer.sh (that store is control-plane
-                             # only). No new writer may create these files.
-                             "store": "legacy-handoff", "legacy_path": pf})
+    open_qs = list(legacy_by_task.get(tid, []))
     open_qs.extend(cp_by_task.get(tid, []))
     is_waiting = bool(open_qs)
     waiting_items.extend(open_qs)
@@ -1143,6 +1147,12 @@ for job in codex_liveness.get("jobs", []):
 # (e.g. registry lag). Still surface them; never silently drop a pending
 # founder question just because the session table hasn't caught up.
 for q in cp_pending:
+    if q["task_id"] not in current:
+        waiting_items.append(q)
+
+# Dangling legacy-handoff questions are equally founder-visible even when
+# their worker lane was launched outside the active.yaml dispatch funnel.
+for q in legacy_pending:
     if q["task_id"] not in current:
         waiting_items.append(q)
 
