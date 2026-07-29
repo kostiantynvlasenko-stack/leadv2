@@ -126,11 +126,25 @@ fi
 printf '%s|wiki-query|inject hits>0\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/leadv2-wiki-query.log 2>/dev/null || true
 # ── emit additionalContext + ledger event ─────────────────────────────────────
 python3 - "$RESULTS" <<'PYEOF'
-import sys, json, os, datetime
+import sys, json, os, datetime, subprocess
 
 results = sys.argv[1]
 header  = "## Wiki context (auto-injected)\n\n"
 block   = header + results
+
+def _fallback_project_root():
+    # Repo-agnostic default (matches leadv2-helpers.sh convention): derive
+    # from git, never assume a specific consumer repo.
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return os.getcwd()
 
 # emit ledger event (fire-and-forget, never blocks)
 try:
@@ -145,8 +159,7 @@ try:
         }
     }
     ledger_path = os.path.join(
-        os.environ.get("LEADV2_PROJECT_ROOT",
-                       os.path.expanduser("~/Projects/persona-engine")),
+        os.environ.get("LEADV2_PROJECT_ROOT", _fallback_project_root()),
         "docs/leadv2/ledger.jsonl"
     )
     os.makedirs(os.path.dirname(ledger_path), exist_ok=True)

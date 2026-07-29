@@ -14,7 +14,7 @@ set -euo pipefail
 
 # ── constants ──────────────────────────────────────────────────────────────────
 readonly WIKI_DB="${HOME}/.claude/leadv2-wiki/wiki.db"
-readonly PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-${HOME}/Projects/persona-engine}"
+readonly PROJECT_ROOT="${LEADV2_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
 log() { printf -- '[wiki-index] %s\n' "$*" >&2; }
 
