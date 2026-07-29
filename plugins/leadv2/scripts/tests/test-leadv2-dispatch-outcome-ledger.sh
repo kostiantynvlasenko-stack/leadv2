@@ -150,8 +150,15 @@ else
 fi
 
 # ── 3. still RUNNING -> signature never freed ───────────────────────────────────────
+# NOTE: the assignment must prefix the FUNCTION CALL (`FAKE_SONNET_BEHAVIOR=long
+# _dispatch ...`), not the `out3=` assignment around it -- `FAKE_SONNET_BEHAVIOR=long
+# out3="$(_dispatch ...)"` is two bare shell-variable assignments with no command word,
+# so the fake launcher's subprocess never actually sees the env var and silently falls
+# back to its "quick" (0.3s) default, making the lane genuinely dead by the time of the
+# second dispatch a few lines below (found while adding
+# test-dispatch-ledger-partial-close.sh, DISPATCH-LEDGER-PARTIAL-CLOSE-01).
 m3="task: long-running-lane $$ $(date +%s)"
-FAKE_SONNET_BEHAVIOR=long out3="$(_dispatch "${m3}")"; rc3=$?
+out3="$( FAKE_SONNET_BEHAVIOR=long _dispatch "${m3}" )"; rc3=$?
 pid3="$(_pid_from_output "${out3}")"
 if [[ ${rc3} -eq 0 && -n "${pid3}" ]] && kill -0 "${pid3}" 2>/dev/null; then
   out3b="$(_dispatch "${m3}")"; rc3b=$?

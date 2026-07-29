@@ -198,6 +198,30 @@
 #      exactly as fix-pass-4 requires for spawn.
 #      ONE-STEP ROLLBACK: LEADV2_DISPATCH_OUTCOME_LEDGER=0 restores today's behavior exactly
 #      -- a CONFIRMED row blocks for the full CONFIRMED_TTL regardless of outcome. Default 1.
+#
+# WHAT IT DOES (DISPATCH-LEDGER-PARTIAL-CLOSE-01, 2026-07-29 -- checkpointed != finished)
+#   9. Item 8 above answers "did anything happen?" -- LANE-TURNCAP-CHECKPOINT-01 (220eeaf)
+#      made that diverge from "was the mission finished?": a lane cut off at --max-turns now
+#      commits whatever it has before dying, so _dispatch_evidence_exists finds a real commit
+#      and item 8's outcome resolution reads it as completed work, blocking re-dispatch of a
+#      mission that only got partway through. FIX: _dispatch_checkpointed_cutoff(sig8,
+#      created_epoch) runs BEFORE the evidence check on a "dead" row and frees it (does not
+#      block) when BOTH already-recorded signals say "cut off, never recovered":
+#        - docs/handoff/dispatch-<sig8>/CHECKPOINT.md exists with mtime >= created_epoch --
+#          the exact artifact LANE-TURNCAP-CHECKPOINT-01 writes the moment session-runner.sh
+#          detects turn_cap_exhausted (spawn_worker's sonnet arm always launches with
+#          --task-id "dispatch-${sig8}", so this path needs no lookup table).
+#        - docs/handoff/dispatch-<sig8>/phase8-passed.flag (session-runner.sh's own SENTINEL,
+#          the same "mission finished" proof it uses for completion_proof_present) does NOT
+#          exist -- if it does, the lane recovered on a later resume attempt within the SAME
+#          reservation and genuinely finished; that case falls through to item 8's ordinary
+#          evidence check and stays blocked, unchanged. No third notion of doneness invented
+#          -- this composes the checkpoint marker (220eeaf) with the existing sentinel
+#          session-runner.sh already treats as authoritative.
+#      Never runs on a live or unprovable row (liveness dead-only, same gate as item 8).
+#      ONE-STEP ROLLBACK: LEADV2_DISPATCH_CHECKPOINT_CUTOFF=0 disables this carve-out only --
+#      a checkpointed-and-cut-off row then falls through to item 8's evidence check exactly as
+#      before (blocks, since the checkpoint commit itself counts as evidence). Default 1.
 
 set -uo pipefail   # -u safe (quote everything, no unbound vars); NO -e (refusals must journal)
 
@@ -226,6 +250,9 @@ CONFIRMED_TTL="${LEADV2_DISPATCH_CONFIRMED_TTL_S:-7200}"
 OUTCOME_LEDGER="${LEADV2_DISPATCH_OUTCOME_LEDGER:-1}"
 _EVIDENCE_EXCLUDE_RE_DEFAULT='\.lock$|(^|/)docs/leadv2/\.bus-offsets/|(^|/)docs/leadv2/active\.yaml$'
 EVIDENCE_EXCLUDE_RE="${LEADV2_DISPATCH_EVIDENCE_EXCLUDE_RE:-${_EVIDENCE_EXCLUDE_RE_DEFAULT}}"
+# DISPATCH-LEDGER-PARTIAL-CLOSE-01 (see doc block item 9): one-step rollback for the
+# checkpointed-cutoff carve-out.
+CHECKPOINT_CUTOFF="${LEADV2_DISPATCH_CHECKPOINT_CUTOFF:-1}"
 
 log()        { printf '[%s] %s\n' "$SCRIPT_NAME" "$*" >&2; }
 log_err()    { printf '[%s] ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2; }
@@ -472,14 +499,43 @@ print(datetime.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H
   printf '%s\n' "${raw}" | grep -vE '^\s*$' | grep -vE "${EVIDENCE_EXCLUDE_RE}" | grep -q .
 }
 
+# DISPATCH-LEDGER-PARTIAL-CLOSE-01 (see doc block item 9): deterministic docs/handoff paths
+# for the two already-recorded signals this composes -- spawn_worker's sonnet arm always
+# launches with --task-id "dispatch-${sig8}", so both paths are derivable from sig8 alone.
+_dispatch_checkpoint_marker() {  # <sig8> -> path (stdout)
+  printf '%s/docs/handoff/dispatch-%s/CHECKPOINT.md' "${PROJECT_ROOT}" "$1"
+}
+_dispatch_completion_sentinel() {  # <sig8> -> path (stdout)
+  printf '%s/docs/handoff/dispatch-%s/phase8-passed.flag' "${PROJECT_ROOT}" "$1"
+}
+
+# rc0: this row is checkpointed-and-cut-off and never recovered -- free it. rc1: not (no
+# checkpoint marker, marker predates this reservation, or the mission's own completion
+# sentinel says it finished -- see doc block item 9 for why the sentinel check comes first).
+_dispatch_checkpointed_cutoff() {  # <sig8> <created_epoch> -> rc0 cutoff; rc1 not
+  local sig8="$1" created="$2" marker mtime
+  [[ -f "$(_dispatch_completion_sentinel "${sig8}")" ]] && return 1
+  marker="$(_dispatch_checkpoint_marker "${sig8}")"
+  [[ -f "${marker}" ]] || return 1
+  mtime="$(stat -f %m "${marker}" 2>/dev/null || stat -c %Y "${marker}" 2>/dev/null)" || return 1
+  [[ "${mtime}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${created}" =~ ^[0-9]+$ ]] || created=0
+  (( mtime >= created ))
+}
+
 # rc0: this row still blocks (worker alive, liveness undetermined, or finished-with-
 # evidence). rc1: this row no longer blocks (worker finished AND left no evidence -- the
-# mission's failure mode: "returned status=completed and produced nothing").
+# mission's failure mode: "returned status=completed and produced nothing" -- OR was
+# checkpointed-and-cut-off at the turn cap and never recovered).
 _dispatch_outcome_blocks() {  # <arm> <handle> <created_epoch> <sig8> -> rc0 blocks; rc1 free
   local arm="$1" handle="$2" created="$3" sig8="$4" liveness
   liveness="$(_dispatch_worker_liveness "${arm}" "${handle}")"
   case "${liveness}" in
     dead)
+      if [[ "${CHECKPOINT_CUTOFF}" == "1" ]] && _dispatch_checkpointed_cutoff "${sig8}" "${created}"; then
+        log "dispatch_reclaimed task=${sig8} arm=${arm} handle=${handle} reason=checkpointed_cutoff"
+        return 1
+      fi
       if _dispatch_evidence_exists "${created}"; then
         return 0
       fi

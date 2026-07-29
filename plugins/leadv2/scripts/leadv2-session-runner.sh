@@ -315,18 +315,23 @@ while (( attempt < MAX_ATTEMPTS )); do
     force_close_only=1
   fi
 
-  # LANE-TURNCAP-CHECKPOINT-01: a prior attempt (turn-cap death or otherwise)
-  # may have left a handoff note — self-authored or the auto-fallback from
-  # leadv2-turncap-checkpoint-commit.sh. Point every resume at it; reading
-  # what a previous attempt already established is cheaper than repeating
-  # the investigation from zero.
+  # LANE-TURNCAP-CHECKPOINT-01 / DISPATCH-LEDGER-PARTIAL-CLOSE-01: a prior attempt
+  # (turn-cap death or otherwise) may have left a handoff note — self-authored or the
+  # auto-fallback from leadv2-turncap-checkpoint-commit.sh. Point every resume at it,
+  # INCLUDING attempt 0: a checkpointed row can now be freed for re-dispatch by
+  # leadv2-dispatch-code.sh's _dispatch_checkpointed_cutoff, which starts this whole
+  # loop over at attempt 0 with a brand-new SESSION_ID — the checkpoint note from the
+  # freed row is still sitting at this same TASK_ID's docs/handoff path and must not be
+  # silently skipped just because it's a "fresh" attempt counter. Reading what a
+  # previous attempt already established is cheaper than repeating the investigation
+  # from zero.
   checkpoint_hint=""
-  if [[ "$attempt" -gt 0 && -f "$CHECKPOINT_NOTE" ]]; then
+  if [[ -f "$CHECKPOINT_NOTE" ]]; then
     checkpoint_hint=" Read docs/handoff/${TASK_ID}/CHECKPOINT.md FIRST — it records what a previous attempt already established and what remains; do not repeat that investigation."
   fi
 
   if [[ "$attempt" -eq 0 ]]; then
-    prompt="/leadv2 ${TASK_ID}"
+    prompt="/leadv2 ${TASK_ID}${checkpoint_hint}"
   elif [[ "$force_close_only" -eq 1 ]]; then
     prompt="/leadv2 ${TASK_ID} -- CONTINUE: Your previous turn ended in success but the Phase-8 sentinel is missing. Do NOT redo any build/review/deploy work — git log shows it already landed. Run ONLY .claude/scripts/leadv2-phase8-close.sh (and its prerequisite leadv2-phase8-assert.sh / leadv2-phase8-e2e-gate.sh) to completion now (attempt ${attempt}/${MAX_ATTEMPTS}).${checkpoint_hint}"
     force_close_only=0
