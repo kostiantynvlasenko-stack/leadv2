@@ -1024,7 +1024,7 @@ spawn_product_close() { # <sig8> <author arm> <normalized handle> <quota-eligibl
     emit decision "product_close task=${sig8} status=failed reason=close_script_missing"
     return 1
   fi
-  PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_DISPATCH_CACHE_DIR="${CACHE_DIR}" \
+  PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_DISPATCH_CACHE_DIR="${CACHE_BASE}" \
     LEADV2_JOURNAL_BIN="${JOURNAL_BIN}" LEADV2_DISPATCH_CODEX_BIN="${CODEX_BIN}" \
     LEADV2_DISPATCH_ARCHITECT_BIN="${ARCHITECT_BIN}" \
     LEADV2_DISPATCH_REVIEWER_ARMS="${reviewer_arms}" \
