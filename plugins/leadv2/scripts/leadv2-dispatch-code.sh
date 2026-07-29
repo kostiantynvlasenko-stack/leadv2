@@ -228,6 +228,16 @@
 #      ONE-STEP ROLLBACK: LEADV2_DISPATCH_CHECKPOINT_CUTOFF=0 disables this carve-out only --
 #      a checkpointed-and-cut-off row then falls through to item 8's evidence check exactly as
 #      before (blocks, since the checkpoint commit itself counts as evidence). Default 1.
+#
+# PRODUCT-READINESS-GATES-01 (ST-9, 2026-07-29)
+#   Product work is engine/platform/web behaviour.  plugin, tooling, docs, and pure
+#   diagnosis are the only fast-path classes.  The classifier is deliberately
+#   conservative: an absent/unknown kind is PRODUCT, never fast-path.  Every dispatch
+#   journals its classification and reason.  Product gates each default on and have a
+#   one-flip rollback: LEADV2_DISPATCH_ARCHITECT_GATE=0,
+#   LEADV2_DISPATCH_E2E_GATE=0, LEADV2_DISPATCH_REVIEW_GATE=0.  A prepass may be skipped
+#   only when --writes proves exactly one file; that exception is journaled.  The
+#   supervisor only dispatches: architect, e2e, and review are agents/scripts.
 
 set -uo pipefail   # -u safe (quote everything, no unbound vars); NO -e (refusals must journal)
 
@@ -262,6 +272,9 @@ CHECKPOINT_CUTOFF="${LEADV2_DISPATCH_CHECKPOINT_CUTOFF:-1}"
 # DISPATCH-EVIDENCE-NOT-ATTRIBUTED-01: keep the attribution and max-turns reclaim behind
 # one narrow rollback switch; OUTCOME_LEDGER=0 remains the broader pre-outcome rollback.
 EVIDENCE_ATTRIBUTION="${LEADV2_DISPATCH_EVIDENCE_ATTRIBUTION:-1}"
+ARCHITECT_GATE="${LEADV2_DISPATCH_ARCHITECT_GATE:-1}"
+E2E_GATE="${LEADV2_DISPATCH_E2E_GATE:-1}"
+REVIEW_GATE="${LEADV2_DISPATCH_REVIEW_GATE:-1}"
 
 log()        { printf '[%s] %s\n' "$SCRIPT_NAME" "$*" >&2; }
 log_err()    { printf '[%s] ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2; }
@@ -850,6 +863,51 @@ atomic_review_check_and_record() {  # <diff_hash> <verdict> <reviewer> <run_id>
 # shellcheck disable=SC1003  # tr -d '"\\' is correct as-is (literal quote+backslash set)
 sanitize_field() { printf '%s' "$1" | tr -d '"\\' | tr '\n' ' ' | tr -cd 'A-Za-z0-9._:/-'; }
 
+# ── PRODUCT-READINESS-GATES-01: classification + architect prepass ─────────────
+# A fast path must be explicit.  Do not infer "docs" from a filename or assume a
+# diagnosis is harmless merely because its prose contains no change verb: unknown means
+# product and gets all three gates.
+classify_product_work() { # <kind> <mission> -> product|non_product<TAB>reason
+  local kind="${1,,}" mission="${2,,}"
+  case "${kind}" in
+    plugin|tooling|tool|docs|documentation|diagnosis|diagnostic|investigation)
+      printf 'non_product\texplicit_kind_%s' "${kind}"; return ;;
+  esac
+  if [[ "${mission}" =~ ^[[:space:]]*(docs?-only|documentation-only|pure[[:space:]]+diagnosis|diagnosis-only|tooling-only|plugin-only) ]]; then
+    printf 'non_product\texplicit_mission_fast_path'; return
+  fi
+  printf 'product\tconservative_default'
+}
+
+_prepass_file() { printf '%s/docs/handoff/dispatch-%s/architect-prepass.md' "${PROJECT_ROOT}" "$1"; }
+
+architect_prepass() { # <raw mission> <sig8> <writes> -> 0 ran/skipped/disabled, 1 failed
+  local raw="$1" sig8="$2" writes="$3" f mfile out rc count
+  if [[ "${ARCHITECT_GATE}" != "1" ]]; then
+    emit decision "architect_prepass task=${sig8} status=disabled reason=kill_switch"
+    return 0
+  fi
+  # A comma-separated declaration is proof only when it has exactly one non-empty entry.
+  count="$(printf '%s' "${writes}" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+  if [[ "${count}" == "1" ]]; then
+    emit decision "architect_prepass task=${sig8} status=skipped reason=provably_one_file writes=${writes}"
+    return 0
+  fi
+  f="$(_prepass_file "${sig8}")"; mkdir -p "$(dirname "${f}")" || return 1
+  mfile="$(mktemp "${TMPDIR:-/tmp}/leadv2-architect-prepass.XXXXXX")" || return 1
+  printf '%s\n' "You are the architect prepass. Turn this mission into a scoped implementation design. State: changes, exact files, acceptance evidence, and explicit non-goals. Do not implement.\n\nMISSION:\n${raw}" > "${mfile}"
+  out="$(PROJECT_ROOT="${PROJECT_ROOT}" bash "${ARCHITECT_BIN}" --role architect --model "${LEADV2_DISPATCH_ARCHITECT_MODEL:-opus}" --task-id "dispatch-${sig8}-architect" --mission-file "${mfile}" --wait 2>&1)"; rc=$?
+  rm -f "${mfile}"
+  if [[ ${rc} -ne 0 ]]; then
+    emit decision "architect_prepass task=${sig8} status=failed rc=${rc}"
+    log_err "architect prepass failed: ${out}"
+    return 1
+  fi
+  printf '%s\n' "${out}" > "${f}" || return 1
+  [[ -s "${f}" ]] || { emit decision "architect_prepass task=${sig8} status=failed reason=empty_output"; return 1; }
+  emit decision "architect_prepass task=${sig8} status=ran artifact=docs/handoff/dispatch-${sig8}/architect-prepass.md"
+}
+
 # ── spawn: actually launch the resolved worker (Finding 2) ────────────────────────
 # GLM_BIN/SUBSESSION_BIN are sibling scripts, overridable so tests stub the underlying
 # `claude` call via EACH launcher's OWN seam (glm-coder.sh: GLM_CLAUDE_BIN/GLM_RUNS_DIR/
@@ -857,6 +915,7 @@ sanitize_field() { printf '%s' "$1" | tr -d '"\\' | tr '\n' ' ' | tr -cd 'A-Za-z
 # duplicates that stubbing, it only calls the launcher and reports its handle.
 GLM_BIN="${LEADV2_DISPATCH_GLM_BIN:-${SCRIPT_DIR}/glm-coder.sh}"
 SUBSESSION_BIN="${LEADV2_DISPATCH_SUBSESSION_BIN:-${SCRIPT_DIR}/claude-subsession.sh}"
+ARCHITECT_BIN="${LEADV2_DISPATCH_ARCHITECT_BIN:-${SUBSESSION_BIN}}"
 # codex-task.sh is the sanctioned Codex channel -- it already owns tier resolution
 # (--tier top|standard|volume), detach (task --background), and its own job registry;
 # this script never reimplements any of that, only calls it and reads its handle/status.
@@ -1307,6 +1366,21 @@ cmd_resolve() {
   JOURNAL_TASK="dispatch-${sig8}"
   if [[ -z "${sig}" ]] || ! sig_is_hex "${sig}"; then
     log_err "signature computation failed"; exit 1
+  fi
+
+  # Product classifications are visible even when a later shape/router/ledger gate refuses
+  # the task.  This is intentionally before any reservation/spawn side effect.
+  local product_class classification_reason
+  IFS=$'\t' read -r product_class classification_reason <<< "$(classify_product_work "${kind}" "${mission}")"
+  emit decision "dispatch_classified task=${sig8} class=${product_class} reason=${classification_reason} kind=${kind:-unknown}"
+  if [[ "${product_class}" == "product" ]]; then
+    if ! architect_prepass "${mission}" "${sig8}" "${lane_writes}"; then
+      log_err "architect prepass did not produce a scoped design for product task=${sig8}"
+      exit 1
+    fi
+    # The developer receives the independently-produced design artifact, never the
+    # supervisor's raw prose.  The artifact is also the durable audit record.
+    mission="Product implementation task dispatch-${sig8}. Read and implement ONLY the scoped design in docs/handoff/dispatch-${sig8}/architect-prepass.md. Preserve its non-goals. Before closing, run the required end-to-end gate and cross-provider review gate recorded for this task."
   fi
 
   # QUESTION-CHANNEL-DEAD-01 (willingness half): dispatch-code.sh is a lane
