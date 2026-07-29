@@ -29,12 +29,26 @@ journal a fully audit-able decision.
 Usage:
     leadv2-router-v2.py resolve  --chain glm,codex,sonnet [--quota-json FILE]
     leadv2-router-v2.py dry-run  --chain glm,codex,sonnet [--quota-json FILE]
+    leadv2-router-v2.py filter   --arms-json FILE --glm-policy-json FILE
+                                  [--mission-kind K] [--protected-path]
+                                  [--glm-quota-gate-tripped]
+                                  [--glm-failure-count N] [--channel-down a,b]
 
 `resolve` prints pipe-friendly key=value lines (matching the rest of the
 dispatch tooling's journal style) and exits 0 with a winner, 3 with no
 eligible arm. `dry-run` prints the full decision vector as indented JSON,
 always exits 0 -- for humans / --dry-run smoke tests, never gates a real
 dispatch.
+
+`filter` (T4, SMART-ROUTING-V2 L1 hard filters) is a DIFFERENT, EARLIER
+layer than `resolve`'s quota-headroom ordering above: it decides which arms
+are eligible AT ALL, from policy + registry facts alone -- never from
+usable_now/headroom. See filter_arms() below for the invariant this exists
+to guarantee (an excluded arm is never resurrected by a headroom number).
+Prints the same eligible=/filtered= key=value lines `resolve` uses so
+callers can pipe filter's `eligible` list straight into resolve's `--chain`.
+Always exits 0 (a filter producing zero eligible arms is a valid, reportable
+outcome for the caller to act on -- not this layer's failure).
 """
 import argparse
 import json
@@ -168,6 +182,89 @@ def resolve(chain, quota):
     }
 
 
+# ---------------------------------------------------------------------------
+# T4 -- L1 hard filters (SMART-ROUTING-V2 docs/specs/smart-routing-v2.md sec3).
+#
+# Deliberately narrower inputs than resolve()'s: filter_arms() never receives
+# usable_now/headroom, so a filtered arm CANNOT be traded back in by a good
+# score -- the invariant is structural (the function has no parameter to leak
+# it through), not just a behavioural promise a test happens to check.
+#
+# Reason-code priority mirrors the spec table order; a filtered arm gets the
+# FIRST rule that excludes it (setdefault), matching "reason codes matter as
+# much as the verdict" -- one code per arm, the one that actually decided it.
+# ---------------------------------------------------------------------------
+
+# GLM-FIRST-01's own build arm plus the codex-fitting arm are the only two
+# ROUTER-QUOTA-DRIVEN-01/T3-registry buckets a mission_kind policy ban can
+# reach; sonnet/opus/haiku all sit on the anthropic bucket and are the
+# opus_only_mission_kinds' intended DESTINATION, never its target.
+POLICY_BAN_BUCKETS = ("glm", "codex")
+
+
+def filter_arms(arms, glm_policy, signals):
+    """Pure function: registry + policy + per-dispatch signals -> {eligible, filtered}.
+
+    arms: list of {id, channel, model, bucket, reserve_threshold, reserve_allow}
+          (T3 router_v2.arms shape; extra keys ignored).
+    glm_policy: the routing.yaml phases.glm_policy dict (opus_only_mission_kinds
+          etc.), or None/{} if absent -- an absent policy bans nothing (the
+          block staying the SOLE source of policy bans means "missing" is
+          "no ban configured", not "ban everything").
+    signals: {
+        mission_kind: str | None,
+        protected_path: bool,
+        glm_quota_gate_tripped: bool,   # caller already ran leadv2-glm-quota-gate.sh
+        glm_failure_count: int,          # F1-spoof-fix note below
+        channel_down: [arm_id, ...],
+    }
+
+    No LLM, no I/O, no clock -- same determinism contract as resolve().
+    """
+    glm_policy = glm_policy or {}
+    reasons = {}  # arm_id -> reason (first match wins, spec table order)
+
+    opus_only = set(glm_policy.get("opus_only_mission_kinds", []) or [])
+    mission_kind = signals.get("mission_kind")
+    if mission_kind is not None and mission_kind in opus_only:
+        for arm in arms:
+            if arm.get("bucket") in POLICY_BAN_BUCKETS:
+                reasons.setdefault(arm["id"], "policy_ban")
+
+    if signals.get("protected_path"):
+        # Spec sec3 L1: protected path -> "only sonnet/opus arms" eligible.
+        for arm in arms:
+            if arm.get("model") not in ("sonnet", "opus"):
+                reasons.setdefault(arm["id"], "protected_path")
+
+    if signals.get("glm_quota_gate_tripped"):
+        for arm in arms:
+            if arm.get("bucket") == "glm":
+                reasons.setdefault(arm["id"], "quota_gate")
+
+    # F1-spoof-fix (leadv2-dispatch-code.sh "FIX PASS 2"): glm_failure_count
+    # has no real ledger backing it yet, so a caller-supplied value that would
+    # TRIP the rule is not trustworthy input -- same posture as dispatch-
+    # code.sh's own capped/ignored-and-journalled handling. The caller decides
+    # whether to surface the ignore; this function just refuses to act on an
+    # unverified >=2 by treating it as 0 until a real ledger source exists.
+    glm_failure_count = signals.get("glm_failure_count") or 0
+    if signals.get("glm_failure_count_ledger_verified") and glm_failure_count >= 2:
+        for arm in arms:
+            if arm.get("bucket") == "glm":
+                reasons.setdefault(arm["id"], "failed_twice")
+
+    channel_down = set(signals.get("channel_down") or [])
+    for arm in arms:
+        if arm["id"] in channel_down:
+            reasons.setdefault(arm["id"], "channel_down")
+
+    eligible = [arm["id"] for arm in arms if arm["id"] not in reasons]
+    filtered = [{"arm": aid, "reason": reasons[aid]}
+                for aid in [a["id"] for a in arms] if aid in reasons]
+    return {"eligible": eligible, "filtered": filtered}
+
+
 def load_quota(quota_json_path, quota_live_path):
     if quota_json_path:
         with open(quota_json_path) as fh:
@@ -178,16 +275,59 @@ def load_quota(quota_json_path, quota_live_path):
     return json.loads(out)
 
 
+def _run_filter(args):
+    with open(args.arms_json) as fh:
+        arms = json.load(fh)
+    glm_policy = {}
+    if args.glm_policy_json:
+        with open(args.glm_policy_json) as fh:
+            glm_policy = json.load(fh) or {}
+    channel_down = [a.strip() for a in (args.channel_down or "").split(",") if a.strip()]
+    signals = {
+        "mission_kind": args.mission_kind,
+        "protected_path": bool(args.protected_path),
+        "glm_quota_gate_tripped": bool(args.glm_quota_gate_tripped),
+        "glm_failure_count": args.glm_failure_count or 0,
+        "glm_failure_count_ledger_verified": bool(args.glm_failure_count_ledger_verified),
+        "channel_down": channel_down,
+    }
+    result = filter_arms(arms, glm_policy, signals)
+    print("eligible=%s" % ",".join(result["eligible"]))
+    print("filtered=%s" % json.dumps(result["filtered"], sort_keys=True))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("mode", choices=["resolve", "dry-run"])
-    parser.add_argument("--chain", required=True,
-                        help="comma-separated ordered arm ids, e.g. glm,codex,sonnet")
+    parser.add_argument("mode", choices=["resolve", "dry-run", "filter"])
+    parser.add_argument("--chain",
+                        help="resolve/dry-run: comma-separated ordered arm ids, e.g. glm,codex,sonnet")
     parser.add_argument("--quota-json", help="fixture file (tests); default reads live quota")
     parser.add_argument("--quota-live", help="override path to leadv2-quota-live.sh")
+    parser.add_argument("--arms-json", help="filter: path to router_v2.arms as JSON array")
+    parser.add_argument("--glm-policy-json", help="filter: path to phases.glm_policy as JSON object")
+    parser.add_argument("--mission-kind", help="filter: mission_kind signal")
+    parser.add_argument("--protected-path", action="store_true",
+                        help="filter: safety-gate/publish/payments touched")
+    parser.add_argument("--glm-quota-gate-tripped", action="store_true",
+                        help="filter: caller already ran leadv2-glm-quota-gate.sh and it exited non-zero")
+    parser.add_argument("--glm-failure-count", type=int, default=0,
+                        help="filter: only acted on with --glm-failure-count-ledger-verified (F1-spoof-fix)")
+    parser.add_argument("--glm-failure-count-ledger-verified", action="store_true",
+                        help="filter: caller confirms --glm-failure-count is ledger-backed, not caller-guessed")
+    parser.add_argument("--channel-down", help="filter: comma-separated arm ids that are hard-unavailable")
     args = parser.parse_args(argv)
 
+    if args.mode == "filter":
+        if not args.arms_json:
+            sys.stderr.write("leadv2-router-v2.py filter: --arms-json is required\n")
+            return 2
+        return _run_filter(args)
+
+    if not args.chain:
+        sys.stderr.write("leadv2-router-v2.py: --chain is required for resolve/dry-run\n")
+        return 2
     chain = [a.strip() for a in args.chain.split(",") if a.strip()]
     if not chain:
         sys.stderr.write("leadv2-router-v2.py: --chain must name at least one arm\n")
