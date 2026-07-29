@@ -109,9 +109,9 @@ if [[ "$SUB" == "task" && " $* " != *"leadv2-ask.sh"* ]]; then
 If you hit a decision you cannot safely make yourself, call the blocking
 question channel and wait for the answer rather than guessing:
   bash \"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-ask.sh\" \"${_QUESTION_TASK_ID}\" \"<question>\" \\
-    --option \"a|<label>\" --option \"b|<label>\" [--timeout <sec=1800>]
-Always include at least one clearly reversible option, so the supervisor can
-safely unblock the lane when the founder is unavailable. Do not use this for
+    --option \"a|<reversible label>\" --option \"b|<label>\" --default-option \"a\" [--timeout <sec=1800>]
+Every question must name its clearly reversible option with --default-option,
+so a timeout proceeds visibly and never holds a lane. Do not use this for
 routine progress or confirmation-seeking."
   set -- "$@" "${_QUESTION_PROTOCOL}"
 fi

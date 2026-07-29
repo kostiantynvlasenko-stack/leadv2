@@ -12,21 +12,23 @@
 # BLOCKS until answered (via leadv2-answer.sh / `/leadv2 reply`).
 #
 # Usage:
-#   leadv2-ask.sh <task-id> "<question>" --option "label|desc" [--option "label|desc" ...] [--timeout <sec=1800>]
+#   leadv2-ask.sh <task-id> "<question>" --option "label|desc" [--option "label|desc" ...] [--default-option <label>] [--timeout <sec=1800>]
 #
 # Writes <control-plane>/questions/<qid>.yaml:
 #   task_id: <task-id>
 #   question: <question>
 #   options: [{label: <label>, text: <desc>}, ...]
+#   default_option: <label|null>         # reversible timeout choice, if any
 #   asked_at: <ISO8601>
 #   status: pending
 #   answer: null
 #
 # Behavior: polls every LEADV2_ASK_POLL_INTERVAL seconds (default 3) until
 # status becomes 'answered', then prints the chosen option label to stdout
-# and exits 0. On timeout (default 1800s / 30min): prints a clear
-# LEADV2_ASK_TIMEOUT marker to stderr and exits 2 — caller should fall back
-# to its own best-effort default and note the assumption explicitly.
+# and exits 0. On timeout, a declared --default-option is recorded in the
+# question, journal, and open-threads, then printed to stdout and exited 0.
+# Without one, the task is parked human-needed and unclaimed (freeing the
+# pump slot), then exits 2. A timeout is never invisible.
 #
 # DEGRADE (QUESTION-BRIDGE-01): if the control-plane WRITE itself fails — e.g.
 # a stricter per-process sandbox denies flock()/open()/os.replace() on the
@@ -65,6 +67,7 @@ PHASE=""
 PRIORITY="normal"
 WAIT_POLICY="blocking"
 NO_BLOCK=0
+DEFAULT_OPTION=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --option)
@@ -75,6 +78,11 @@ while [[ $# -gt 0 ]]; do
     --timeout)
       [[ $# -ge 2 ]] || usage
       TIMEOUT="$2"
+      shift 2
+      ;;
+    --default-option)
+      [[ $# -ge 2 ]] || usage
+      DEFAULT_OPTION="$2"
       shift 2
       ;;
     --phase)
@@ -112,6 +120,19 @@ if [[ "${#OPTIONS[@]}" -lt 1 ]]; then
   usage
 fi
 
+if [[ -n "$DEFAULT_OPTION" ]]; then
+  DEFAULT_OPTION="${DEFAULT_OPTION#"${DEFAULT_OPTION%%[![:space:]]*}"}"
+  DEFAULT_OPTION="${DEFAULT_OPTION%"${DEFAULT_OPTION##*[![:space:]]}"}"
+  _default_found=0
+  for _raw_option in "${OPTIONS[@]}"; do
+    _option_label="${_raw_option%%|*}"
+    _option_label="${_option_label#"${_option_label%%[![:space:]]*}"}"
+    _option_label="${_option_label%"${_option_label##*[![:space:]]}"}"
+    [[ "$_option_label" == "$DEFAULT_OPTION" ]] && _default_found=1
+  done
+  [[ "$_default_found" -eq 1 ]] || { printf -- '[leadv2-ask] --default-option must name an --option label\n' >&2; exit 1; }
+fi
+
 QDIR="$("${SCRIPT_DIR}/leadv2-state-path.sh" questions)"
 LOCK="${QDIR}/.write.lock"
 
@@ -139,12 +160,13 @@ STORE="v2"
 # fallback instead of aborting the whole script under `set -euo pipefail`.
 if ! {
   mkdir -p "$QDIR" &&
-  python3 - "$QFILE" "$LOCK" "$QID" "$TASK_ID" "$QUESTION" "$ASKED_AT" "$PHASE" "$PRIORITY" "$WAIT_POLICY" "${OPTIONS[@]}" <<'PYEOF'
+  python3 - "$QFILE" "$LOCK" "$QID" "$TASK_ID" "$QUESTION" "$ASKED_AT" "$PHASE" "$PRIORITY" "$WAIT_POLICY" "$DEFAULT_OPTION" "${OPTIONS[@]}" <<'PYEOF'
 import fcntl, os, sys
 import yaml
 
-qfile, lock_path, qid, task_id, question, asked_at, phase, priority, wait_policy = sys.argv[1:10]
-raw_options = sys.argv[10:]
+qid, task_id, question, asked_at, phase, priority, wait_policy, default_option = sys.argv[3:11]
+qfile, lock_path = sys.argv[1:3]
+raw_options = sys.argv[11:]
 
 options = []
 for raw in raw_options:
@@ -162,6 +184,7 @@ doc = {
     "summary_for_lead": question[:60],
     "question": question,
     "options": options,
+    "default_option": default_option or None,
     "priority": priority or "normal",
     "asked_at": asked_at,
     "wait_policy": wait_policy or "blocking",
@@ -191,11 +214,11 @@ PYEOF
   LEGACY_ERR_FILE="$(mktemp)"
   if ! {
     mkdir -p "$LEGACY_DIR" &&
-    python3 - "$LEGACY_PENDING" "$QID" "$TASK_ID" "$PHASE" "$QUESTION" "$ASKED_AT" "${OPTIONS[@]}" <<'PYEOF'
+    python3 - "$LEGACY_PENDING" "$QID" "$TASK_ID" "$PHASE" "$QUESTION" "$ASKED_AT" "$DEFAULT_OPTION" "${OPTIONS[@]}" <<'PYEOF'
 import os, sys, yaml
 
-pending, qid, task_id, phase, question, created_at = sys.argv[1:7]
-raw_options = sys.argv[7:]
+pending, qid, task_id, phase, question, created_at, default_option = sys.argv[1:8]
+raw_options = sys.argv[8:]
 
 options = []
 for raw in raw_options:
@@ -212,6 +235,7 @@ doc = {
     "summary_for_lead": question[:60],
     "question": question,
     "options": options,
+    "default_option": default_option or None,
     "auto_decide_after": None,
     "wait_indefinitely": False,
     "priority": "P1",
@@ -303,5 +327,57 @@ PYEOF
   sleep "$POLL_INTERVAL"
 done
 
-printf -- 'LEADV2_ASK_TIMEOUT qid=%s task_id=%s\n' "$QID" "$TASK_ID" >&2
+_timeout_record() { # $1=status $2=selected-or-empty $3=decision-text
+  local status="$1" selected="$2" decision="$3"
+  if [[ "$STORE" == "v2" ]]; then
+    python3 - "$QFILE" "$status" "$selected" "$decision" <<'PYEOF' || true
+import datetime, os, sys, yaml
+p, status, selected, decision = sys.argv[1:]
+try:
+    with open(p, encoding="utf-8") as f: doc = yaml.safe_load(f) or {}
+    doc["status"] = status
+    doc["answer"] = {"selected": selected or None, "decided_by": decision,
+                     "answered_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}
+    tmp = p + ".timeout.%d" % os.getpid()
+    with open(tmp, "w", encoding="utf-8") as f:
+        yaml.safe_dump(doc, f, sort_keys=False); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, p)
+except Exception:
+    pass
+PYEOF
+  fi
+}
+
+_journal_timeout() { # $1=text
+  CLAUDE_PROJECT_ROOT="$LEGACY_PROJECT_ROOT" bash "${SCRIPT_DIR}/leadv2-journal.sh" append "$TASK_ID" decision "$1" \
+    >/dev/null 2>&1 || true
+}
+
+_open_thread_timeout() { # $1=text
+  local threads
+  threads="$(PROJECT_ROOT="$LEGACY_PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" open-threads.md 2>/dev/null || true)"
+  [[ -n "$threads" ]] || return 0
+  printf -- '- [ ] %s — ask-timeout: task %s qid %s %s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TASK_ID" "$QID" "$1" >>"$threads" 2>/dev/null || true
+}
+
+if [[ -n "$DEFAULT_OPTION" ]]; then
+  _timeout_record timed_out "$DEFAULT_OPTION" timeout_default
+  _journal_timeout "ask-timeout qid=${QID} default_option=${DEFAULT_OPTION}; proceeded on reversible default"
+  _open_thread_timeout "timed out; proceeded on default_option=${DEFAULT_OPTION} (follow-up visible)"
+  printf -- 'LEADV2_ASK_TIMEOUT_DEFAULT qid=%s task_id=%s default_option=%s\n' "$QID" "$TASK_ID" "$DEFAULT_OPTION" >&2
+  printf -- '%s\n' "$DEFAULT_OPTION"
+  exit 0
+fi
+
+_timeout_record timed_out_human_needed "" timeout_no_default
+_journal_timeout "ask-timeout qid=${QID} no default_option; parked human-needed and released slot"
+_open_thread_timeout "timed out with no default_option; parked human-needed and released slot"
+if [[ -f "${SCRIPT_DIR}/leadv2-tasks-lib.sh" ]]; then
+  # shellcheck source=leadv2-tasks-lib.sh
+  PROJECT_ROOT="$LEGACY_PROJECT_ROOT" source "${SCRIPT_DIR}/leadv2-tasks-lib.sh"
+  leadv2_tasks_update "$TASK_ID" --key lane --value human-needed >/dev/null 2>&1 || true
+  leadv2_tasks_unclaim "$TASK_ID" >/dev/null 2>&1 || true
+fi
+printf -- 'LEADV2_ASK_TIMEOUT_HUMAN_NEEDED qid=%s task_id=%s\n' "$QID" "$TASK_ID" >&2
 exit 2
