@@ -57,13 +57,22 @@ in `context.yaml` or `CLAUDE.md` is founder-only too.
   5-hour and weekly rate-limit windows, never dollar figures.
 
 Everything else is silent. The steady-state budget is at most two supervisor
-turns per 30 minutes plus one per lane event. On a lane-close announcement,
-also update that task through `tasks-lib` and the corresponding State cell in
-`docs/leadv2/CURRENT-PLAN.md` in the same turn. Any plan reorder must be
-mirrored into `docs/tasks.yaml`; the supervisor alone writes CURRENT-PLAN and
-all `tasks.yaml` edits go through `tasks-lib`. When the backlog pump is on, it
-claims capacity through the dispatch funnel; the supervisor does not claim
-work manually.
+turns per 30 minutes plus one per lane event. A close announcement is an
+atomic supervisor turn: before announcing it, flip that intent's
+`docs/tasks.yaml` row through `leadv2-tasks-lib.sh`, then edit the matching
+State cell in `docs/leadv2/CURRENT-PLAN.md`, and announce only after both
+writes succeed. Do not defer either write to a later turn. A plan that lags
+the work is worse than no plan: the next session trusts it.
+
+`CURRENT-PLAN.md` is supervisor-owned: lanes never write it. `tasks.yaml` is
+intent-keyed and format-sensitive: the supervisor and backlog pump may write
+it only through `leadv2-tasks-lib.sh`, whose lock is the writer arbiter; no
+hand-authored YAML or whole-file rewrite is allowed. A plan restructure
+(cluster change or reorder) is one edit transaction: update CURRENT-PLAN and
+mirror the same intent order in `tasks.yaml` through the library before the
+turn ends. Questions are written only by the question channel, and the loop
+log is append-only. When the backlog pump is on, it claims capacity through
+the dispatch funnel; the supervisor does not claim work manually.
 
 ## Status reporting standard
 
