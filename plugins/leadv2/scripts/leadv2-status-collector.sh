@@ -103,7 +103,13 @@ _sc_run_section "git" _sc_git_section
 #    here would just re-risk the exact trap it already solves). ──────────
 _sc_lanes_section() {
   cd "$PROJECT_ROOT"
-  PROJECT_ROOT="$PROJECT_ROOT" bash "$_SC_DIR/leadv2-supervise.sh" --json
+  # supervise.sh resolves LEADV2_PROJECT_ROOT before PROJECT_ROOT.  Pin all
+  # accepted root variables so an ambient supervisor session cannot make this
+  # snapshot read a different repository's control plane.
+  LEADV2_PROJECT_ROOT="$PROJECT_ROOT" \
+    CLAUDE_PROJECT_DIR="$PROJECT_ROOT" \
+    PROJECT_ROOT="$PROJECT_ROOT" \
+    bash "$_SC_DIR/leadv2-supervise.sh" --json
 }
 _sc_run_section "lanes" _sc_lanes_section
 
