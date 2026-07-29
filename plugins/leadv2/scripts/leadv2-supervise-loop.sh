@@ -210,13 +210,12 @@ PUMP_SH="${SCRIPT_DIR}/leadv2-backlog-pump.sh"
 
 # BACKLOG-PUMP-01: this loop already owns the sleep/poll cadence (off_limits:
 # "no sleep/poll loop owned by the LLM") — the pump's refill trigger belongs
-# here, not in the lead's turn. Gated by LEADV2_BACKLOG_PUMP so an unset/0
-# value is a zero-cost no-op call (leadv2-backlog-pump.sh itself checks and
-# returns immediately; the cheap env check here just skips the subprocess
-# entirely when the pump was never turned on).
+# here, not in the lead's turn. Gated by LEADV2_BACKLOG_PUMP so an explicit 0
+# is a zero-cost no-op; the default is on and a single flip restores prior
+# behaviour.
 _run_pump_on_close() {
   local out_json="$1"
-  [[ "${LEADV2_BACKLOG_PUMP:-0}" == "1" ]] || return 0
+  [[ "${LEADV2_BACKLOG_PUMP:-1}" == "1" ]] || return 0
   [[ -x "$PUMP_SH" ]] || return 0
   local closed_ids
   closed_ids="$(python3 -c "

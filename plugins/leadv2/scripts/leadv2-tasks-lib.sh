@@ -191,7 +191,7 @@ def set_nested(obj, path, val):
             except ValueError: obj[parts[-1]] = val
 
 # ── Dispatch ─────────────────────────────────────────────────────────────
-if op == "top_n":
+if op in ("top_n", "declared_top_n"):
     top_n = int(args[0])
     fd = acquire_lock(shared=True)
     try:
@@ -212,7 +212,10 @@ if op == "top_n":
             candidates.append((LANE_RANK.get(lane,99),
                                PRIORITY_RANK.get(str(it.get("priority","medium")),4),
                                parse_dt(it.get("created_at","")), str(it.get("id","")), lane, it))
-        candidates.sort(key=lambda x: x[:4])
+        # `top_n` retains its ranked view. The refill pump uses the declared
+        # plan order: docs/ARCHITECTURE.md says the top task is the next task.
+        if op == "top_n":
+            candidates.sort(key=lambda x: x[:4])
         for _, _, _, iid, lane, it in candidates[:top_n]:
             print(f"{lane}\t{it.get('priority','medium')}\t{iid}\t{it.get('title','')}")
     finally:
@@ -424,6 +427,12 @@ DISPATCHER
 leadv2_tasks_top_n() {
   local n="${1:?leadv2_tasks_top_n requires N}"
   _tasks_dispatch top_n "$n"
+}
+
+leadv2_tasks_declared_top_n() {
+  # Eligible pending tasks in their source-file (plan-declared) order.
+  local n="${1:?leadv2_tasks_declared_top_n requires N}"
+  _tasks_dispatch declared_top_n "$n"
 }
 
 leadv2_tasks_by_id() {

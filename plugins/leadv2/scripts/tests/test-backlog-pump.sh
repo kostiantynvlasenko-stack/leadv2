@@ -4,12 +4,15 @@
 # 1. lane finishes -> next queued task dispatches automatically, no human step.
 # 2. queue empty -> nothing happens, quietly (exit 0, no dispatch call).
 # 3. concurrency cap respected (active == max -> no dispatch).
-# 4. a judgment-class task is NOT auto-dispatched (lane=human-needed never a
+# 4. kill switch off is a no-op; unresolved Git state refuses a refill.
+# 5. duplicate signature is returned to the existing dispatch ledger, never
+#    dispatched or claimed by a second bookkeeping surface.
+# 6. a judgment-class task is NOT auto-dispatched (lane=human-needed never a
 #    top_n candidate; an opus-arm rc=3 candidate is unclaimed + surfaced).
-# 5. a lane that finished having produced nothing does not silently consume
+# 7. a lane that finished having produced nothing does not silently consume
 #    the queue (1st empty close -> requeued; 2nd consecutive -> parked
 #    human-needed, never spins forever).
-# 6. dry-run shows the next N candidates + reason, priority order.
+# 8. dry-run shows the next N candidates + declared plan-order reason.
 #
 # Fully isolated: LEADV2_PROJECT_ROOT / LEADV2_STATE_ROOT point at throwaway
 # tmp dirs; LEADV2_BACKLOG_PUMP_DISPATCH_BIN / LEADV2_JOURNAL_BIN stub out the
@@ -166,7 +169,71 @@ YAML
   fi
 }
 
-# ── Test 4: judgment-class task is NOT auto-dispatched ──────────────────────
+# ── Test 4: rollback flag exactly restores the pre-pump no-op ──────────────
+test_kill_switch_off() {
+  read -r repo state < <(_new_fixture)
+  _write_tasks "$repo" '- id: T-off
+  lane: action
+  status: pending
+  priority: high
+  title: must remain untouched while disabled
+  created_at: "2026-01-01T00:00:00Z"
+'
+  read -r stub rcfile logfile < <(_make_dispatch_stub "$state")
+  local before after
+  before="$(cat "$repo/docs/tasks.yaml")"
+  LEADV2_BACKLOG_PUMP=0 _run_pump "$repo" "$state" "$stub" check >/dev/null 2>&1
+  after="$(cat "$repo/docs/tasks.yaml")"
+  if [[ ! -s "$logfile" && "$before" == "$after" ]]; then
+    pass "kill_switch_off: no dispatch and no queue mutation"
+  else
+    fail "kill_switch_off: pump changed state while disabled"
+  fi
+}
+
+# ── Test 5: a mid-conflict repository never receives a refill ──────────────
+test_tree_mid_conflict() {
+  read -r repo state < <(_new_fixture)
+  _write_tasks "$repo" '- id: T-conflict
+  lane: action
+  status: pending
+  priority: high
+  title: must not start during a merge conflict
+  created_at: "2026-01-01T00:00:00Z"
+'
+  read -r stub rcfile logfile < <(_make_dispatch_stub "$state")
+  git -C "$repo" rev-parse HEAD >"$repo/.git/MERGE_HEAD"
+  _run_pump "$repo" "$state" "$stub" check >/dev/null 2>&1
+  if [[ ! -s "$logfile" ]]; then
+    pass "tree_mid_conflict: no dispatch while Git has MERGE_HEAD"
+  else
+    fail "tree_mid_conflict: dispatched into an unresolved tree"
+  fi
+}
+
+# ── Test 6: duplicate refusal remains owned by the dispatch ledger ─────────
+test_duplicate_signature_refused() {
+  read -r repo state < <(_new_fixture)
+  _write_tasks "$repo" '- id: T-duplicate
+  lane: action
+  status: pending
+  priority: high
+  title: already represented by a dispatch signature
+  created_at: "2026-01-01T00:00:00Z"
+'
+  read -r stub rcfile logfile < <(_make_dispatch_stub "$state")
+  echo 2 >"$rcfile"
+  _run_pump "$repo" "$state" "$stub" check >/dev/null 2>&1
+  local item
+  item="$(LEADV2_PROJECT_ROOT="$repo" PROJECT_ROOT="$repo" bash -c "source '$TASKS_LIB'; leadv2_tasks_by_id T-duplicate" 2>/dev/null)"
+  if [[ -s "$logfile" && "$item" == *"status: pending"* && "$item" == *"by: null"* ]]; then
+    pass "duplicate_signature_refused: ledger refusal unclaims without redispatch"
+  else
+    fail "duplicate_signature_refused: duplicate was not safely returned to queue"
+  fi
+}
+
+# ── Test 7: judgment-class task is NOT auto-dispatched ──────────────────────
 test_judgment_class_excluded() {
   read -r repo state < <(_new_fixture)
   _write_tasks "$repo" '- id: T-human
@@ -204,7 +271,7 @@ test_judgment_class_excluded() {
   _run_pump "$repo2" "$state2" "$stub2" check >/dev/null 2>&1
 
   local unclaimed=0
-  grep -q "^status: pending" <(LEADV2_PROJECT_ROOT="$repo2" PROJECT_ROOT="$repo2" bash -c "source '$TASKS_LIB'; leadv2_tasks_by_id T-arch") 2>/dev/null && unclaimed=1
+  grep -q "^[[:space:]]*status: pending" <(LEADV2_PROJECT_ROOT="$repo2" PROJECT_ROOT="$repo2" bash -c "source '$TASKS_LIB'; leadv2_tasks_by_id T-arch") 2>/dev/null && unclaimed=1
 
   if [[ "$unclaimed" -eq 1 ]] && grep -q "T-arch" "${state2}/docs/leadv2/open-threads.md" 2>/dev/null; then
     pass "judgment_class_excluded: opus-arm candidate unclaimed + surfaced to founder"
@@ -213,7 +280,7 @@ test_judgment_class_excluded() {
   fi
 }
 
-# ── Test 5: empty-outcome lane does not silently consume the queue ─────────
+# ── Test 8: empty-outcome lane does not silently consume the queue ─────────
 test_empty_outcome_bounded() {
   read -r repo state < <(_new_fixture)
   _write_tasks "$repo" '- id: T-empty
@@ -232,7 +299,7 @@ test_empty_outcome_bounded() {
     bash "$PUMP_SH" reap T-empty >/dev/null 2>&1
 
   local status1
-  status1="$(LEADV2_PROJECT_ROOT="$repo" PROJECT_ROOT="$repo" bash -c "source '$TASKS_LIB'; leadv2_tasks_by_id T-empty" 2>/dev/null | grep -E '^(status|lane):')"
+  status1="$(LEADV2_PROJECT_ROOT="$repo" PROJECT_ROOT="$repo" bash -c "source '$TASKS_LIB'; leadv2_tasks_by_id T-empty" 2>/dev/null | grep -E '^[[:space:]]*(status|lane):')"
 
   # Re-claim + reap again (2nd consecutive empty close) -> parked human-needed.
   LEADV2_PROJECT_ROOT="$repo" PROJECT_ROOT="$repo" bash -c "source '$TASKS_LIB'; leadv2_tasks_claim T-empty --by tester" >/dev/null 2>&1
@@ -241,7 +308,7 @@ test_empty_outcome_bounded() {
     bash "$PUMP_SH" reap T-empty >/dev/null 2>&1
 
   local lane2
-  lane2="$(LEADV2_PROJECT_ROOT="$repo" PROJECT_ROOT="$repo" bash -c "source '$TASKS_LIB'; leadv2_tasks_by_id T-empty" 2>/dev/null | grep -E '^lane:' | awk '{print $2}')"
+  lane2="$(LEADV2_PROJECT_ROOT="$repo" PROJECT_ROOT="$repo" bash -c "source '$TASKS_LIB'; leadv2_tasks_by_id T-empty" 2>/dev/null | grep -E '^[[:space:]]*lane:' | awk '{print $2}')"
 
   if grep -q "status: pending" <<<"$status1" && [[ "$lane2" == "human-needed" ]]; then
     pass "empty_outcome_bounded: 1st empty -> requeued, 2nd consecutive -> parked (never spins forever)"
@@ -250,7 +317,7 @@ test_empty_outcome_bounded() {
   fi
 }
 
-# ── Test 6: dry-run shows next N candidates + reason, priority order ───────
+# ── Test 9: dry-run shows next N candidates + declared plan order ──────────
 test_dry_run() {
   read -r repo state < <(_new_fixture)
   _write_tasks "$repo" '- id: T-low
@@ -278,8 +345,8 @@ test_dry_run() {
          bash "$PUMP_SH" dry-run 3 2>/dev/null)"
 
   local first_line; first_line="$(head -1 <<<"$out")"
-  if grep -q "T-crit" <<<"$first_line" && grep -qc "would dispatch" <<<"$out"; then
-    pass "dry_run: priority order (recovery/critical first) + reasons printed, no side effects"
+  if grep -q "T-low" <<<"$first_line" && grep -q "declared plan order" <<<"$out"; then
+    pass "dry_run: plan-declared source order + reasons printed, no side effects"
   else
     fail "dry_run: unexpected output: $out"
   fi
@@ -289,6 +356,9 @@ log "=== BACKLOG-PUMP-01 test suite ==="
 test_auto_dispatch
 test_empty_queue
 test_concurrency_cap
+test_kill_switch_off
+test_tree_mid_conflict
+test_duplicate_signature_refused
 test_judgment_class_excluded
 test_empty_outcome_bounded
 test_dry_run

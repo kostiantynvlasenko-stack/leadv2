@@ -5,10 +5,9 @@
 # whatever the lead's attention happened to be on.
 #
 # QUEUE SOURCE: docs/tasks.yaml via leadv2-tasks-lib.sh — NOT a second
-# backlog. leadv2_tasks_top_n already (a) excludes lane=human-needed (the
-# judgment-class tasks — paid/irreversible/architecture triage), (b) excludes
-# claimed/blocked-by-deps rows, (c) sorts by lane-rank/priority/created_at.
-# This script adds exactly the missing piece: the refill trigger + bounds.
+# backlog. docs/ARCHITECTURE.md defines its top task as "next", so this pump
+# uses leadv2_tasks_declared_top_n: eligible rows retain that stated plan order.
+# It excludes human-needed, claimed, and blocked-by-deps rows.
 #
 # COMPOSITION (never bypassed, never re-implemented here):
 #   - duplicate-signature refusal: leadv2-dispatch-code.sh owns the
@@ -30,9 +29,8 @@
 #     assumes its schema.
 #
 # BOUNDS (mission requirement — state every bound + what happens when it trips):
-#   1. Master off switch: LEADV2_BACKLOG_PUMP=1 required to do ANYTHING beyond
-#      `status`/`dry-run`. Default 0 = today's behaviour, unchanged. One flag
-#      flip is the entire rollback.
+#   1. Master off switch: LEADV2_BACKLOG_PUMP=1 required to dispatch. Default
+#      1; LEADV2_BACKLOG_PUMP=0 restores the pre-pump behaviour in one flip.
 #   2. Concurrency cap: LEADV2_BACKLOG_PUMP_MAX (default: active.yaml
 #      meta.hard_limit, else 3). At/over cap -> `check` exits 0, no dispatch,
 #      logged "at_capacity".
@@ -127,7 +125,7 @@ _override() {  # $1=key $2=default -> value
 }
 
 # ── config resolution: env > per-repo override > default ───────────────────
-PUMP_ENABLED="${LEADV2_BACKLOG_PUMP:-$(_override enabled 0)}"
+PUMP_ENABLED="${LEADV2_BACKLOG_PUMP:-$(_override enabled 1)}"
 
 ACTIVE_YAML="$(PROJECT_ROOT="$PROJECT_ROOT" "${SCRIPT_DIR}/leadv2-state-path.sh" active.yaml 2>/dev/null)"
 
@@ -171,6 +169,35 @@ for s in (d.get('sessions') or []):
     tid = s.get('task_id')
     if tid: print(tid)
 " "$ACTIVE_YAML" 2>/dev/null
+}
+
+# Serialize checks per project so concurrent supervise ticks cannot both see
+# and consume the same free slot. mkdir is an atomic portable lock primitive.
+PUMP_LOCK_DIR="/tmp/leadv2-backlog-pump-$(printf '%s' "$PROJECT_ROOT" | shasum | awk '{print $1}').lock"
+PUMP_LOCK_HELD=0
+_release_pump_lock() {
+  [[ "$PUMP_LOCK_HELD" == "1" ]] && rmdir "$PUMP_LOCK_DIR" 2>/dev/null || true
+  PUMP_LOCK_HELD=0
+}
+_acquire_pump_lock() {
+  if mkdir "$PUMP_LOCK_DIR" 2>/dev/null; then
+    PUMP_LOCK_HELD=1
+    trap _release_pump_lock EXIT
+    return 0
+  fi
+  return 1
+}
+
+# Fail closed when Git reports an unfinished merge/rebase/cherry-pick or
+# unmerged index entries. Refusing a refill is safer than an ambiguous tree.
+_tree_mid_conflict() {
+  git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  local ref
+  for ref in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; do
+    git -C "$PROJECT_ROOT" rev-parse -q --verify "$ref" >/dev/null 2>&1 && return 0
+  done
+  git -C "$PROJECT_ROOT" ls-files -u 2>/dev/null | grep -q . && return 0
+  return 1
 }
 
 # ── quota headroom: at least one provider bucket must clear the floor ───────
@@ -232,7 +259,7 @@ cmd_dry_run() {
   cap=$(( MAX_CONCURRENT - active ))
   (( cap < 0 )) && cap=0
   local raw
-  raw="$(leadv2_tasks_top_n "$MAX_CANDIDATES" 2>/dev/null || true)"
+  raw="$(leadv2_tasks_declared_top_n "$MAX_CANDIDATES" 2>/dev/null || true)"
   if [[ -z "$raw" ]]; then
     printf 'queue empty — nothing would start\n'
     return 0
@@ -243,7 +270,7 @@ cmd_dry_run() {
     i=$((i + 1))
     (( i > n )) && break
     if (( i <= cap )); then
-      printf '%d. %s [%s/%s] %s — would dispatch: next in priority order, capacity available (%d/%d slots free)\n' \
+      printf '%d. %s [%s/%s] %s — would dispatch: next in declared plan order, capacity available (%d/%d slots free)\n' \
         "$i" "$iid" "$lane" "$priority" "$title" "$cap" "$MAX_CONCURRENT"
     else
       printf '%d. %s [%s/%s] %s — would NOT dispatch yet: no free capacity (%d/%d in use)\n' \
@@ -255,6 +282,16 @@ cmd_dry_run() {
 cmd_check() {
   if [[ "$PUMP_ENABLED" != "1" ]]; then
     log "disabled (LEADV2_BACKLOG_PUMP=0) — no-op"
+    return 0
+  fi
+
+  if ! _acquire_pump_lock; then
+    jemit decision "pump_refused reason=check_in_progress"
+    return 0
+  fi
+
+  if _tree_mid_conflict; then
+    jemit decision "pump_refused reason=tree_mid_conflict"
     return 0
   fi
 
@@ -272,7 +309,7 @@ cmd_check() {
   fi
 
   local raw
-  raw="$(leadv2_tasks_top_n "$MAX_CANDIDATES" 2>/dev/null || true)"
+  raw="$(leadv2_tasks_declared_top_n "$MAX_CANDIDATES" 2>/dev/null || true)"
   if [[ -z "$raw" ]]; then
     log "queue empty — nothing to pump"
     return 0
@@ -307,7 +344,7 @@ cmd_check() {
 
     case "$rc" in
       0)
-        jemit decision "pump_dispatched task=${iid} lane=${lane} priority=${priority} reason=priority_order rank=${examined}"
+        jemit decision "pump_dispatched task=${iid} lane=${lane} priority=${priority} reason=declared_plan_order rank=${examined}"
         dispatched=$((dispatched + 1))
         cap=$((cap - 1))
         ;;
