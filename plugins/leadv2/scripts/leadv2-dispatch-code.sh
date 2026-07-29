@@ -275,8 +275,18 @@ EVIDENCE_ATTRIBUTION="${LEADV2_DISPATCH_EVIDENCE_ATTRIBUTION:-1}"
 ARCHITECT_GATE="${LEADV2_DISPATCH_ARCHITECT_GATE:-1}"
 # The architect is advisory.  Keep this comfortably below the two-minute
 # caller deadline; an invalid override is treated as the safe default.
-ARCHITECT_PREPASS_TIMEOUT_SEC="${LEADV2_DISPATCH_ARCHITECT_TIMEOUT_SEC:-30}"
-[[ "${ARCHITECT_PREPASS_TIMEOUT_SEC}" =~ ^[1-9][0-9]*$ ]] || ARCHITECT_PREPASS_TIMEOUT_SEC=30
+# PREPASS-TIMEOUT-REALISTIC-01 (2026-07-29): was 30s, which no architect can meet — the real
+# designs it produces run 13-21KB and take minutes. Every "prepass failed" today was this
+# timeout firing on work that was proceeding normally, and the design landed in the handoff
+# dir seconds after we had already given up on it.
+ARCHITECT_PREPASS_TIMEOUT_SEC="${LEADV2_DISPATCH_ARCHITECT_TIMEOUT_SEC:-420}"
+[[ "${ARCHITECT_PREPASS_TIMEOUT_SEC}" =~ ^[1-9][0-9]*$ ]] || ARCHITECT_PREPASS_TIMEOUT_SEC=420
+# How many times to re-run the architect before giving up. A product task is NEVER dispatched
+# without a design (founder, 2026-07-29): the gate exists so the work is thought through, and
+# running it raw makes the downstream review and end-to-end gates inspect something nobody
+# scoped. If every attempt fails the task is PARKED and surfaced, not silently degraded.
+ARCHITECT_PREPASS_ATTEMPTS="${LEADV2_DISPATCH_ARCHITECT_ATTEMPTS:-2}"
+[[ "${ARCHITECT_PREPASS_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]] || ARCHITECT_PREPASS_ATTEMPTS=2
 ARCHITECT_PREPASS_REASON=""
 E2E_GATE="${LEADV2_DISPATCH_E2E_GATE:-1}"
 REVIEW_GATE="${LEADV2_DISPATCH_REVIEW_GATE:-1}"
@@ -1448,9 +1458,22 @@ cmd_resolve() {
     # launched at all -- which is strictly worse than dispatching an unrefined mission.
     # The gate exists to IMPROVE a mission when it can, not to hold the fleet hostage when
     # it cannot. Degrade to the raw mission and journal why, loudly.
-    if ! architect_prepass "${mission}" "${sig8}" "${lane_writes}"; then
-      emit decision "architect_prepass task=${sig8} status=degraded reason=${ARCHITECT_PREPASS_REASON:-no_design} action=dispatch_raw_mission"
-      log_err "architect prepass produced no design for product task=${sig8} -- dispatching the raw mission instead"
+    # PREPASS-RETRY-THEN-PARK-01 (2026-07-29, founder decision, SUPERSEDES the degrade-to-raw
+    # behaviour described just above): retry, never skip. A product task that reaches a worker
+    # without a design defeats the entire purpose -- the cross-provider review and the
+    # end-to-end gate would then be inspecting something nobody ever scoped. Blocking forever
+    # is wrong; dispatching unrefined is also wrong; PARKING and surfacing it is the honest
+    # third option.
+    local _pp_ok=0 _pp_try=1
+    while (( _pp_try <= ARCHITECT_PREPASS_ATTEMPTS )); do
+      if architect_prepass "${mission}" "${sig8}" "${lane_writes}"; then _pp_ok=1; break; fi
+      emit decision "architect_prepass task=${sig8} status=retrying attempt=${_pp_try}/${ARCHITECT_PREPASS_ATTEMPTS} reason=${ARCHITECT_PREPASS_REASON:-no_design}"
+      _pp_try=$(( _pp_try + 1 ))
+    done
+    if (( _pp_ok == 0 )); then
+      emit decision "architect_prepass task=${sig8} status=parked reason=no_design_after_${ARCHITECT_PREPASS_ATTEMPTS}_attempts action=not_dispatched"
+      log_err "architect prepass produced no design for product task=${sig8} after ${ARCHITECT_PREPASS_ATTEMPTS} attempts -- task PARKED, not dispatched."
+      exit 3
     fi
     # The developer receives the independently-produced design -- but INLINE, and only
     # when one actually exists. Two failures on 2026-07-29 came from this line: it replaced
