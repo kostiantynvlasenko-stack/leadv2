@@ -73,6 +73,70 @@ BUCKET_FOR_ARM = {
 
 EXHAUSTED_AT_OR_BELOW = 0.0
 
+
+def headroom_weight(usable_now, weights):
+    """Return the configured monotone weight for usable_now.
+
+    ``usable_now is None`` is *unknown*, not zero and not abundant.  Unknown
+    headroom does not trip the reserve rule (there is no evidence it is below
+    reserve), remains fail-open/rankable, and receives only the explicit
+    ``min_usable_now: null`` weight.  Thus it cannot masquerade as healthy.
+    """
+    if usable_now is None:
+        for row in weights:
+            if row.get("min_usable_now") is None:
+                return float(row["weight"])
+        return 0.2
+    known = sorted((r for r in weights if r.get("min_usable_now") is not None),
+                   key=lambda r: float(r["min_usable_now"]), reverse=True)
+    for row in known:
+        if float(usable_now) >= float(row["min_usable_now"]):
+            return float(row["weight"])
+    return float(known[-1]["weight"]) if known else 1.0
+
+
+def select_arms(arms, l1_result, quota, estimate, samples, headroom_weights):
+    """L3 selector: L1 survivors -> reserve -> samples*headroom -> argmax.
+
+    This deliberately accepts L1's *already filtered* set, rather than all
+    arms plus filter inputs.  Consequently an L1-rejected arm has no code path
+    to scoring or selection, irrespective of quota, sample, or score.
+    """
+    arm_by_id = {arm["id"]: arm for arm in arms}
+    survivors = [arm_by_id[aid] for aid in l1_result["eligible"] if aid in arm_by_id]
+    # Preserve L1 reasons first; they are never overwritten downstream.
+    filtered = list(l1_result.get("filtered", []))
+    vector = []
+    for arm in survivors:
+        aid = arm["id"]
+        bucket = arm.get("bucket", aid).split(":", 1)[0]
+        usable = bucket_usable_now(quota.get(bucket) or {})
+        threshold = float(arm.get("reserve_threshold", 0))
+        allowed = (estimate.get("duration_class") == "short" and
+                   estimate.get("work_kind") in set(arm.get("reserve_allow") or ["review"]))
+        # Unknown is not comparable to the threshold: fail open, but its
+        # configured unknown weight below makes it rank last absent competence.
+        if usable is not None and usable < threshold and not allowed:
+            filtered.append({"arm": aid, "reason": "reserve"})
+            continue
+        sample = float(samples.get(aid, 0.75))
+        weight = headroom_weight(usable, headroom_weights)
+        vector.append({"arm": aid, "bucket": bucket, "usable_now": usable,
+                       "reserve_threshold": threshold, "sample": sample,
+                       "headroom_weight": weight, "score": sample * weight})
+    winner_row = max(vector, key=lambda row: (row["score"], -l1_result["eligible"].index(row["arm"])),
+                     default=None)
+    return {
+        "eligible": [row["arm"] for row in vector], "filtered": filtered,
+        "vector": vector, "headroom": {row["arm"]: row["usable_now"] for row in vector},
+        "samples": {row["arm"]: row["sample"] for row in vector},
+        "winner": winner_row["arm"] if winner_row else None,
+        "winner_reason": "max_sample_x_headroom" if winner_row else "all_arms_filtered",
+        "task_class": "%s:%s" % (estimate.get("work_kind", "unknown"),
+                                     "short" if estimate.get("duration_class") == "short" and estimate.get("complexity") in ("trivial", "simple") else "long"),
+        "estimate_id": estimate.get("estimate_id", "unknown"),
+    }
+
 # Mirrors leadv2-glm-quota-gate.sh sec1 exactly (same env var, same >=threshold-
 # on-EITHER-window semantics) so GLM's existing 80% reroute policy is reused,
 # not reimplemented as a second, possibly-drifting gate ("never open a second
@@ -305,8 +369,12 @@ def main(argv=None):
                         help="resolve/dry-run: comma-separated ordered arm ids, e.g. glm,codex,sonnet")
     parser.add_argument("--quota-json", help="fixture file (tests); default reads live quota")
     parser.add_argument("--quota-live", help="override path to leadv2-quota-live.sh")
-    parser.add_argument("--arms-json", help="filter: path to router_v2.arms as JSON array")
+    parser.add_argument("--arms-json", help="filter/resolve: path to router_v2.arms as JSON array")
     parser.add_argument("--glm-policy-json", help="filter: path to phases.glm_policy as JSON object")
+    parser.add_argument("--l1-json", help="resolve: JSON L1 filter result (eligible/filtered)")
+    parser.add_argument("--estimate-json", help="resolve: arm-blind TaskEstimate JSON")
+    parser.add_argument("--samples-json", help="resolve: arm-id -> pre-sampled competence JSON")
+    parser.add_argument("--headroom-weights-json", help="resolve: router_v2.headroom_weights JSON")
     parser.add_argument("--mission-kind", help="filter: mission_kind signal")
     parser.add_argument("--protected-path", action="store_true",
                         help="filter: safety-gate/publish/payments touched")
@@ -324,6 +392,38 @@ def main(argv=None):
             sys.stderr.write("leadv2-router-v2.py filter: --arms-json is required\n")
             return 2
         return _run_filter(args)
+
+    # The complete T6/T7 L3 path.  Its inputs are materialized JSON so it is
+    # pure and replayable from the journal; the shell wrapper obtains them from
+    # T4/T5/L4 in production.  Supplying --l1-json structurally prevents any
+    # L1-filtered arm from being revived by later layers.
+    if args.mode == "resolve" and args.l1_json:
+        required = (args.arms_json, args.estimate_json, args.samples_json,
+                    args.headroom_weights_json)
+        if not all(required):
+            sys.stderr.write("leadv2-router-v2.py resolve: L3 requires --arms-json --estimate-json --samples-json --headroom-weights-json\n")
+            return 2
+        with open(args.arms_json) as fh:
+            arms = json.load(fh)
+        with open(args.l1_json) as fh:
+            l1 = json.load(fh)
+        with open(args.estimate_json) as fh:
+            estimate = json.load(fh)
+        with open(args.samples_json) as fh:
+            samples = json.load(fh)
+        with open(args.headroom_weights_json) as fh:
+            weights = json.load(fh)
+        quota = load_quota(args.quota_json, args.quota_live)
+        result = select_arms(arms, l1, quota, estimate, samples, weights)
+        print("winner=%s" % (result["winner"] or ""))
+        print("reason=%s" % result["winner_reason"])
+        print("eligible=%s" % ",".join(result["eligible"]))
+        print("filtered=%s" % json.dumps(result["filtered"], sort_keys=True))
+        print("headroom=%s" % json.dumps(result["headroom"], sort_keys=True))
+        print("samples=%s" % json.dumps(result["samples"], sort_keys=True))
+        print("task_class=%s" % result["task_class"])
+        print("estimate_id=%s" % result["estimate_id"])
+        return 0 if result["winner"] else 3
 
     if not args.chain:
         sys.stderr.write("leadv2-router-v2.py: --chain is required for resolve/dry-run\n")

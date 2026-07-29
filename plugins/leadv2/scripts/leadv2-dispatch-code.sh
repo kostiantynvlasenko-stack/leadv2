@@ -1423,9 +1423,11 @@ confirmation-seeking; only for a decision you cannot make yourself."
   # status=completed, so only the quota READER -- never a spawn outcome --
   # can see it is dry; a hand-maintained exclusion list was the stopgap until
   # this shipped and is founder-rejected as the permanent answer.
-  # Kill switch: LEADV2_ROUTER_V2_QUOTA_FILTER=0 restores the exact pre-T6
-  # behavior (chain order only; exhaustion undetected until a spawn refusal).
-  if [[ "${LEADV2_ROUTER_V2_QUOTA_FILTER:-1}" != "0" ]]; then
+  # V2 is shadow/off by default.  LEADV2_ROUTER_V2=0 is the one-step rollback
+  # and leaves the legacy candidate order byte-for-byte untouched; the narrow
+  # QUOTA_FILTER switch remains available while this early compatibility path
+  # is replaced by the complete L1→L3 resolver in the later integration task.
+  if [[ "${LEADV2_ROUTER_V2:-0}" == "1" && "${LEADV2_ROUTER_V2_QUOTA_FILTER:-1}" != "0" ]]; then
     local _rv2_bin="${LEADV2_ROUTER_V2_BIN:-${SCRIPT_DIR}/leadv2-router-v2.sh}"
     if [[ -f "${_rv2_bin}" ]]; then
       local _rv2_chain _rv2_out _rv2_rc _rv2_eligible

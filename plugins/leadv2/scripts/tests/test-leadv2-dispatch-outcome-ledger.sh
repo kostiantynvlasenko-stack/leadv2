@@ -89,7 +89,7 @@ _dispatch() {  # <mission> [extra args...]
     LEADV2_DISPATCH_CACHE_DIR="${CACHE_DIR}" \
     LEADV2_DISPATCH_SUBSESSION_BIN="${FAKE_SUBSESSION}" \
     LEADV2_JOURNAL_BIN=/bin/true \
-    LEADV2_ROUTER_V2_QUOTA_FILTER=0 \
+    LEADV2_ROUTER_V2=0 \
     LEADV2_EXCLUDED_ARMS="__none__" \
     LEADV2_LANE_SHAPE=off \
     "${DISPATCH_SH}" "$1" --protected --spawn "${@:2}" )

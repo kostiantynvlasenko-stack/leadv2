@@ -83,6 +83,11 @@ GLM_FAILURE_COUNT=0
 GLM_FAILURE_LEDGER_VERIFIED=0
 CHANNEL_DOWN=""
 SKIP_QUOTA_GATE_CHECK=0
+L1_JSON=""
+ESTIMATE_JSON=""
+SAMPLES_JSON=""
+HEADROOM_WEIGHTS_JSON=""
+ACCOUNT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     resolve|dry-run|filter) MODE="$1"; shift ;;
@@ -97,6 +102,11 @@ while [[ $# -gt 0 ]]; do
     --channel-down) CHANNEL_DOWN="${2:-}"; shift 2 ;;
     --routing-yaml) ROUTING_YAML="${2:-}"; shift 2 ;;
     --skip-quota-gate-check) SKIP_QUOTA_GATE_CHECK=1; shift ;;
+    --l1-json) L1_JSON="${2:-}"; shift 2 ;;
+    --estimate-json) ESTIMATE_JSON="${2:-}"; shift 2 ;;
+    --samples-json) SAMPLES_JSON="${2:-}"; shift 2 ;;
+    --headroom-weights-json) HEADROOM_WEIGHTS_JSON="${2:-}"; shift 2 ;;
+    --account) ACCOUNT="${2:-}"; shift 2 ;;
     -h|--help)    sed -n '3,61p' "$0"; exit 0 ;;
     *) die "unknown arg: $1" ;;
   esac
@@ -164,9 +174,27 @@ with open(out_policy, "w") as fh:
   exit "${RC}"
 fi
 
-[[ -n "${CHAIN}" ]] || die "--chain is required (comma-separated ordered arm ids)"
+if [[ -n "${L1_JSON}${ESTIMATE_JSON}${SAMPLES_JSON}${HEADROOM_WEIGHTS_JSON}" ]]; then
+  [[ "${MODE}" == "resolve" ]] || die "L3 inputs are valid only with resolve"
+  [[ -n "${L1_JSON}" && -n "${ESTIMATE_JSON}" && -n "${SAMPLES_JSON}" && -n "${HEADROOM_WEIGHTS_JSON}" ]] \
+    || die "L3 requires --l1-json --estimate-json --samples-json --headroom-weights-json"
+  [[ -f "${ROUTING_YAML}" ]] || die "routing.yaml not found: ${ROUTING_YAML}"
+  TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/leadv2-router-v2-resolve.XXXXXX")" || die "mktemp failed"
+  trap 'rm -rf "${TMP_DIR}"' EXIT
+  ARMS_JSON="${TMP_DIR}/arms.json"
+  python3 -c '
+import json, sys, yaml
+with open(sys.argv[1]) as fh:
+    cfg = yaml.safe_load(fh) or {}
+with open(sys.argv[2], "w") as fh:
+    json.dump(((cfg.get("router_v2") or {}).get("arms")) or [], fh)
+' "${ROUTING_YAML}" "${ARMS_JSON}" || die "routing.yaml parse failed: ${ROUTING_YAML}"
+  PY_ARGS=(resolve --arms-json "${ARMS_JSON}" --l1-json "${L1_JSON}" --estimate-json "${ESTIMATE_JSON}" --samples-json "${SAMPLES_JSON}" --headroom-weights-json "${HEADROOM_WEIGHTS_JSON}")
+else
+  [[ -n "${CHAIN}" ]] || die "--chain is required (comma-separated ordered arm ids)"
+  PY_ARGS=("${MODE}" --chain "${CHAIN}")
+fi
 
-PY_ARGS=("${MODE}" --chain "${CHAIN}")
 [[ -n "${QUOTA_JSON}" ]] && PY_ARGS+=(--quota-json "${QUOTA_JSON}")
 [[ -n "${QUOTA_LIVE}" ]] && PY_ARGS+=(--quota-live "${QUOTA_LIVE}")
 
@@ -181,8 +209,11 @@ if [[ "${MODE}" == "resolve" && -n "${TASK_ID}" && -f "${JOURNAL_BIN}" ]]; then
   eligible="$(printf '%s\n' "${OUT}" | sed -n 's/^eligible=//p')"
   filtered="$(printf '%s\n' "${OUT}" | sed -n 's/^filtered=//p')"
   headroom="$(printf '%s\n' "${OUT}" | sed -n 's/^headroom=//p')"
+  samples="$(printf '%s\n' "${OUT}" | sed -n 's/^samples=//p')"
+  task_class="$(printf '%s\n' "${OUT}" | sed -n 's/^task_class=//p')"
+  estimate_id="$(printf '%s\n' "${OUT}" | sed -n 's/^estimate_id=//p')"
   bash "${JOURNAL_BIN}" append "${TASK_ID}" decision \
-    "route_v2_resolved winner=${winner} reason=${reason} eligible=${eligible} filtered=${filtered} headroom=${headroom}" \
+    "route_v2_resolved winner=${winner} reason=${reason} eligible=${eligible} filtered=${filtered} headroom=${headroom} samples=${samples:-{}} class=${task_class:-unknown} estimate_id=${estimate_id:-unknown} account=${ACCOUNT:-unknown}" \
     >/dev/null 2>&1 || true
 fi
 

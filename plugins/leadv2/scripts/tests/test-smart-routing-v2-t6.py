@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
 ROUTER_PY_PATH = SCRIPTS / "leadv2-router-v2.py"
 ROUTER_SH_PATH = SCRIPTS / "leadv2-router-v2.sh"
+ROUTING_YAML_PATH = SCRIPTS.parent / "config" / "leadv2-routing.yaml"
 
 spec = importlib.util.spec_from_file_location("router_v2", ROUTER_PY_PATH)
 router_v2 = importlib.util.module_from_spec(spec)
@@ -132,6 +133,81 @@ class UnknownPolicyTests(unittest.TestCase):
         result = router_v2.resolve(CHAIN, quota)
         self.assertEqual(result["winner"], "glm")
         self.assertEqual(result["winner_reason"], "unknown_headroom_failopen")
+
+
+class SelectionAndReserveTests(unittest.TestCase):
+    """T6/T7: L1 is final; reserve protects review capacity for every bucket."""
+
+    ARMS = [
+        {"id": "glm", "bucket": "glm", "reserve_threshold": 2, "reserve_allow": ["review"]},
+        {"id": "codex", "bucket": "codex", "reserve_threshold": 2, "reserve_allow": ["review"]},
+        {"id": "claude-sonnet", "bucket": "anthropic:max_20x", "reserve_threshold": 2, "reserve_allow": ["review"]},
+    ]
+    WEIGHTS = [{"min_usable_now": 8, "weight": 1.0}, {"min_usable_now": 2, "weight": .7},
+               {"min_usable_now": 0, "weight": .4}, {"min_usable_now": None, "weight": .2}]
+
+    def estimate(self, work_kind="build", duration="long"):
+        return {"complexity": "complex", "duration_class": duration, "work_kind": work_kind,
+                "estimate_id": "estimate-1"}
+
+    def test_l1_filtered_arm_cannot_be_selected_with_best_headroom_or_sample(self):
+        quota = {"glm": glm_bucket(), "codex": codex_bucket(used_percent=99),
+                 "anthropic": anthropic_bucket(five_hour_pct=99, weekly_pct=99)}
+        l1 = {"eligible": ["codex", "claude-sonnet"],
+              "filtered": [{"arm": "glm", "reason": "policy_ban"}]}
+        result = router_v2.select_arms(self.ARMS, l1, quota, self.estimate(),
+                                       {"glm": 1.0, "codex": .01, "claude-sonnet": .01}, self.WEIGHTS)
+        self.assertNotEqual(result["winner"], "glm")
+        self.assertIn({"arm": "glm", "reason": "policy_ban"}, result["filtered"])
+
+    def test_reserve_refuses_long_build_but_allows_short_review(self):
+        quota = {"glm": glm_bucket(weekly_pct=90), "codex": codex_bucket(used_percent=90),
+                 "anthropic": anthropic_bucket(five_hour_pct=90, weekly_pct=90)}
+        l1 = {"eligible": ["codex", "claude-sonnet"], "filtered": []}
+        build = router_v2.select_arms(self.ARMS, l1, quota, self.estimate(),
+                                       {"codex": .9, "claude-sonnet": .8}, self.WEIGHTS)
+        self.assertEqual({r["arm"] for r in build["filtered"] if r["reason"] == "reserve"},
+                         {"codex", "claude-sonnet"})
+        review = router_v2.select_arms(self.ARMS, l1, quota, self.estimate("review", "short"),
+                                        {"codex": .9, "claude-sonnet": .8}, self.WEIGHTS)
+        self.assertEqual(review["winner"], "codex")
+        self.assertEqual(set(review["eligible"]), {"codex", "claude-sonnet"})
+
+    def test_unknown_usable_now_passes_reserve_but_uses_unknown_weight(self):
+        quota = {"glm": glm_bucket(), "codex": codex_bucket(status="unknown"),
+                 "anthropic": anthropic_bucket()}
+        result = router_v2.select_arms(self.ARMS, {"eligible": ["codex"], "filtered": []}, quota,
+                                       self.estimate(), {"codex": .9}, self.WEIGHTS)
+        self.assertEqual(result["winner"], "codex")
+        self.assertIsNone(result["headroom"]["codex"])
+        self.assertEqual(result["vector"][0]["headroom_weight"], .2)
+
+    def test_resolve_cli_preserves_l1_boundary_and_emits_replay_vector(self):
+        """The public L3 contract cannot score an arm that L1 removed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            quota_file = tmp / "quota.json"
+            l1_file = tmp / "l1.json"
+            estimate_file = tmp / "estimate.json"
+            samples_file = tmp / "samples.json"
+            weights_file = tmp / "weights.json"
+            quota_file.write_text(json.dumps({"glm": glm_bucket(), "codex": codex_bucket(50),
+                                              "anthropic": anthropic_bucket(99, 99)}))
+            l1_file.write_text(json.dumps({"eligible": ["codex", "claude-sonnet"],
+                                           "filtered": [{"arm": "glm", "reason": "policy_ban"}]}))
+            estimate_file.write_text(json.dumps(self.estimate()))
+            samples_file.write_text(json.dumps({"glm": 1.0, "codex": .01, "claude-sonnet": .01}))
+            weights_file.write_text(json.dumps(self.WEIGHTS))
+            proc = subprocess.run([
+                "bash", str(ROUTER_SH_PATH), "resolve", "--routing-yaml", str(ROUTING_YAML_PATH),
+                "--quota-json", str(quota_file), "--l1-json", str(l1_file),
+                "--estimate-json", str(estimate_file), "--samples-json", str(samples_file),
+                "--headroom-weights-json", str(weights_file),
+            ], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertNotIn("winner=glm", proc.stdout)
+            self.assertIn('filtered=[{"arm": "glm", "reason": "policy_ban"}', proc.stdout)
+            self.assertIn("samples=", proc.stdout)
 
 
 class BashWrapperDryRunTests(unittest.TestCase):
