@@ -28,6 +28,12 @@
 # docs/leadv2/open-threads.md under "## Captured asks (auto)" (cap 40
 # entries). Capture is best-effort and NEVER affects hook exit/stdout.
 #
+# OPEN-THREADS-HYGIENE-01: an entry is removed the moment it's resolved
+# (scripts/leadv2-thread-prune.sh resolve <substring>) — there is no
+# intermediate "- [x] " state to reaccumulate. capture_ask() also strips any
+# "- [x] " line on every write, defensively, in case one is added some other
+# way (e.g. a human hand-checking a box in an editor).
+#
 # Fail-open: ANY error -> exit 0 with empty stdout. Never blocks a prompt.
 # stdlib-only (bash + python3, +PyYAML if present — degrades gracefully
 # without it), zero network. Target <300ms.
@@ -202,7 +208,12 @@ def build_thread_anchor(root, leadv2_dir):
         "4. Anything promised for later goes to docs/leadv2/scheduled-decisions.md the same turn."
     )
 
-    header = ["<task-anchor>", "NO ACTIVE TASK — thread anchor (docs/leadv2/open-threads.md)"]
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "${CLAUDE_PLUGIN_ROOT}")
+    header = [
+        "<task-anchor>",
+        "NO ACTIVE TASK — thread anchor (docs/leadv2/open-threads.md)",
+        f"supervisor role definition (stable, never a status dump): {plugin_root}/docs/supervisor-role.md",
+    ]
     content = []
     if has_ot:
         tail = read_last_nonblank_lines(ot_path, 8)
@@ -308,7 +319,11 @@ def capture_ask(root, leadv2_dir, prompt):
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         new_entry = f"- [ ] {ts} — {single_line}"
 
-        lines = existing.splitlines()
+        # OPEN-THREADS-HYGIENE-01: self-prune any resolved ("- [x] ") lines on
+        # every capture — resolution (leadv2-thread-prune.sh resolve) already
+        # deletes an entry outright, so a "- [x] " line should never persist;
+        # this is belt-and-braces for anything else that hand-checks a box.
+        lines = [l for l in existing.splitlines() if not l.startswith("- [x] ")]
         if heading in lines:
             h_idx = lines.index(heading)
             j = h_idx + 1

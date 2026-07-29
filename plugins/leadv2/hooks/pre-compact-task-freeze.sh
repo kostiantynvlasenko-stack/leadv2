@@ -16,10 +16,17 @@
 #   - docs/tasks.yaml            (file mirror of Supabase work_items; status
 #                                  open/in_progress == anything not in a
 #                                  closed-status set — see CLOSED_STATUSES)
-#   - <leadv2_dir>/open-threads.md          (verbatim)
+#   - <leadv2_dir>/open-threads.md          (open state only, post
+#                                             OPEN-THREADS-HYGIENE-01 — see
+#                                             scripts/leadv2-thread-prune.sh;
+#                                             capped, not necessarily verbatim)
 #   - <leadv2_dir>/scheduled-decisions.md   (DUE/OVERDUE rows only)
 #   - <leadv2_dir>/tasks/*/journal.md       (tail of the most recently
 #                                             touched journal, best-effort)
+#   - plugin docs/supervisor-role.md        (pointed to, never embedded — a
+#                                             real file survives a compact by
+#                                             existing on disk, not by being
+#                                             re-injected into chat context)
 # NO network, NO Supabase call — after a compact nobody goes to the network,
 # that is the entire premise of this hook.
 #
@@ -256,13 +263,27 @@ def main():
             f"- \u2026 +{hidden} more open tasks hidden (P0->P3->unranked sort; see docs/tasks.yaml)"
         )
 
+    # OPEN-THREADS-HYGIENE-01: open-threads.md is now open STATE only (a
+    # question awaiting an answer / a promised action not yet taken / a live
+    # background job), self-pruned via leadv2-thread-prune.sh \u2014 it no longer
+    # carries a hand-written, ever-growing role/status head block, so there
+    # is nothing "stable" left to split out with role_and_tail(). Freeze the
+    # (now-bounded) file as-is; role_and_tail's short-file path already
+    # returns it whole when there's nothing worth truncating. The supervisor
+    # role definition itself lives outside this file entirely (it's a real,
+    # rarely-edited file \u2014 it survives a compact by existing on disk, not by
+    # being re-injected into chat context every time) and is only pointed to
+    # here, never embedded.
     ot_lines = read_file(os.path.join(leadv2_abs, "open-threads.md"))
     ot_section = []
     if ot_lines:
         threads_tail_n = int(os.environ.get("LEADV2_FREEZE_THREADS_TAIL", "40"))
         role_lines, tail_lines, dropped = role_and_tail(ot_lines, tail_n=threads_tail_n)
         ot_section = [
-            "## OPEN THREADS \u2014 role block + freshest tail (docs/leadv2/open-threads.md; capped, not verbatim)"
+            "## OPEN THREADS (docs/leadv2/open-threads.md; capped, not verbatim)",
+            "supervisor role definition (stable, not frozen here): "
+            + os.environ.get("CLAUDE_PLUGIN_ROOT", "${CLAUDE_PLUGIN_ROOT}")
+            + "/docs/supervisor-role.md",
         ]
         ot_section += role_lines
         if dropped:
