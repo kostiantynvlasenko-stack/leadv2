@@ -955,8 +955,8 @@ spawn_worker() {
   return ${rc}
 }
 
-spawn_product_close() { # <sig8> <author arm> <normalized handle>
-  local sig8="$1" author="$2" handle="$3"
+spawn_product_close() { # <sig8> <author arm> <normalized handle> <quota-eligible arms csv>
+  local sig8="$1" author="$2" handle="$3" reviewer_arms="${4:-}"
   [[ "${E2E_GATE}" == "1" || "${REVIEW_GATE}" == "1" ]] || return 0
   local close_bin="${LEADV2_DISPATCH_PRODUCT_CLOSE_BIN:-${SCRIPT_DIR}/leadv2-dispatch-product-close.sh}"
   if [[ ! -f "${close_bin}" ]]; then
@@ -966,6 +966,7 @@ spawn_product_close() { # <sig8> <author arm> <normalized handle>
   PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_DISPATCH_CACHE_DIR="${CACHE_DIR}" \
     LEADV2_JOURNAL_BIN="${JOURNAL_BIN}" LEADV2_DISPATCH_CODEX_BIN="${CODEX_BIN}" \
     LEADV2_DISPATCH_ARCHITECT_BIN="${ARCHITECT_BIN}" \
+    LEADV2_DISPATCH_REVIEWER_ARMS="${reviewer_arms}" \
     bash "${close_bin}" "${PROJECT_ROOT}" "${sig8}" "${author}" "${handle}" "${E2E_GATE}" "${REVIEW_GATE}" \
       >/dev/null 2>&1 &
   emit decision "product_close task=${sig8} status=spawned author=${author}"
@@ -1623,7 +1624,9 @@ confirmation-seeking; only for a decision you cannot make yourself."
       exit 2
       ;;
     0)
-      if [[ "${product_class}" == "product" ]] && ! spawn_product_close "${sig8}" "${candidate}" "${LAST_WORKER_HANDLE:-}"; then
+      local reviewer_arms
+      reviewer_arms="$(IFS=,; printf '%s' "${candidate_arms[*]}")"
+      if [[ "${product_class}" == "product" ]] && ! spawn_product_close "${sig8}" "${candidate}" "${LAST_WORKER_HANDLE:-}" "${reviewer_arms}"; then
         # The worker is already live; make the failed postflight launch visible rather than
         # pretending close evidence will arrive.  Do not kill the independently-owned worker.
         log_err "product close gate could not be launched for task=${sig8}"

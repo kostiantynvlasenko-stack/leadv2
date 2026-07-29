@@ -40,4 +40,49 @@ fi
 
 if [[ "${REVIEW_ON}" != 1 ]]; then
   emit decision "review_gate task=${TASK} status=disabled reason=kill_switch"
+  exit 0
+fi
+
+# REVIEWER_ARMS is an availability result supplied by the router/quota layer. Removing the
+# author is the cross-provider correctness constraint, not an operator exclusion. A conflict
+# is a finding: a same-provider-only pool must never turn into a silent skip.
+arms="${LEADV2_DISPATCH_REVIEWER_ARMS:-codex,sonnet}"
+reviewer=""
+IFS=',' read -r -a candidates <<< "${arms}"
+for candidate in "${candidates[@]}"; do
+  [[ "${candidate}" == "${AUTHOR}" || -z "${candidate}" ]] && continue
+  case "${candidate}" in codex|sonnet) reviewer="${candidate}"; break;; esac
+done
+if [[ -z "${reviewer}" ]]; then
+  printf 'status: conflict\nauthor: %s\navailable_reviewer_arms: %s\n' "${AUTHOR}" "${arms}" > "${HANDOFF}/review-gate.md"
+  emit decision "review_gate task=${TASK} status=conflict author=${AUTHOR} available=${arms} reason=no_cross_provider_reviewer"
+  exit 0
+fi
+
+diff_file="${HANDOFF}/review.diff"
+git -C "${ROOT}" diff HEAD > "${diff_file}" 2>/dev/null || true
+diff_hash="$(shasum -a 256 "${diff_file}" | awk '{print $1}')"
+# Dedup is checked BEFORE spending a second provider. record-review below remains the
+# atomic writer that resolves a concurrent race; in that case the duplicate result is also
+# journaled instead of masquerading as a new review.
+ledger="${LEADV2_DISPATCH_CACHE_DIR:-${HOME}/.claude/cache}/review-ledger/$(basename "${ROOT}").jsonl"
+if [[ -f "${ledger}" ]] && grep -qF "\"diff_hash\":\"${diff_hash}\"" "${ledger}"; then
+  emit decision "review_gate task=${TASK} status=dedup diff=${diff_hash:0:8}"
+  exit 0
+fi
+review_out="${HANDOFF}/review-${reviewer}.md"
+if [[ "${reviewer}" == codex ]]; then
+  bash "${LEADV2_DISPATCH_CODEX_BIN:-${SCRIPT_DIR}/codex-task.sh}" adversarial-review --base HEAD --wait > "${review_out}" 2>&1; review_rc=$?
+else
+  mission_file="${HANDOFF}/review-mission.md"
+  printf 'Review ONLY the diff at %s. Return Critical/High correctness findings or clean. You are independent of the author (%s).\n' "${diff_file}" "${AUTHOR}" > "${mission_file}"
+  PROJECT_ROOT="${ROOT}" bash "${LEADV2_DISPATCH_ARCHITECT_BIN:-${SCRIPT_DIR}/claude-subsession.sh}" --role critic --model sonnet --task-id "dispatch-${TASK}-review" --mission-file "${mission_file}" --wait > "${review_out}" 2>&1; review_rc=$?
+fi
+verdict=PASS_WITH_NITS; [[ ${review_rc} -ne 0 ]] && verdict=FAIL
+record_out="$(LEADV2_DISPATCH_CACHE_DIR="${LEADV2_DISPATCH_CACHE_DIR:-}" LEADV2_JOURNAL_BIN="${JOURNAL_BIN}" \
+  bash "${DISPATCH_BIN}" record-review --diff-hash "${diff_hash}" --verdict "${verdict}" --reviewer "${reviewer}" --run-id "dispatch-${TASK}" 2>&1)"; record_rc=$?
+if [[ ${record_rc} -eq 2 ]]; then
+  emit decision "review_gate task=${TASK} status=dedup diff=${diff_hash:0:8}"
+else
+  emit decision "review_gate task=${TASK} status=ran author=${AUTHOR} reviewer=${reviewer} verdict=${verdict} diff=${diff_hash:0:8} ledger_rc=${record_rc}"
 fi
