@@ -955,6 +955,22 @@ spawn_worker() {
   return ${rc}
 }
 
+spawn_product_close() { # <sig8> <author arm> <normalized handle>
+  local sig8="$1" author="$2" handle="$3"
+  [[ "${E2E_GATE}" == "1" || "${REVIEW_GATE}" == "1" ]] || return 0
+  local close_bin="${LEADV2_DISPATCH_PRODUCT_CLOSE_BIN:-${SCRIPT_DIR}/leadv2-dispatch-product-close.sh}"
+  if [[ ! -f "${close_bin}" ]]; then
+    emit decision "product_close task=${sig8} status=failed reason=close_script_missing"
+    return 1
+  fi
+  PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_DISPATCH_CACHE_DIR="${CACHE_DIR}" \
+    LEADV2_JOURNAL_BIN="${JOURNAL_BIN}" LEADV2_DISPATCH_CODEX_BIN="${CODEX_BIN}" \
+    LEADV2_DISPATCH_ARCHITECT_BIN="${ARCHITECT_BIN}" \
+    bash "${close_bin}" "${PROJECT_ROOT}" "${sig8}" "${author}" "${handle}" "${E2E_GATE}" "${REVIEW_GATE}" \
+      >/dev/null 2>&1 &
+  emit decision "product_close task=${sig8} status=spawned author=${author}"
+}
+
 # A launcher can decline an arm without being broken.  The GLM quota gate's
 # documented REROUTE message is such an admission decision; test launchers and
 # future gates may use the explicit LEADV2_DISPATCH_REFUSED marker.  Keep this
@@ -1188,6 +1204,7 @@ atomic_dispatch_reserve_spawn_confirm() {  # <sig> <arm> <rule> <mission> <sig8>
     local crc raw_handle handle
     raw_handle="$(printf '%s\n' "${spawn_out}" | sed -n 's/.*[[:space:]]handle=\(.*\)$/\1/p' | tail -1)"
     handle="$(_dispatch_normalize_handle "${arm}" "${raw_handle}")"
+    LAST_WORKER_HANDLE="${handle}"
     dispatch_confirm "${token}" "${handle}"; crc=$?
     ACTIVE_DISPATCH_TOKEN=""
     [[ ${crc} -eq 0 ]] && return 0
@@ -1606,6 +1623,11 @@ confirmation-seeking; only for a decision you cannot make yourself."
       exit 2
       ;;
     0)
+      if [[ "${product_class}" == "product" ]] && ! spawn_product_close "${sig8}" "${candidate}" "${LAST_WORKER_HANDLE:-}"; then
+        # The worker is already live; make the failed postflight launch visible rather than
+        # pretending close evidence will arrive.  Do not kill the independently-owned worker.
+        log_err "product close gate could not be launched for task=${sig8}"
+      fi
       emit decision "route_resolved by=router router=${router_label} model=${candidate} task=${sig8} rule=${rule} reason=${reason}"
       printf 'route_resolved by=router router=%s model=%s task=%s rule=%s reason=%s\n' "${router_label}" "${candidate}" "${sig8}" "${rule}" "${reason}"
       exit 0
