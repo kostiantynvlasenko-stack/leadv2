@@ -12,6 +12,7 @@ Subcmds:
   decrement_cooldown <ctx_key> <state_json> -> updated state JSON
   parse_rd    <rd_yaml_path>            -> JSON array of route-decision entries
   update      <task_id> <rd_json> <sc_json> <state_json> -> updated state JSON
+  update_outcomes <task_id> <outcomes_json> <state_json> -> updated state JSON
   stamp_meta  <state_json> <now_iso>    -> state JSON with meta stamped
   rebuild     <scorecard_content> <handoff_base_dir> -> state JSON
 """
@@ -163,6 +164,16 @@ def _ensure_arm(state: dict, ctx_key: str, arm: str, heuristic: str) -> None:
         state["arms"][ctx_key][arm] = _init_arm(arm, heuristic)
 
 
+V2_PRIOR = {"alpha": 3, "beta": 1}
+
+
+def _ensure_v2_arm(state: dict[str, Any], task_class: str, arm: str) -> None:
+    """Create an outcome-keyed v2 arm with the optimistic documented prior."""
+    state.setdefault("arms", {}).setdefault(task_class, {})
+    if arm not in state["arms"][task_class]:
+        state["arms"][task_class][arm] = dict(V2_PRIOR)
+
+
 # ── Thompson sampling ─────────────────────────────────────────────────────────
 
 def thompson_sample(ctx_key: str, allowed: list[str], heuristic: str,
@@ -188,6 +199,15 @@ def thompson_sample(ctx_key: str, allowed: list[str], heuristic: str,
             best_arm = arm
 
     return best_arm
+
+
+def thompson_sample_v2(task_class: str, allowed: list[str], state: dict[str, Any]) -> tuple[str, dict[str, float]]:
+    """Sample only eligible arms using the v2 optimistic prior for unseen keys."""
+    samples: dict[str, float] = {}
+    for arm in allowed:
+        counts = state.get("arms", {}).get(task_class, {}).get(arm, V2_PRIOR)
+        samples[arm] = random.betavariate(int(counts.get("alpha", 3)), int(counts.get("beta", 1)))
+    return max(samples, key=samples.get) if samples else "", samples
 
 
 # ── reward formula ────────────────────────────────────────────────────────────
@@ -271,7 +291,11 @@ def cmd_sample(args: list[str]) -> None:
         state = {}
 
     try:
-        chosen = thompson_sample(ctx_key, allowed, heuristic, state)
+        if os.environ.get("LEADV2_ROUTER_V2", "0") == "1":
+            chosen, samples = thompson_sample_v2(ctx_key, allowed, state)
+            print("samples=" + json.dumps(samples, sort_keys=True))
+        else:
+            chosen = thompson_sample(ctx_key, allowed, heuristic, state)
     except Exception:
         chosen = heuristic
 
@@ -428,6 +452,61 @@ def cmd_update(args: list[str]) -> None:
     print(json.dumps(state))
 
 
+def cmd_update_outcomes(args: list[str]) -> None:
+    """Apply v2 route outcomes, once per task id, keyed by (arm, task_class).
+
+    The route outcome is the source of truth: dispatch attempts do not earn a
+    success.  This must remain separate from the legacy scorecard updater while
+    router v2 is flag-gated.
+    """
+    task_id, outcomes_raw, state_raw = args[0], args[1], args[2]
+    try:
+        outcomes = json.loads(outcomes_raw) if outcomes_raw.strip() else []
+        if not isinstance(outcomes, list):
+            outcomes = []
+    except Exception:
+        outcomes = []
+    try:
+        state = json.loads(state_raw) if state_raw.strip().startswith("{") else {}
+    except Exception:
+        state = {}
+
+    state.setdefault("version", 1)
+    state.setdefault("arms", {})
+    state.setdefault("cooldowns", {})
+    state.setdefault("meta", {})
+    applied = state["meta"].setdefault("applied_task_ids", [])
+
+    # A close invokes us for one task; tolerate a multi-row fixture / retried
+    # recorder by applying every row for that task atomically under the same id.
+    matching = [row for row in outcomes if isinstance(row, dict) and row.get("task_id") == task_id]
+    if task_id in applied:
+        print(json.dumps(state))
+        return
+    if not matching:
+        print(json.dumps(state))
+        return
+
+    for row in matching:
+        arm = row.get("arm")
+        task_class = row.get("task_class")
+        if not isinstance(arm, str) or not arm or not isinstance(task_class, str) or not task_class:
+            continue
+        _ensure_v2_arm(state, task_class, arm)
+        counts = state["arms"][task_class][arm]
+        success = (row.get("committed") is True and
+                   row.get("review_verdict") != "blocked" and
+                   isinstance(row.get("fix_rounds"), int) and row["fix_rounds"] <= 2)
+        if success:
+            counts["alpha"] = int(counts.get("alpha", V2_PRIOR["alpha"])) + 1
+        else:
+            counts["beta"] = int(counts.get("beta", V2_PRIOR["beta"])) + 1
+
+    applied.append(task_id)
+    state["meta"]["applied_task_ids"] = applied[-500:]
+    print(json.dumps(state))
+
+
 def cmd_stamp_meta(args: list[str]) -> None:
     state_raw, now_iso = args[0], args[1]
     try:
@@ -504,6 +583,7 @@ CMDS = {
     "decrement_cooldown":  cmd_decrement_cooldown,
     "parse_rd":            cmd_parse_rd,
     "update":              cmd_update,
+    "update_outcomes":     cmd_update_outcomes,
     "stamp_meta":          cmd_stamp_meta,
     "rebuild":             cmd_rebuild,
 }

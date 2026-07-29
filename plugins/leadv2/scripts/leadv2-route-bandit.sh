@@ -10,6 +10,7 @@
 #
 #   leadv2-route-bandit.sh update \
 #     --task-id BANDIT-01 \
+#     [--outcomes-file /path/to/route-outcomes.jsonl] \
 #     [--state-file /path] \
 #     [--scorecard-file /path]
 #
@@ -172,13 +173,14 @@ _decrement_cooldown() {
 # ── UPDATE subcommand ─────────────────────────────────────────────────────────
 
 cmd_update() {
-  local task_id="" state_file="" scorecard_file=""
+  local task_id="" state_file="" scorecard_file="" outcomes_file=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --task-id)        task_id="$2";        shift 2 ;;
       --state-file)     state_file="$2";     shift 2 ;;
       --scorecard-file) scorecard_file="$2"; shift 2 ;;
+      --outcomes-file)  outcomes_file="$2";  shift 2 ;;
       *) shift ;;
     esac
   done
@@ -207,6 +209,54 @@ cmd_update() {
     # The old fallback $(cd "$SCRIPT_DIR/../.." && pwd) resolves to the plugin repo, not
     # the consuming repo, causing rd_file to be looked up in the wrong tree → skipped.
     proj_root="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+
+    # Router v2 learns only from recorded close outcomes, never from dispatch
+    # decisions or the legacy scorecard reward.  Keeping this branch behind the
+    # v2 flag makes rollback a single env flip and leaves existing routing byte-
+    # compatible while the flag is off.
+    if [[ "${LEADV2_ROUTER_V2:-0}" == "1" ]]; then
+      outcomes_file="${outcomes_file:-${proj_root}/docs/leadv2/route-outcomes.jsonl}"
+      if [[ ! -f "$outcomes_file" ]]; then
+        log_info "update: no route outcomes for task $task_id; skipping"
+        printf 'update_result=skipped\n'
+        return 0
+      fi
+
+      local outcomes_json state_json="{}" new_state_json now_iso
+      outcomes_json="$(python3 -c '
+import json, sys
+rows = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    try:
+        rows.append(json.loads(line))
+    except (OSError, ValueError, json.JSONDecodeError):
+        continue
+print(json.dumps(rows))
+' "$outcomes_file" 2>/dev/null)" || outcomes_json="[]"
+      if [[ -f "$state_file" ]]; then
+        state_json="$(_state_to_json "$state_file")" || state_json="{}"
+      fi
+      # Do not even restamp metadata on a replay: T11's idempotency contract is
+      # state-byte-for-state-byte, not merely unchanged alpha/beta values.
+      if python3 -c 'import json,sys; sys.exit(0 if sys.argv[1] in json.loads(sys.argv[2]).get("meta", {}).get("applied_task_ids", []) else 1)' \
+        "$task_id" "$state_json" 2>/dev/null; then
+        log_info "update: outcome task $task_id already applied; no-op"
+        printf 'update_result=ok\n'
+        return 0
+      fi
+      new_state_json="$(python3 "$PY_HELPER" update_outcomes "$task_id" "$outcomes_json" "$state_json" 2>/dev/null)" || {
+        log_err "update: v2 outcome update failed"
+        printf 'update_result=error\n'
+        return 0
+      }
+      now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+      new_state_json="$(python3 "$PY_HELPER" stamp_meta "$new_state_json" "$now_iso" 2>/dev/null)" || true
+      _write_state "$new_state_json" "$state_file" || { printf 'update_result=error\n'; return 0; }
+      log_info "update: outcome state updated for task $task_id"
+      printf 'update_result=ok\n'
+      return 0
+    fi
+
     local handoff_dir="${proj_root}/docs/handoff/${task_id}"
     local rd_file="${handoff_dir}/route-decisions.yaml"
 
