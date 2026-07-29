@@ -206,6 +206,41 @@ except Exception:
 }
 trap _cleanup_sentinel EXIT
 
+PUMP_SH="${SCRIPT_DIR}/leadv2-backlog-pump.sh"
+
+# BACKLOG-PUMP-01: this loop already owns the sleep/poll cadence (off_limits:
+# "no sleep/poll loop owned by the LLM") — the pump's refill trigger belongs
+# here, not in the lead's turn. Gated by LEADV2_BACKLOG_PUMP so an unset/0
+# value is a zero-cost no-op call (leadv2-backlog-pump.sh itself checks and
+# returns immediately; the cheap env check here just skips the subprocess
+# entirely when the pump was never turned on).
+_run_pump_on_close() {
+  local out_json="$1"
+  [[ "${LEADV2_BACKLOG_PUMP:-0}" == "1" ]] || return 0
+  [[ -x "$PUMP_SH" ]] || return 0
+  local closed_ids
+  closed_ids="$(python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(0)
+for tid in (d.get('closed_since_last') or []):
+    print(tid)
+" "$out_json" 2>/dev/null || true)"
+  local tid
+  while IFS= read -r tid; do
+    [[ -z "$tid" ]] && continue
+    bash "$PUMP_SH" reap "$tid" >>"$LOG_FILE" 2>&1 || true
+  done <<<"$closed_ids"
+  # Refill regardless of whether anything closed THIS cycle — capacity can
+  # also free up from a manual close, or the pump can be freshly enabled
+  # while lanes already sit idle (the exact founder complaint this exists
+  # to fix): "capacity free + queue non-empty" must not depend on a fresh
+  # event to notice.
+  bash "$PUMP_SH" check >>"$LOG_FILE" 2>&1 || true
+}
+
 _render_events() {
   local out_json="$1"
   python3 - "$out_json" "$LOG_FILE" <<'PYEV'
@@ -423,6 +458,7 @@ while true; do
       "$(_now_iso)" "$RC" "$(printf -- '%s' "$OUT" | tr '\n' ' ' | cut -c1-180)" >>"$LOG_FILE"
   else
     _render_events "$OUT"
+    _run_pump_on_close "$OUT"
   fi
 
   NOW_EPOCH=$(date +%s)
