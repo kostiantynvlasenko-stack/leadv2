@@ -88,6 +88,7 @@ _wait_dead() {  # <pid> <timeout_s>
 
 _checkpoint_note() { printf '%s/docs/handoff/dispatch-%s/CHECKPOINT.md' "${ROOT}" "$1"; }
 _sentinel()         { printf '%s/docs/handoff/dispatch-%s/phase8-passed.flag' "${ROOT}" "$1"; }
+_stream()           { printf '%s/docs/handoff/dispatch-%s/developer.stream.jsonl' "${ROOT}" "$1"; }
 
 # ── 1. dead + fresh CHECKPOINT.md + no sentinel -> re-dispatch succeeds ─────────────
 m1="task: turncap-cutoff-lane $$ $(date +%s)"
@@ -187,6 +188,81 @@ if [[ ${rc4} -eq 0 && -n "${pid4}" && -n "${sig8_4}" ]] && _wait_dead "${pid4}" 
 else
   fail "4: setup — first dispatch or process-death wait failed (rc=${rc4})"
 fi
+
+# ── 5. stream terminal max_turns + attributed partial commit -> re-dispatch succeeds ──
+m5="task: stream-maxturns-cutoff-lane $$ $(date +%s)"
+FAKE_SONNET_BEHAVIOR=quick out5="$(_dispatch "${m5}")"; rc5=$?
+pid5="$(_pid_from_output "${out5}")"; sig8_5="$(_sig8_from_output "${out5}")"
+if [[ ${rc5} -eq 0 && -n "${pid5}" && -n "${sig8_5}" ]] && _wait_dead "${pid5}" 5; then
+  sleep 1
+  stream5="$(_stream "${sig8_5}")"
+  mkdir -p "$(dirname "${stream5}")"
+  printf '{"terminal_reason":"max_turns"}\n' > "${stream5}"
+  ( cd "${ROOT}" && printf 'partial stream work\n' >> platform/partial_stream_work.py \
+    && git add platform/partial_stream_work.py "docs/handoff/dispatch-${sig8_5}/developer.stream.jsonl" \
+    && git commit -qm "partial work dispatch-${sig8_5}" )
+  sleep 1
+  out5b="$(_dispatch "${m5}")"; rc5b=$?
+  if [[ ${rc5b} -eq 0 ]] && grep -q 'route_resolved' <<<"${out5b}"; then
+    pass "5: terminal max_turns frees a lane despite its attributed partial commit"
+  else
+    fail "5: expected rc=0 after max_turns, got rc=${rc5b} out=${out5b}"
+  fi
+else
+  fail "5: setup — first dispatch or process-death wait failed (rc=${rc5})"
+fi
+
+# ── 6. a real phase-8 sentinel wins over a max_turns stream ────────────────────────
+m6="task: stream-maxturns-completed-lane $$ $(date +%s)"
+FAKE_SONNET_BEHAVIOR=quick out6="$(_dispatch "${m6}")"; rc6=$?
+pid6="$(_pid_from_output "${out6}")"; sig8_6="$(_sig8_from_output "${out6}")"
+if [[ ${rc6} -eq 0 && -n "${pid6}" && -n "${sig8_6}" ]] && _wait_dead "${pid6}" 5; then
+  sleep 1
+  stream6="$(_stream "${sig8_6}")"; sentinel6="$(_sentinel "${sig8_6}")"
+  mkdir -p "$(dirname "${stream6}")"
+  printf '{"subtype":"error_max_turns"}\n' > "${stream6}"
+  : > "${sentinel6}"
+  ( cd "${ROOT}" && printf 'completed after cap\n' >> platform/completed_stream_work.py \
+    && git add platform/completed_stream_work.py "docs/handoff/dispatch-${sig8_6}/developer.stream.jsonl" "docs/handoff/dispatch-${sig8_6}/phase8-passed.flag" \
+    && git commit -qm "completed work dispatch-${sig8_6}" )
+  sleep 1
+  out6b="$(_dispatch "${m6}")"; rc6b=$?
+  if [[ ${rc6b} -eq 2 ]] && grep -q 'duplicate_task_signature' <<<"${out6b}"; then
+    pass "6: phase-8 sentinel blocks despite terminal max_turns stream"
+  else
+    fail "6: expected rc=2 with phase-8 sentinel, got rc=${rc6b} out=${out6b}"
+  fi
+else
+  fail "6: setup — first dispatch or process-death wait failed (rc=${rc6})"
+fi
+
+# ── 7. missing or malformed stream never proves cutoff; attributed work still blocks ─
+for stream_case in missing malformed; do
+  mission="task: stream-${stream_case}-conservative-lane $$ $(date +%s)"
+  FAKE_SONNET_BEHAVIOR=quick out7="$(_dispatch "${mission}")"; rc7=$?
+  pid7="$(_pid_from_output "${out7}")"; sig8_7="$(_sig8_from_output "${out7}")"
+  if [[ ${rc7} -eq 0 && -n "${pid7}" && -n "${sig8_7}" ]] && _wait_dead "${pid7}" 5; then
+    sleep 1
+    if [[ "${stream_case}" == malformed ]]; then
+      stream7="$(_stream "${sig8_7}")"
+      mkdir -p "$(dirname "${stream7}")"
+      printf '{"terminal_reason":"max_turns"}\nnot-json\n' > "${stream7}"
+    fi
+    ( cd "${ROOT}" && printf '%s partial\n' "${stream_case}" >> "platform/${stream_case}_stream_work.py" \
+      && git add "platform/${stream_case}_stream_work.py" ${stream7:+"docs/handoff/dispatch-${sig8_7}/developer.stream.jsonl"} \
+      && git commit -qm "partial work dispatch-${sig8_7}" )
+    sleep 1
+    out7b="$(_dispatch "${mission}")"; rc7b=$?
+    if [[ ${rc7b} -eq 2 ]] && grep -q 'duplicate_task_signature' <<<"${out7b}"; then
+      pass "7/${stream_case}: unprovable cutoff remains blocked"
+    else
+      fail "7/${stream_case}: expected rc=2 for unprovable cutoff, got rc=${rc7b} out=${out7b}"
+    fi
+  else
+    fail "7/${stream_case}: setup — first dispatch or process-death wait failed (rc=${rc7})"
+  fi
+  unset stream7
+done
 
 printf '\n[TEST] %s passed, %s failed\n' "${PASS}" "${FAIL}"
 if (( FAIL > 0 )); then
