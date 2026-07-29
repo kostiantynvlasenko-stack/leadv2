@@ -32,6 +32,8 @@
 #     (same fail-closed order as leadv2-supervise.sh; no script-dir fallback)
 #   LEADV2_SUPERVISE_EVENT_POLL_S   — event poll interval seconds (default 5)
 #   LEADV2_SUPERVISE_PULSE_S        — full pulse interval seconds (default 300)
+#   LEADV2_SUPERVISE_BROAD_STATUS_S — founder broad-status cadence seconds
+#     (default 1800; 0 disables as a one-step rollback)
 #   LEADV2_SUPERVISE_LOOP_MAX_CYCLES — exit after N event-poll cycles (test
 #     determinism; 0/unset = run forever)
 #   LEADV2_SUPERVISE_LOOP_PULSE_ON_START=1 — force a pulse on the FIRST cycle
@@ -89,6 +91,7 @@ ACTIVE_YAML="$(PROJECT_ROOT="$PROJECT_ROOT" "$STATE_PATH_SH" active.yaml)"
 
 EVENT_POLL_S="${LEADV2_SUPERVISE_EVENT_POLL_S:-5}"
 PULSE_S="${LEADV2_SUPERVISE_PULSE_S:-300}"
+BROAD_STATUS_S="${LEADV2_SUPERVISE_BROAD_STATUS_S:-1800}"
 MAX_CYCLES="${LEADV2_SUPERVISE_LOOP_MAX_CYCLES:-0}"
 
 # EFFICIENCY-TUNE-01 C: job-registry stall/done detection.
@@ -207,6 +210,7 @@ except Exception:
 trap _cleanup_sentinel EXIT
 
 PUMP_SH="${SCRIPT_DIR}/leadv2-backlog-pump.sh"
+BROAD_STATUS_SH="${SCRIPT_DIR}/leadv2-broad-status.sh"
 
 # BACKLOG-PUMP-01: this loop already owns the sleep/poll cadence (off_limits:
 # "no sleep/poll loop owned by the LLM") — the pump's refill trigger belongs
@@ -441,8 +445,10 @@ PYJOBS
 }
 
 LAST_PULSE_EPOCH=0
+LAST_BROAD_STATUS_EPOCH=$(date +%s)
 if [[ "${LEADV2_SUPERVISE_LOOP_PULSE_ON_START:-0}" == "1" ]]; then
   LAST_PULSE_EPOCH=0
+  LAST_BROAD_STATUS_EPOCH=0
 else
   LAST_PULSE_EPOCH=$(date +%s)
 fi
@@ -469,6 +475,19 @@ while true; do
     fi
     _render_job_registry
     LAST_PULSE_EPOCH=$NOW_EPOCH
+  fi
+
+  # The supervisor never reads or composes this status: the helper gathers
+  # facts and makes one cheap model call, then writes a finished block here.
+  if [[ "$BROAD_STATUS_S" =~ ^[0-9]+$ ]] && (( BROAD_STATUS_S > 0 )) \
+      && (( NOW_EPOCH - LAST_BROAD_STATUS_EPOCH >= BROAD_STATUS_S )); then
+    if [[ -x "$BROAD_STATUS_SH" ]]; then
+      bash "$BROAD_STATUS_SH" >>"$LOG_FILE" 2>&1 || \
+        printf -- '%s [BROAD_STATUS] failure: quality read unavailable\n' "$(_now_iso)" >>"$LOG_FILE"
+    else
+      printf -- '%s [BROAD_STATUS] failure: composer unavailable; quality read unavailable\n' "$(_now_iso)" >>"$LOG_FILE"
+    fi
+    LAST_BROAD_STATUS_EPOCH=$NOW_EPOCH
   fi
 
   if [[ "$MAX_CYCLES" -gt 0 && "$CYCLE" -ge "$MAX_CYCLES" ]]; then
