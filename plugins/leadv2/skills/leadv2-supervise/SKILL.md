@@ -155,6 +155,14 @@ Both scripts below are REAL, canonical, and live in this plugin's
   fine for an embedded subagent in the SAME session/worktree as the lead.
   Answered via `scripts/leadv2-reply.sh --task-id <id> <qid> <option>`.
 
+`/leadv2 reply <q-id> <option>` itself never picks between the two scripts by
+hand (LANE-QUESTION-DELIVERY-01) — it calls `scripts/leadv2-reply-router.sh
+<q-id> <option>`, which checks the control-plane store first and falls back
+to a `docs/handoff/*/questions-async/<qid>-pending.yaml` glob, then execs the
+matching one of the two scripts above. A qid found in neither store, or in
+both (id collision), fails loudly naming what was checked — never a silent
+no-op.
+
 `leadv2-supervise.sh` dual-reads both stores (it never writes to either
 except via the same reply calls a founder-driven `/leadv2 reply` would make)
 so the supervising lead sees pending questions regardless of which store a

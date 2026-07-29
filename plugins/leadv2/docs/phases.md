@@ -32,7 +32,7 @@ Agent tool is the default. claude-subsession ONLY for task-queue meetings (PO/ar
 
 ## §Invocation
 
-**Reply mode** (`/leadv2 reply <q-id> <option>`): Detect if args start with `reply`. Extract `<q-id>` and `<option>`. Resolve task-id via content-based grep: `grep -rl "qid:.*${qid}" docs/handoff/*/questions-async/*-pending.yaml | head -1`. If ambiguous (multiple matches) or not found, hard-fail with Russian error. Call `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-reply.sh" --task-id <task_id> <q-id> <option>`. Exit immediately — do NOT enter 9-phase loop.
+**Reply mode** (`/leadv2 reply <q-id> <option>`): Detect if args start with `reply`. Extract `<q-id>` and `<option>`. Call `bash "${CLAUDE_PLUGIN_ROOT}/scripts/leadv2-reply-router.sh" <q-id> <option>` — it resolves BOTH question stores (control-plane `<state-root>/questions/<qid>.yaml`, canonical for fanned-out/adopted lanes; and legacy-handoff `docs/handoff/*/questions-async/<qid>-pending.yaml`, worktree-local for embedded same-session subagents) and dispatches to whichever one holds the qid — do NOT grep or pick a store by hand, and do NOT call `leadv2-reply.sh` directly (LANE-QUESTION-DELIVERY-01: a control-plane q-id, which is what every fanned-out lane actually uses, has no legacy-handoff file and a direct grep silently hard-fails). Relay the router's stdout/stderr verbatim; a non-zero exit already carries a Russian error naming what was expected. Exit immediately — do NOT enter 9-phase loop.
 
 **Pulse-mode** (`LEADV2_PULSE_MODE=1`): **On by default** (project env sets `LEADV2_PULSE_MODE=1`). Disable with `LEADV2_PULSE_MODE=0`.
 
