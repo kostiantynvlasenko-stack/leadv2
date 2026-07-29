@@ -251,7 +251,6 @@ print(json.dumps(est))
 # ── journal helper (best-effort, never fatal) ───────────────────────────────
 _journal() {
   local estimate_json="$1" cache_hit="$2"
-  [[ -n "${TASK_ID}" && -f "${JOURNAL_BIN}" ]] || return 0
   local src complexity work_kind duration_class risk_class subsystems live
   src="$(python3 -c "import json,sys; print(json.load(sys.stdin).get('estimate_source',''))" <<<"${estimate_json}" 2>/dev/null)"
   complexity="$(python3 -c "import json,sys; print(json.load(sys.stdin).get('complexity',''))" <<<"${estimate_json}" 2>/dev/null)"
@@ -260,9 +259,22 @@ _journal() {
   risk_class="$(python3 -c "import json,sys; print(json.load(sys.stdin).get('risk_class',''))" <<<"${estimate_json}" 2>/dev/null)"
   subsystems="$(python3 -c "import json,sys; print(json.load(sys.stdin).get('subsystems_touched',''))" <<<"${estimate_json}" 2>/dev/null)"
   live="$(python3 -c "import json,sys; print(json.load(sys.stdin).get('needs_live_verification',''))" <<<"${estimate_json}" 2>/dev/null)"
-  bash "${JOURNAL_BIN}" append "${TASK_ID}" decision \
-    "route_v2_estimate estimate_id=${SIG8} estimate_source=${src} complexity=${complexity} work_kind=${work_kind} duration_class=${duration_class} risk_class=${risk_class} subsystems_touched=${subsystems} needs_live_verification=${live} cache_hit=${cache_hit}" \
-    >/dev/null 2>&1 || true
+  if [[ -n "${TASK_ID}" && -f "${JOURNAL_BIN}" ]]; then
+    bash "${JOURNAL_BIN}" append "${TASK_ID}" decision \
+      "route_v2_estimate estimate_id=${SIG8} estimate_source=${src} complexity=${complexity} work_kind=${work_kind} duration_class=${duration_class} risk_class=${risk_class} subsystems_touched=${subsystems} needs_live_verification=${live} cache_hit=${cache_hit}" \
+      >/dev/null 2>&1 || true
+  fi
+  # T13's audit joins durable estimate records against close outcomes.  The
+  # append is v2-gated and locked, so flag-off judge behavior remains unchanged.
+  if [[ "${LEADV2_ROUTER_V2:-0}" == "1" ]]; then
+    local estimates_file="${PROJECT_ROOT}/${_leadv2_dir}/route-estimates.jsonl"
+    mkdir -p "$(dirname "${estimates_file}")"
+    (
+      flock -x 200
+      python3 -c 'import json,sys; row=json.loads(sys.argv[1]); row["task_id"]=sys.argv[2]; print(json.dumps(row, sort_keys=True))' \
+        "${estimate_json}" "${TASK_ID:-unknown}" >> "${estimates_file}"
+    ) 200>"${estimates_file}.lock" || true
+  fi
 }
 
 _emit() {

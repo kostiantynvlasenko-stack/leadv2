@@ -13,6 +13,7 @@ Subcmds:
   parse_rd    <rd_yaml_path>            -> JSON array of route-decision entries
   update      <task_id> <rd_json> <sc_json> <state_json> -> updated state JSON
   update_outcomes <task_id> <outcomes_json> <state_json> -> updated state JSON
+  judge_audit <estimates_json> <outcomes_json> -> calibration report
   stamp_meta  <state_json> <now_iso>    -> state JSON with meta stamped
   rebuild     <scorecard_content> <handoff_base_dir> -> state JSON
 """
@@ -71,9 +72,9 @@ def parse_yaml_text(text: str) -> dict[str, Any]:
                 state["cooldowns"][current_ctx] = {}
         elif indent == 4 and current_section == "arms" and current_ctx is not None:
             # arm line: sonnet:   {alpha: 8, beta: 2}
-            m = re.match(r'([\w+\-]+):\s*\{alpha:\s*(\d+),\s*beta:\s*(\d+)\}', line)
+            m = re.match(r'([\w+\-]+):\s*\{alpha:\s*([\d.]+),\s*beta:\s*([\d.]+)\}', line)
             if m:
-                arm_name, a, b = m.group(1), int(m.group(2)), int(m.group(3))
+                arm_name, a, b = m.group(1), float(m.group(2)), float(m.group(3))
                 state["arms"][current_ctx][arm_name] = {"alpha": a, "beta": b}
         elif indent == 4 and current_section == "cooldowns" and current_ctx is not None:
             if ":" in line:
@@ -123,8 +124,10 @@ def state_to_yaml(state: dict[str, Any]) -> str:
         lines.append(f"  {json.dumps(ctx_key)}:")
         for arm_name in sorted(ctx_arms):
             ab = ctx_arms[arm_name]
-            a = int(ab.get("alpha", 1))
-            b = int(ab.get("beta", 1))
+            a = float(ab.get("alpha", 1))
+            b = float(ab.get("beta", 1))
+            a = int(a) if a.is_integer() else round(a, 6)
+            b = int(b) if b.is_integer() else round(b, 6)
             lines.append(f"    {arm_name}:   {{alpha: {a}, beta: {b}}}")
 
     lines.append("cooldowns:")
@@ -204,9 +207,17 @@ def thompson_sample(ctx_key: str, allowed: list[str], heuristic: str,
 def thompson_sample_v2(task_class: str, allowed: list[str], state: dict[str, Any]) -> tuple[str, dict[str, float]]:
     """Sample only eligible arms using the v2 optimistic prior for unseen keys."""
     samples: dict[str, float] = {}
+    undersampled: list[str] = []
     for arm in allowed:
         counts = state.get("arms", {}).get(task_class, {}).get(arm, V2_PRIOR)
-        samples[arm] = random.betavariate(int(counts.get("alpha", 3)), int(counts.get("beta", 1)))
+        alpha, beta = float(counts.get("alpha", 3)), float(counts.get("beta", 1))
+        if max(0.0, alpha + beta - 4.0) < 10:
+            undersampled.append(arm)
+        samples[arm] = random.betavariate(alpha, beta)
+    # Lifecycle exploration is constrained to the allowed set supplied by L1/L3;
+    # a filtered arm has no route back through this code path.
+    if undersampled and random.random() < 0.1:
+        return random.choice(undersampled), samples
     return max(samples, key=samples.get) if samples else "", samples
 
 
@@ -498,13 +509,68 @@ def cmd_update_outcomes(args: list[str]) -> None:
                    row.get("review_verdict") != "blocked" and
                    isinstance(row.get("fix_rounds"), int) and row["fix_rounds"] <= 2)
         if success:
-            counts["alpha"] = int(counts.get("alpha", V2_PRIOR["alpha"])) + 1
+            counts["alpha"] = float(counts.get("alpha", V2_PRIOR["alpha"])) + 1
         else:
-            counts["beta"] = int(counts.get("beta", V2_PRIOR["beta"])) + 1
+            counts["beta"] = float(counts.get("beta", V2_PRIOR["beta"])) + 1
 
     applied.append(task_id)
     state["meta"]["applied_task_ids"] = applied[-500:]
     print(json.dumps(state))
+
+
+def cmd_reset_arm(args: list[str]) -> None:
+    """Reset or decay all v2 rows for one arm, preserving mean on decay."""
+    arm, mode, state_raw = args[0], args[1], args[2]
+    try:
+        state = json.loads(state_raw) if state_raw.strip().startswith("{") else {}
+    except Exception:
+        state = {}
+    state.setdefault("version", 1)
+    state.setdefault("arms", {})
+    state.setdefault("cooldowns", {})
+    state.setdefault("meta", {})
+    for task_class, arms in state["arms"].items():
+        if arm not in arms:
+            continue
+        if mode == "reset":
+            arms[arm] = dict(V2_PRIOR)
+        elif mode == "decay":
+            counts = arms[arm]
+            # Scaling both Beta parameters preserves alpha/(alpha+beta) exactly,
+            # while halving the evidence count n (and accepts float parameters).
+            arms[arm] = {
+                "alpha": float(counts.get("alpha", 3)) / 2.0,
+                "beta": float(counts.get("beta", 1)) / 2.0,
+            }
+    print(json.dumps(state))
+
+
+def cmd_judge_audit(args: list[str]) -> None:
+    """Join route estimates to outcomes and print compact calibration evidence."""
+    try:
+        estimates = json.loads(args[0]) if args[0].strip() else []
+        outcomes = json.loads(args[1]) if args[1].strip() else []
+    except Exception:
+        estimates, outcomes = [], []
+    estimate_by_id = {r.get("estimate_id"): r for r in estimates if isinstance(r, dict) and r.get("estimate_id")}
+    joined = [(estimate_by_id.get(row.get("estimate_id")), row) for row in outcomes if isinstance(row, dict) and row.get("estimate_id") in estimate_by_id]
+    if not outcomes:
+        print("no data")
+        return
+    if not joined:
+        print("no data (outcomes have no matching estimates)")
+        return
+    fallback = sum(1 for est, row in joined if row.get("estimate_source", est.get("estimate_source")) == "fallback")
+    print("fallback_share=%d/%d=%.1f%%" % (fallback, len(joined), 100 * fallback / len(joined)))
+    for complexity in ("trivial", "simple", "standard", "complex"):
+        rows = [(est, row) for est, row in joined if est.get("complexity") == complexity]
+        if not rows:
+            print("complexity=%s count=0 miscalibration=unknown" % complexity)
+            continue
+        bad = [(est, row) for est, row in rows if isinstance(row.get("fix_rounds"), int) and row["fix_rounds"] >= 3]
+        print("complexity=%s count=%d fix_rounds>=3=%d rate=%.1f%%" % (complexity, len(rows), len(bad), 100 * len(bad) / len(rows)))
+        for _, row in bad:
+            print("  said=%s task_id=%s estimate_id=%s fix_rounds=%s" % (complexity, row.get("task_id", "unknown"), row.get("estimate_id", "unknown"), row.get("fix_rounds")))
 
 
 def cmd_stamp_meta(args: list[str]) -> None:
@@ -584,6 +650,8 @@ CMDS = {
     "parse_rd":            cmd_parse_rd,
     "update":              cmd_update,
     "update_outcomes":     cmd_update_outcomes,
+    "reset_arm":           cmd_reset_arm,
+    "judge_audit":         cmd_judge_audit,
     "stamp_meta":          cmd_stamp_meta,
     "rebuild":             cmd_rebuild,
 }

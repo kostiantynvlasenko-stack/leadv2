@@ -18,6 +18,13 @@
 #     [--state-file /path] \
 #     [--project-root /path]
 #
+#   leadv2-route-bandit.sh reset-arm --arm <id> --mode decay|reset [--by <operator>]
+#   leadv2-route-bandit.sh judge-audit [--estimates-file PATH] [--outcomes-file PATH]
+#
+# Model swap procedure: update the registry model, run reset-arm, then verify
+# the emitted arm_reset journal event.  This command is v2-only: the v1 phase
+# bandit remains untouched while LEADV2_ROUTER_V2 is off.
+#
 # STDOUT (sample): chosen_arm=<arm>
 # STDOUT (update): update_result=ok|skipped|error
 # STDOUT (rebuild): rebuild_result=ok|skipped|error
@@ -418,6 +425,71 @@ cmd_rebuild() {
   return 0
 }
 
+# ── RESET-ARM subcommand (T12 lifecycle) ─────────────────────────────────────
+
+cmd_reset_arm() {
+  local arm="" mode="" state_file="" operator="${USER:-unknown}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --arm)        arm="$2"; shift 2 ;;
+      --mode)       mode="$2"; shift 2 ;;
+      --state-file) state_file="$2"; shift 2 ;;
+      --by)         operator="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [[ "${LEADV2_ROUTER_V2:-0}" == "1" ]] || { printf 'reset_result=skipped\n'; return 0; }
+  [[ -n "$arm" && "$mode" =~ ^(decay|reset)$ ]] || { log_warn "reset-arm requires --arm and --mode decay|reset"; printf 'reset_result=error\n'; return 0; }
+  state_file="${state_file:-${LEADV2_BANDIT_STATE_FILE:-$(_default_state_file)}}"
+  local proj_root state_json="{}" new_state_json now_iso events_file
+  proj_root="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+  [[ -f "$state_file" ]] && state_json="$(_state_to_json "$state_file")" || true
+  new_state_json="$(python3 "$PY_HELPER" reset_arm "$arm" "$mode" "$state_json" 2>/dev/null)" || { printf 'reset_result=error\n'; return 0; }
+  now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  new_state_json="$(python3 "$PY_HELPER" stamp_meta "$new_state_json" "$now_iso" 2>/dev/null)" || true
+  _write_state "$new_state_json" "$state_file" || { printf 'reset_result=error\n'; return 0; }
+  events_file="${proj_root}/docs/leadv2/route-bandit-journal.jsonl"
+  mkdir -p "$(dirname "$events_file")"
+  (
+    flock -x 200
+    python3 -c 'import json,sys; print(json.dumps({"event":"arm_reset","arm":sys.argv[1],"mode":sys.argv[2],"by":sys.argv[3],"recorded_at":sys.argv[4]}, sort_keys=True))' \
+      "$arm" "$mode" "$operator" "$now_iso" >> "$events_file"
+  ) 200>"${events_file}.lock" || true
+  printf 'reset_result=ok\n'
+}
+
+# ── JUDGE-AUDIT subcommand (T13) ─────────────────────────────────────────────
+
+cmd_judge_audit() {
+  local estimates_file="" outcomes_file="" proj_root estimates_json="[]" outcomes_json="[]"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --estimates-file) estimates_file="$2"; shift 2 ;;
+      --outcomes-file) outcomes_file="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [[ "${LEADV2_ROUTER_V2:-0}" == "1" ]] || { printf 'no data (LEADV2_ROUTER_V2=0)\n'; return 0; }
+  proj_root="${LEADV2_PROJECT_ROOT:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+  estimates_file="${estimates_file:-${proj_root}/docs/leadv2/route-estimates.jsonl}"
+  outcomes_file="${outcomes_file:-${proj_root}/docs/leadv2/route-outcomes.jsonl}"
+  _jsonl_array() {
+    python3 -c '
+import json, sys
+rows=[]
+try:
+  for line in open(sys.argv[1], encoding="utf-8"):
+    try: rows.append(json.loads(line))
+    except (ValueError, json.JSONDecodeError): pass
+except OSError: pass
+print(json.dumps(rows))
+' "$1"
+  }
+  [[ -f "$estimates_file" ]] && estimates_json="$(_jsonl_array "$estimates_file")"
+  [[ -f "$outcomes_file" ]] && outcomes_json="$(_jsonl_array "$outcomes_file")"
+  python3 "$PY_HELPER" judge_audit "$estimates_json" "$outcomes_json" 2>/dev/null || printf 'no data\n'
+}
+
 # ── SELECT-FOR-WORKFLOW subcommand ────────────────────────────────────────────
 # Lead-side bandit selection for Workflow JS dispatch.
 # Workflow JS is sandboxed (no shell/fs), so bandit must run here before Workflow().
@@ -580,9 +652,11 @@ main() {
     sample)               cmd_sample               "$@" ;;
     update)               cmd_update               "$@" ;;
     rebuild)              cmd_rebuild              "$@" ;;
+    reset-arm)            cmd_reset_arm            "$@" ;;
+    judge-audit)          cmd_judge_audit          "$@" ;;
     select-for-workflow)  cmd_select_for_workflow  "$@" ;;
     *)
-      log_err "Unknown subcommand: '$subcmd'. Use: sample | update | rebuild | select-for-workflow"
+      log_err "Unknown subcommand: '$subcmd'. Use: sample | update | rebuild | reset-arm | judge-audit | select-for-workflow"
       exit 1
       ;;
   esac
