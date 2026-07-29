@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # leadv2-dispatch-product-close.sh — detached post-worker readiness gates for ST-9.
 # It is deliberately a script, not supervisor work: dispatch starts it only after a live
-# product worker is confirmed.  It reports an absent e2e or cross-provider conflict as a
-# finding; neither is silently passed.  Kill switches are passed explicitly by dispatch.
+# product worker is confirmed.  It reports a missing e2e entrypoint, an unscopable diff, or
+# a cross-provider conflict as a finding; none is silently passed.  Kill switches are passed
+# explicitly by dispatch.
 set -uo pipefail
 
 ROOT="${1:?root}"; TASK="${2:?task}"; AUTHOR="${3:?author}"; HANDLE="${4:-}"
 E2E_ON="${5:-1}"; REVIEW_ON="${6:-1}"
+WRITES_CSV="${LEADV2_DISPATCH_LANE_WRITES:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JOURNAL_BIN="${LEADV2_JOURNAL_BIN:-${SCRIPT_DIR}/leadv2-journal.sh}"
 DISPATCH_BIN="${LEADV2_DISPATCH_BIN:-${SCRIPT_DIR}/leadv2-dispatch-code.sh}"
@@ -26,14 +28,20 @@ fi
 
 if [[ "${E2E_ON}" != 1 ]]; then
   emit decision "e2e_gate task=${TASK} status=disabled reason=kill_switch"
-elif [[ ! -f "${ROOT}/tests/run-all.sh" ]]; then
-  printf 'status: absent\nreason: tests/run-all.sh not found\n' > "${HANDOFF}/e2e-gate.md"
-  emit decision "e2e_gate task=${TASK} status=absent reason=no_relevant_e2e"
+elif ! e2e_cmd="$(bash "${SCRIPT_DIR}/leadv2-e2e-entrypoint.sh" "${ROOT}")"; then
+  repo="$(basename "${ROOT}")"
+  printf 'status: blocked\nreason: no_e2e_entrypoint\nrepo: %s\n' "${repo}" > "${HANDOFF}/e2e-gate.md"
+  rm -f "${HANDOFF}/e2e-gate-passed.flag"
+  emit decision "e2e_gate task=${TASK} status=blocked reason=no_e2e_entrypoint repo=${repo}"
+  exit 4
 else
-  bash "${ROOT}/tests/run-all.sh" --scope changed > "${HANDOFF}/e2e-gate.log" 2>&1; e2e_rc=$?
+  bash -c "${e2e_cmd} --scope changed" > "${HANDOFF}/e2e-gate.log" 2>&1; e2e_rc=$?
   if [[ ${e2e_rc} -eq 0 ]]; then
+    printf 'e2e-gate-passed: %s\nasserted_at: %s\nscope: changed\nbypassed: false\n' \
+      "${TASK}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${HANDOFF}/e2e-gate-passed.flag"
     emit decision "e2e_gate task=${TASK} status=ran verdict=pass"
   else
+    rm -f "${HANDOFF}/e2e-gate-passed.flag"
     emit decision "e2e_gate task=${TASK} status=ran verdict=fail rc=${e2e_rc}"
   fi
 fi
@@ -60,7 +68,31 @@ if [[ -z "${reviewer}" ]]; then
 fi
 
 diff_file="${HANDOFF}/review.diff"
-git -C "${ROOT}" diff HEAD > "${diff_file}" 2>/dev/null || true
+: > "${diff_file}"
+blocked_reason=""
+if [[ -n "${WRITES_CSV}" ]]; then
+  IFS=',' read -r -a raw_writes <<< "${WRITES_CSV}"
+  writes=()
+  for w in "${raw_writes[@]}"; do
+    w="${w#"${w%%[![:space:]]*}"}"; w="${w%"${w##*[![:space:]]}"}"
+    [[ -n "${w}" ]] && writes+=("${w}")
+  done
+  if [[ ${#writes[@]} -gt 0 ]]; then
+    git -C "${ROOT}" diff HEAD -- "${writes[@]}" ':(exclude)docs/leadv2' ':(exclude)docs/handoff' > "${diff_file}" 2>/dev/null || true
+  fi
+  [[ -s "${diff_file}" ]] || blocked_reason="unscopable_diff"
+else
+  wt="$(bash "${SCRIPT_DIR}/leadv2-lane-worktree.sh" path-of "${TASK}" 2>/dev/null || true)"
+  if [[ -n "${wt}" && -d "${wt}" ]]; then
+    git -C "${wt}" diff HEAD -- ':(exclude)docs/leadv2' ':(exclude)docs/handoff' > "${diff_file}" 2>/dev/null || true
+  fi
+  [[ -s "${diff_file}" ]] || blocked_reason="unscopable_diff"
+fi
+if [[ -n "${blocked_reason}" ]]; then
+  printf 'status: blocked\nreason: %s\n' "${blocked_reason}" > "${HANDOFF}/review-gate.md"
+  emit decision "review_gate task=${TASK} status=blocked reason=${blocked_reason}"
+  exit 5
+fi
 diff_hash="$(shasum -a 256 "${diff_file}" | awk '{print $1}')"
 # Dedup is checked BEFORE spending a second provider. record-review below remains the
 # atomic writer that resolves a concurrent race; in that case the duplicate result is also

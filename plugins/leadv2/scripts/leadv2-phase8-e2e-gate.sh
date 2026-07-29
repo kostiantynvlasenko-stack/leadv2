@@ -111,7 +111,14 @@ if [[ "${PE_SKIP_TESTS:-}" == "1" ]]; then
 fi
 
 rc=0
-bash "${PROJECT_ROOT}/tests/run-all.sh" --scope changed > "$LOG" 2>&1 || rc=$?
+e2e_cmd=""
+if ! e2e_cmd="$(bash "${SCRIPT_DIR}/leadv2-e2e-entrypoint.sh" "${PROJECT_ROOT}")"; then
+  echo "leadv2-phase8-e2e-gate: no e2e entrypoint in $(basename "${PROJECT_ROOT}") -- blocked" \
+    | tee "$LOG" >&2
+  rm -f "$SENTINEL"
+  exit 1
+fi
+bash -c "${e2e_cmd} --scope changed" > "$LOG" 2>&1 || rc=$?
 
 if [[ $rc -eq 0 ]]; then
   printf 'e2e-gate-passed: %s\nasserted_at: %s\nscope: changed\nbypassed: false\ndeploy_verified: %s\ndeploy_verify_bypassed: %s\ndeploy_verify_bypass_reason: %s\n' \
