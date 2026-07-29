@@ -355,6 +355,43 @@ sig = {
     "glm_failure_count":       float(e.get("DC_GLM_FAILURES", "0") or 0),
     "glm_lock_busy":           bool(int(e.get("DC_GLM_LOCK_BUSY", "0") or 0)),
 }
+
+# ── SMART-ROUTING-V2 dispatch resolver ─────────────────────────────────────
+# Composes the existing layered components in their strict order: L1 hard
+# filters -> L2 arm-blind task judge -> L3 reserve/score -> L4 bandit samples.
+# It does not implement a second policy predicate.
+resolve_v2_dispatch() { # <mission> <sig8> <class> <kind> <protected>
+  local mission="$1" sig8="$2" class="$3" kind="$4" protected="$5"
+  local rv2_bin="${LEADV2_ROUTER_V2_BIN:-${SCRIPT_DIR}/leadv2-router-v2.sh}"
+  local judge_bin="${LEADV2_TASK_JUDGE_BIN:-${SCRIPT_DIR}/leadv2-task-judge.sh}"
+  local bandit_bin="${LEADV2_ROUTE_BANDIT_BIN:-${SCRIPT_DIR}/leadv2-route-bandit.sh}"
+  local tmp mission_file l1_file estimate_file samples_file weights_file filter_out estimate bandit_out out rc
+  [[ -f "${rv2_bin}" && -f "${judge_bin}" && -f "${bandit_bin}" ]] || { log_err "router v2 dependency missing"; return 1; }
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/leadv2-dispatch-v2.XXXXXX")" || return 1
+  mission_file="${tmp}/mission"; l1_file="${tmp}/l1.json"; estimate_file="${tmp}/estimate.json"
+  samples_file="${tmp}/samples.json"; weights_file="${tmp}/weights.json"
+  printf '%s' "${mission}" > "${mission_file}"
+  filter_out="$(PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_ROUTING_YAML="${ROUTING_YAML}" bash "${rv2_bin}" filter --task-id "${sig8}" --mission-kind "${kind}" $([[ "${protected}" == "1" ]] && printf -- '--protected-path') 2>/dev/null)" || { rm -rf "${tmp}"; return 1; }
+  python3 -c '
+import json,sys
+rows=sys.stdin.read().splitlines(); eligible=next((r[9:] for r in rows if r.startswith("eligible=")), ""); filtered=next((r[9:] for r in rows if r.startswith("filtered=")), "[]")
+json.dump({"eligible":[a for a in eligible.split(",") if a],"filtered":json.loads(filtered)},sys.stdout)
+' <<<"${filter_out}" > "${l1_file}" || { rm -rf "${tmp}"; return 1; }
+  estimate="$(PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_ROUTER_V2=1 bash "${judge_bin}" --mission-file "${mission_file}" --task-id "${sig8}" --class "${class}" 2>/dev/null)" || { rm -rf "${tmp}"; return 1; }
+  printf '%s' "${estimate}" > "${estimate_file}"
+  local allowed task_class
+  allowed="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("eligible", [])))' "${l1_file}")"
+  task_class="$(python3 -c 'import json,sys; e=json.load(open(sys.argv[1])); print("%s:%s"%(e.get("work_kind","unknown"),"short" if e.get("duration_class")=="short" and e.get("complexity") in ("trivial","simple") else "long"))' "${estimate_file}")"
+  bandit_out="$(PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_ROUTER_V2=1 bash "${bandit_bin}" sample --context-key "${task_class}" --allowed "${allowed}" --heuristic glm 2>/dev/null)" || true
+  printf '%s\n' "${bandit_out}" | sed -n 's/^samples=//p' | head -1 > "${samples_file}"
+  if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${samples_file}" >/dev/null 2>&1; then
+    python3 -c 'import json,sys; print(json.dumps({a:0.75 for a in json.load(open(sys.argv[1])).get("eligible",[])},sort_keys=True))' "${l1_file}" > "${samples_file}"
+  fi
+  python3 -c 'import json,sys,yaml; cfg=yaml.safe_load(open(sys.argv[1])) or {}; json.dump(((cfg.get("router_v2") or {}).get("headroom_weights")) or [],open(sys.argv[2],"w"))' "${ROUTING_YAML}" "${weights_file}" || { rm -rf "${tmp}"; return 1; }
+  out="$(PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_ROUTING_YAML="${ROUTING_YAML}" bash "${rv2_bin}" resolve --task-id "${sig8}" --routing-yaml "${ROUTING_YAML}" --l1-json "${l1_file}" --estimate-json "${estimate_file}" --samples-json "${samples_file}" --headroom-weights-json "${weights_file}" --account "${LEADV2_ROUTER_V2_ACCOUNT:-unknown}" 2>/dev/null)"
+  rc=$?; rm -rf "${tmp}"; [[ ${rc} -eq 0 ]] || return "${rc}"
+  printf '%s\n' "${out}"; printf 'tier=%s\n' "${LEADV2_ROUTER_V2_CODEX_TIER:-standard}"
+}
 rules = [
     (bool(sig["mission_kind"]) and sig["mission_kind"] in opus_kinds,
         None, "opus", "opus_mission_kind"),
@@ -1298,14 +1335,16 @@ cmd_resolve() {
   mission="${mission}
 
 ---
-If you hit a genuine ambiguity you cannot safely resolve yourself (which of
-several destructive options, a policy conflict, missing authorization), ask
-via the async question channel instead of guessing or stalling silently:
+If you hit a decision you cannot safely make yourself (including destructive
+options, a policy conflict, or missing authorization), ask via the async
+question channel and wait for the answer rather than guessing or stalling:
   bash \"\${CLAUDE_PLUGIN_ROOT}/../../scripts/leadv2-ask.sh\" \"${JOURNAL_TASK}\" \"<question>\" \\
     --option \"a|<label>\" --option \"b|<label>\" [--timeout <sec=1800>]
 It blocks until answered via \`/leadv2 reply <q-id> <option>\` and prints the
-chosen option. On timeout it exits 2 -- fall back to your best-effort default
-and state the assumption explicitly. Do not use this for routine progress or
+chosen option. Always include at least one clearly reversible option, so the
+supervisor can safely unblock the lane if the founder is unavailable. On
+timeout it exits 2 -- fall back to your best-effort default and state the
+assumption explicitly. Do not use this for routine progress or
 confirmation-seeking; only for a decision you cannot make yourself."
 
   # LANE-SHAPE-01 gate (docs/specs/lane-shape.md task 2): classify solo vs line
@@ -1361,12 +1400,26 @@ confirmation-seeking; only for a decision you cannot make yourself."
   export DC_PROTECTED="${protected}" DC_SAFETY="${safety}" DC_SUBSYSTEM_COUNT="${subsystems}" \
          DC_INTERACTIVE="${interactive}" DC_UI_JUDGMENT="${ui}" DC_KIND="${kind}" \
          DC_GLM_FAILURES="${glmfails}" DC_GLM_LOCK_BUSY="${lockbusy}"
-  local resolved arm rule reason tier
-  resolved="$(resolve_arm)"
+  local resolved arm rule reason tier router_label v2_eligible
+  router_label="v1"
+  if [[ "${LEADV2_ROUTER_V2:-0}" == "1" ]]; then
+    router_label="v2"
+    resolved="$(resolve_v2_dispatch "${mission}" "${sig8}" "${task_class}" "${kind}" "${protected}")" || {
+      local v2rc=$?
+      emit decision "dispatch_refused reason=router_v2_unavailable task=${sig8} router=v2 rc=${v2rc}"
+      log_err "router v2 resolver failed (rc=${v2rc}); set LEADV2_ROUTER_V2=0 for rollback"
+      exit 1
+    }
+  else
+    resolved="$(resolve_arm)"
+  fi
   arm="$(printf '%s\n' "${resolved}" | sed -n 's/^arm=//p')"
+  [[ -z "${arm}" && "${router_label}" == "v2" ]] && arm="$(printf '%s\n' "${resolved}" | sed -n 's/^winner=//p')"
   rule="$(printf '%s\n' "${resolved}" | sed -n 's/^rule=//p')"
   reason="$(printf '%s\n' "${resolved}" | sed -n 's/^reason=//p')"
   tier="$(printf '%s\n' "${resolved}" | sed -n 's/^tier=//p')"
+  v2_eligible="$(printf '%s\n' "${resolved}" | sed -n 's/^eligible=//p')"
+  [[ "${router_label}" == "v2" ]] && rule="router_v2"
   [[ -n "${arm}" ]] || { log_err "resolver returned no arm: ${resolved}"; exit 1; }
   # RESOLVED_CODEX_TIER is read by _spawn_worker_body's codex case (global, not passed as
   # a positional -- spawn_worker's signature is shared across all three spawning arms).
@@ -1407,12 +1460,17 @@ confirmation-seeking; only for a decision you cannot make yourself."
   # the remaining eligible arms in glm -> codex -> sonnet order.  A hard class
   # exception resolving directly to sonnet therefore cannot escape back to GLM.
   local -a candidate_arms attempted
-  case "${arm}" in
-    glm)   candidate_arms=(glm codex sonnet) ;;
-    codex) candidate_arms=(codex sonnet) ;;
-    sonnet) candidate_arms=(sonnet) ;;
-    *) log_err "unsupported resolved dispatch arm: ${arm}"; exit 1 ;;
-  esac
+  if [[ "${router_label}" == "v2" ]]; then
+    IFS=',' read -r -a candidate_arms <<< "${v2_eligible}"
+    [[ ${#candidate_arms[@]} -gt 0 && -n "${candidate_arms[0]}" ]] || { emit decision "dispatch_rolled_back reason=all_arms_exhausted task=${sig8} router=v2"; exit 4; }
+  else
+    case "${arm}" in
+      glm)   candidate_arms=(glm codex sonnet) ;;
+      codex) candidate_arms=(codex sonnet) ;;
+      sonnet) candidate_arms=(sonnet) ;;
+      *) log_err "unsupported resolved dispatch arm: ${arm}"; exit 1 ;;
+    esac
+  fi
 
   # ROUTER-QUOTA-DRIVEN-01 (T6): filter candidate_arms by LIVE quota truth
   # BEFORE the operator-override block below. An arm with zero usable headroom
@@ -1427,7 +1485,7 @@ confirmation-seeking; only for a decision you cannot make yourself."
   # and leaves the legacy candidate order byte-for-byte untouched; the narrow
   # QUOTA_FILTER switch remains available while this early compatibility path
   # is replaced by the complete L1→L3 resolver in the later integration task.
-  if [[ "${LEADV2_ROUTER_V2:-0}" == "1" && "${LEADV2_ROUTER_V2_QUOTA_FILTER:-1}" != "0" ]]; then
+  if [[ "${LEADV2_ROUTER_V2:-0}" == "1" && "${LEADV2_ROUTER_V2_QUOTA_FILTER:-1}" != "0" && "${router_label}" != "v2" ]]; then
     local _rv2_bin="${LEADV2_ROUTER_V2_BIN:-${SCRIPT_DIR}/leadv2-router-v2.sh}"
     if [[ -f "${_rv2_bin}" ]]; then
       local _rv2_chain _rv2_out _rv2_rc _rv2_eligible

@@ -98,6 +98,24 @@ fi
 
 SUB="${1:-}"
 
+# ST-2 — direct Codex tasks do not pass through dispatch-code.sh, so give them
+# the same blocking-question protocol here. Dispatch missions already contain
+# it; do not append a duplicate in that path.
+if [[ "$SUB" == "task" && " $* " != *"leadv2-ask.sh"* ]]; then
+  _QUESTION_TASK_ID="${LEADV2_TASK_ID:-codex-task}"
+  _QUESTION_PROTOCOL="
+
+---
+If you hit a decision you cannot safely make yourself, call the blocking
+question channel and wait for the answer rather than guessing:
+  bash \"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-ask.sh\" \"${_QUESTION_TASK_ID}\" \"<question>\" \\
+    --option \"a|<label>\" --option \"b|<label>\" [--timeout <sec=1800>]
+Always include at least one clearly reversible option, so the supervisor can
+safely unblock the lane when the founder is unavailable. Do not use this for
+routine progress or confirmation-seeking."
+  set -- "$@" "${_QUESTION_PROTOCOL}"
+fi
+
 # EFFICIENCY-TUNE-01 C: job registry for supervise-loop stall detection.
 # One line per spawn: /tmp/leadv2-job-registry/<session_id>/<job_id> = "run_dir\tstarted_at\tkind".
 # Registry-clear rides the wrapper's own EXIT trap — the completion point that

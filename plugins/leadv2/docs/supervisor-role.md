@@ -31,34 +31,45 @@ A supervisor session does not do the work itself — it coordinates:
    deltas and forward to the founder only what needs them — not every
    tick.
 
-## Announce immediately — never batch these
+## Question triage — answer, escalate, or release the lane
 
-- A lane opens (a child is dispatched) or closes (landed / failed / killed).
-- A child asks a question on the async-question channel — forward it
-  verbatim; never answer on the founder's behalf.
-- A lane dies, stalls, or needs a decision only the founder can make.
+When `leadv2-supervise.sh --json` surfaces a pending async question, classify
+it by this rule — not by instinct. Use `leadv2-reply-router.sh <q-id> <option>`
+for every supervisor answer; it is the one writer for both question stores.
 
-## Never decide alone — escalate instead
+| Bucket | Test | Required action |
+|---|---|---|
+| **Plan-answerable** | The answer is already in `docs/leadv2/CURRENT-PLAN.md`, a spec, or a standing rule/founder decision. | Answer it in the same supervisor turn through `leadv2-reply-router.sh`. This is the normal case. |
+| **Founder-only** | It is money, an irreversible action, or a genuine product/business judgment. | Raise it to the founder in chat. Do not use any alert or notification channel. |
+| **Neither** | The supervisor cannot derive the answer and the founder is unreachable. | Choose the clearly reversible option, state a deadline, answer through the reply router, and journal the assumption in `docs/leadv2/open-threads.md`. If no option is reversible, park it as `human-needed`, record that fact in `open-threads.md`, and free the lane slot. Never leave a question silently blocking a lane. |
 
-- Any judgment call with more than one reasonable answer: scope, priority
-  tradeoffs, "is this good enough to ship."
-- Anything that spends money or touches a paid resource beyond what's
-  already provisioned.
-- Anything irreversible: force-push, drop a table, delete a branch or
-  worktree with uncommitted work, flip a prod safety flag, rotate a
-  credential.
-- Anything the active `context.yaml` or `CLAUDE.md` marks `off_limits`.
+Here, **irreversible** means a live publish, a payment, a schema migration, or
+a deletion. Those actions always belong in the founder-only bucket; do not
+stretch “reversible” at the moment of a decision. Anything marked `off_limits`
+in `context.yaml` or `CLAUDE.md` is founder-only too.
 
-Route these through the async-question channel (`leadv2-ask.sh`) or the
-founder-question-router skill — never guess, and never stall silently
-waiting for an answer that was never asked for.
+## Speak only when it changes the founder's work
+
+- A lane opens, closes, dies, or stalls: announce it in 1–2 plain lines.
+- A founder-only question: raise it in chat, immediately when it blocks a lane;
+  otherwise include it in the next status beat.
+- The 30-minute broad-status beat: paste the generated block. It reports the
+  5-hour and weekly rate-limit windows, never dollar figures.
+
+Everything else is silent. The steady-state budget is at most two supervisor
+turns per 30 minutes plus one per lane event. On a lane-close announcement,
+also update that task through `tasks-lib` and the corresponding State cell in
+`docs/leadv2/CURRENT-PLAN.md` in the same turn. Any plan reorder must be
+mirrored into `docs/tasks.yaml`; the supervisor alone writes CURRENT-PLAN and
+all `tasks.yaml` edits go through `tasks-lib`. When the backlog pump is on, it
+claims capacity through the dispatch funnel; the supervisor does not claim
+work manually.
 
 ## Status reporting standard
 
 - **Short status**: plain words, no jargon, no UUIDs, no dollar figures
-  (report the 5-hour / weekly rate-limit-window usage instead) — cadence is
-  whatever the founder set for the session (commonly every 12-30 minutes
-  while a supervise session is active).
+  (report the 5-hour / weekly rate-limit-window usage instead). The broad
+  status beat is every 30 minutes while supervision is active.
 - **Full status**: on request, or at a natural checkpoint (a lane closing,
   a scheduled full-status interval). Include what landed, what's deployed,
   and what's been live-verified — not just "done."
