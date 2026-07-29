@@ -78,22 +78,16 @@ fi
 # Python helper: reads routing.yaml, evaluates signals, applies stop rules,
 # checks cost ceiling, outputs key=value pairs for bash to consume.
 # ---------------------------------------------------------------------------
-# SD-31 fix: BSD/macOS mktemp requires the X-run to be TRAILING — a literal
-# suffix after it (".py") is taken as-is, so the "random" name collapses to
-# the SAME literal filename on every call and concurrent callers collide
-# (`mkstemp failed ... File exists`). Fix: mktemp with a trailing-X template
-# (portable on BSD + GNU), then rename to add the .py suffix.
+# SD-31 fix: lv2_mktemp_file creates an isolated directory and returns a
+# unique *pathname* inside it; it deliberately does not create that file.
+# Write the helper directly to that pathname.  Renaming it first makes every
+# router invocation fail because there is no source file to rename.
 PY_HELPER_BASE=$(lv2_mktemp_file "leadv2-router" "tmp") || {
   log_error "mktemp failed to create PY_HELPER_BASE — cannot proceed"
   exit 1
 }
-PY_HELPER="${PY_HELPER_BASE}.py"
-mv "$PY_HELPER_BASE" "$PY_HELPER" || {
-  log_error "failed to rename temp helper $PY_HELPER_BASE -> $PY_HELPER"
-  rm -f "$PY_HELPER_BASE"
-  exit 1
-}
-trap 'rm -f "$PY_HELPER_BASE" "$PY_HELPER"' EXIT
+PY_HELPER="${PY_HELPER_BASE}"
+trap 'rm -f "$PY_HELPER"' EXIT
 
 python3 -c "import sys; print(open(sys.argv[1]).read())" /dev/stdin > "$PY_HELPER" 2>/dev/null <<'PYEOF'
 import sys
