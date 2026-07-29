@@ -1,0 +1,20 @@
+You are estimating the shape of a single engineering task — not choosing who or what will carry it out.
+
+Read the TASK DESCRIPTION below and output your estimate as strict JSON matching exactly this schema. No prose, no code fences, no explanation — JSON only, one line:
+
+{"complexity":"trivial|simple|standard|complex","subsystems_touched":<integer 0-10>,"needs_live_verification":true|false,"risk_class":"none|data|safety_publish_payments","duration_class":"short|medium|long","work_kind":"build|review|diagnose|docs"}
+
+Field definitions:
+- complexity: how conceptually hard the task is to reason about, independent of how long it takes.
+- subsystems_touched: rough count of distinct code areas or services the description references, 0 to 10.
+- needs_live_verification: true only if closing this task requires checking a running system — a server, a deployed service, live data — rather than just passing tests.
+- risk_class: "safety_publish_payments" if the task touches a safety gate, publishing, or payments; "data" if it touches migrations, schemas, or stored data; otherwise "none".
+- duration_class: rough wall-clock size of the work — short, medium, or long.
+- work_kind: the dominant kind of work — build (new code), review (checking existing work), diagnose (root-causing a defect), or docs (documentation only).
+
+TASK DESCRIPTION:
+<<<
+<<<MISSION_TEXT>>>
+>>>
+
+Output ONLY the JSON object described above, nothing else.
