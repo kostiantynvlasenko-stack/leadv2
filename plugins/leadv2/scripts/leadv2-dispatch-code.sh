@@ -1378,7 +1378,7 @@ cmd_status() {
 
 # ── resolve (default) path ────────────────────────────────────────────────────────
 cmd_resolve() {
-  local mission="" protected=0 safety=0 subsystems=0 ui=0 interactive=0 kind="" glmfails=0 lockbusy=0 force=0
+  local mission="" protected=0 safety=0 subsystems=0 ui=0 interactive=0 kind="" glmfails=0 lockbusy=0 force=0 task_class="Standard"
   local lane_writes="" lane_acceptance_cmd="" lane_rollback=0
   local spawn="${LEADV2_DISPATCH_SPAWN:-1}"
   local raw

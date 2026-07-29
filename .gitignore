@@ -9,5 +9,6 @@ node_modules/
 # Plugin sync writes canonical scripts here — not source, not committed.
 .claude/scripts/
 .claude/contracts/
+.baseline-*.sh
 __pycache__/
 .claude/anatomy.md
