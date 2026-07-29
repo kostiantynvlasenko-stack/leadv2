@@ -25,7 +25,7 @@ if not ROUTING_YAML_PATH.exists():
     # Vendored copies live at <repo>/.claude/scripts/, while their shared
     # registry stays at <repo>/.claude/ref/.  Canonical uses plugins/leadv2/
     # config instead; keep this acceptance test repo-generic.
-    ROUTING_YAML_PATH = SCRIPTS.parent.parent / "ref" / "leadv2-routing.yaml"
+    ROUTING_YAML_PATH = SCRIPTS.parent / "ref" / "leadv2-routing.yaml"
 
 spec = importlib.util.spec_from_file_location("router_v2", ROUTER_PY_PATH)
 router_v2 = importlib.util.module_from_spec(spec)
