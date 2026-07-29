@@ -242,14 +242,14 @@
 set -uo pipefail   # -u safe (quote everything, no unbound vars); NO -e (refusals must journal)
 
 SCRIPT_NAME="leadv2-dispatch-code"
-PROJECT_ROOT="${CLAUDE_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+PROJECT_ROOT="${CLAUDE_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-"$0"}")" 2>/dev/null && pwd)"
 ROUTING_YAML="${PROJECT_ROOT}/.claude/ref/leadv2-routing.yaml"
 # Overridable so tests can point at /bin/true and avoid writing to the real per-task journal.
 JOURNAL_BIN="${LEADV2_JOURNAL_BIN:-${SCRIPT_DIR}/leadv2-journal.sh}"
 
 CACHE_BASE="${LEADV2_DISPATCH_CACHE_DIR:-${HOME}/.claude/cache}"
-DISPATCH_LEDGER_DIR="${CACHE_BASE}/dispatch-ledger"
+DISPATCH_LEDGER_DIR="${DISPATCH_LEDGER_DIR:-${CACHE_BASE}/dispatch-ledger}"
 REVIEW_LEDGER_DIR="${CACHE_BASE}/code-review-ledger"
 # shellcheck disable=SC2034  # documented config surface (see usage()); the fence hook
 # itself, not this script, is the consumer -- Bash-fence wiring is out of scope here.
@@ -273,6 +273,11 @@ CHECKPOINT_CUTOFF="${LEADV2_DISPATCH_CHECKPOINT_CUTOFF:-1}"
 # one narrow rollback switch; OUTCOME_LEDGER=0 remains the broader pre-outcome rollback.
 EVIDENCE_ATTRIBUTION="${LEADV2_DISPATCH_EVIDENCE_ATTRIBUTION:-1}"
 ARCHITECT_GATE="${LEADV2_DISPATCH_ARCHITECT_GATE:-1}"
+# The architect is advisory.  Keep this comfortably below the two-minute
+# caller deadline; an invalid override is treated as the safe default.
+ARCHITECT_PREPASS_TIMEOUT_SEC="${LEADV2_DISPATCH_ARCHITECT_TIMEOUT_SEC:-30}"
+[[ "${ARCHITECT_PREPASS_TIMEOUT_SEC}" =~ ^[1-9][0-9]*$ ]] || ARCHITECT_PREPASS_TIMEOUT_SEC=30
+ARCHITECT_PREPASS_REASON=""
 E2E_GATE="${LEADV2_DISPATCH_E2E_GATE:-1}"
 REVIEW_GATE="${LEADV2_DISPATCH_REVIEW_GATE:-1}"
 
@@ -883,6 +888,7 @@ _prepass_file() { printf '%s/docs/handoff/dispatch-%s/architect-prepass.md' "${P
 
 architect_prepass() { # <raw mission> <sig8> <writes> -> 0 ran/skipped/disabled, 1 failed
   local raw="$1" sig8="$2" writes="$3" f mfile out rc count
+  ARCHITECT_PREPASS_REASON=""
   if [[ "${ARCHITECT_GATE}" != "1" ]]; then
     emit decision "architect_prepass task=${sig8} status=disabled reason=kill_switch"
     return 0
@@ -896,7 +902,35 @@ architect_prepass() { # <raw mission> <sig8> <writes> -> 0 ran/skipped/disabled,
   f="$(_prepass_file "${sig8}")"; mkdir -p "$(dirname "${f}")" || return 1
   mfile="$(mktemp "${TMPDIR:-/tmp}/leadv2-architect-prepass.XXXXXX")" || return 1
   printf '%s\n' "You are the architect prepass. Turn this mission into a scoped implementation design. State: changes, exact files, acceptance evidence, and explicit non-goals. Do not implement.\n\nMISSION:\n${raw}" > "${mfile}"
-  out="$(PROJECT_ROOT="${PROJECT_ROOT}" bash "${ARCHITECT_BIN}" --role architect --model "${LEADV2_DISPATCH_ARCHITECT_MODEL:-opus}" --task-id "dispatch-${sig8}-architect" --mission-file "${mfile}" --wait 2>&1)"; rc=$?
+  # macOS has no portable `timeout`. Python waits for the launcher only; a
+  # timed-out advisory prepass is deliberately allowed to finish or be reaped
+  # independently while this dispatch immediately continues with the raw task.
+  out="$(PROJECT_ROOT="${PROJECT_ROOT}" python3 - "${ARCHITECT_PREPASS_TIMEOUT_SEC}" "${ARCHITECT_BIN}" "${LEADV2_DISPATCH_ARCHITECT_MODEL:-opus}" "dispatch-${sig8}-architect" "${mfile}" <<'PY' 2>&1
+import os, signal, subprocess, sys
+timeout, binary, model, task_id, mission_file = sys.argv[1:]
+proc = None
+try:
+    proc = subprocess.Popen(
+        ["bash", binary, "--role", "architect", "--model", model,
+         "--task-id", task_id, "--mission-file", mission_file, "--wait"],
+        env=os.environ.copy(), text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, start_new_session=True,
+    )
+    stdout, _ = proc.communicate(timeout=int(timeout))
+    sys.stdout.write(stdout or "")
+    sys.exit(proc.returncode)
+except subprocess.TimeoutExpired as exc:
+    # Kill the launcher's complete process group: otherwise a descendant that
+    # inherited stdout keeps communicate() open until its own long timeout.
+    if proc is not None:
+        try: os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        stdout, _ = proc.communicate()
+        sys.stdout.write(stdout or "")
+    print("architect_prepass_timeout", file=sys.stderr)
+    sys.exit(124)
+PY
+)"; rc=$?
   rm -f "${mfile}"
   # PREPASS-READS-ARTIFACT-01 (2026-07-29): the design is NOT on the launcher's stdout.
   # claude-subsession.sh writes the agent's actual text to its handoff dir and prints only
@@ -911,7 +945,8 @@ architect_prepass() { # <raw mission> <sig8> <writes> -> 0 ran/skipped/disabled,
     [[ -s "${cand}" ]] && { design="${cand}"; break; }
   done
   if [[ ${rc} -ne 0 && -z "${design}" ]]; then
-    emit decision "architect_prepass task=${sig8} status=failed rc=${rc}"
+    ARCHITECT_PREPASS_REASON=$([[ ${rc} -eq 124 ]] && printf 'timeout' || printf 'failed_rc_%s' "${rc}")
+    emit decision "architect_prepass task=${sig8} status=failed reason=${ARCHITECT_PREPASS_REASON} rc=${rc}"
     log_err "architect prepass failed: ${out}"
     return 1
   fi
@@ -920,7 +955,7 @@ architect_prepass() { # <raw mission> <sig8> <writes> -> 0 ran/skipped/disabled,
   else
     printf '%s\n' "${out}" > "${f}" || return 1
   fi
-  [[ -s "${f}" ]] || { emit decision "architect_prepass task=${sig8} status=failed reason=empty_output"; return 1; }
+  [[ -s "${f}" ]] || { ARCHITECT_PREPASS_REASON="empty_output"; emit decision "architect_prepass task=${sig8} status=failed reason=empty_output"; return 1; }
   emit decision "architect_prepass task=${sig8} status=ran artifact=docs/handoff/dispatch-${sig8}/architect-prepass.md source=${design:-stdout}"
 }
 
@@ -1414,7 +1449,7 @@ cmd_resolve() {
     # The gate exists to IMPROVE a mission when it can, not to hold the fleet hostage when
     # it cannot. Degrade to the raw mission and journal why, loudly.
     if ! architect_prepass "${mission}" "${sig8}" "${lane_writes}"; then
-      emit decision "architect_prepass task=${sig8} status=degraded reason=no_design action=dispatch_raw_mission"
+      emit decision "architect_prepass task=${sig8} status=degraded reason=${ARCHITECT_PREPASS_REASON:-no_design} action=dispatch_raw_mission"
       log_err "architect prepass produced no design for product task=${sig8} -- dispatching the raw mission instead"
     fi
     # The developer receives the independently-produced design -- but INLINE, and only
