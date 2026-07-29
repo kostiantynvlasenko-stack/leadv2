@@ -180,10 +180,14 @@
 #          liveness primitives rather than re-deriving them. "alive" or "unknown" (liveness
 #          can't be proven) BLOCKS, same as today -- a live or unprovable task is never freed.
 #        - Only once liveness says "dead" (finished) does _dispatch_evidence_exists(created_
-#          epoch) run: any commit since the reservation, reachable from any ref (worktrees
-#          share the repo's object store), touching a path outside EVIDENCE_EXCLUDE_RE. A
-#          git failure or undeterminable timestamp defaults to "evidence exists" (blocks) --
-#          the ledger only ever frees a sig it has POSITIVELY proven finished-and-empty.
+#          epoch, sig8) run: only a lane-attributed handoff artifact or a commit whose
+#          message names sig8 (normally `dispatch-<sig8>`) counts. A clock-only commit from
+#          another concurrent lane is never evidence. Handoff artifacts are authoritative
+#          because dispatch derives their directory from this exact sig8; commits are
+#          authoritative only with the explicit sig8 marker because this ledger does not
+#          persist a per-lane worktree ref. A git/stat/input failure defaults to "evidence
+#          exists" (blocks) -- the ledger only ever frees a sig it has POSITIVELY proven
+#          finished-and-empty.
 #      "Runtime state churn" -- lock files, the bus offset store, the cross-worktree
 #      active.yaml registry -- is excluded from evidence by EVIDENCE_EXCLUDE_RE (override:
 #      LEADV2_DISPATCH_EVIDENCE_EXCLUDE_RE) so a lane that only touched its own bookkeeping
@@ -198,6 +202,8 @@
 #      exactly as fix-pass-4 requires for spawn.
 #      ONE-STEP ROLLBACK: LEADV2_DISPATCH_OUTCOME_LEDGER=0 restores today's behavior exactly
 #      -- a CONFIRMED row blocks for the full CONFIRMED_TTL regardless of outcome. Default 1.
+#      LEADV2_DISPATCH_EVIDENCE_ATTRIBUTION=0 is the narrower one-step rollback for this
+#      attribution rule: it restores the former clock-wide commit check. Default 1.
 #
 # WHAT IT DOES (DISPATCH-LEDGER-PARTIAL-CLOSE-01, 2026-07-29 -- checkpointed != finished)
 #   9. Item 8 above answers "did anything happen?" -- LANE-TURNCAP-CHECKPOINT-01 (220eeaf)
@@ -253,6 +259,9 @@ EVIDENCE_EXCLUDE_RE="${LEADV2_DISPATCH_EVIDENCE_EXCLUDE_RE:-${_EVIDENCE_EXCLUDE_
 # DISPATCH-LEDGER-PARTIAL-CLOSE-01 (see doc block item 9): one-step rollback for the
 # checkpointed-cutoff carve-out.
 CHECKPOINT_CUTOFF="${LEADV2_DISPATCH_CHECKPOINT_CUTOFF:-1}"
+# DISPATCH-EVIDENCE-NOT-ATTRIBUTED-01: keep the attribution and max-turns reclaim behind
+# one narrow rollback switch; OUTCOME_LEDGER=0 remains the broader pre-outcome rollback.
+EVIDENCE_ATTRIBUTION="${LEADV2_DISPATCH_EVIDENCE_ATTRIBUTION:-1}"
 
 log()        { printf '[%s] %s\n' "$SCRIPT_NAME" "$*" >&2; }
 log_err()    { printf '[%s] ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2; }
@@ -480,21 +489,44 @@ except Exception:
   esac
 }
 
-# rc0: at least one commit since <created_epoch>, reachable from any ref (worktrees share
-# the repo's object/ref store), touches a path outside EVIDENCE_EXCLUDE_RE -- OR the check
-# itself is undeterminable (bad timestamp, git failure: not a repo, etc). rc1: POSITIVELY
-# proven no such commit exists. The asymmetry is deliberate -- an undeterminable result
-# defaults to "evidence exists" (blocks) so this can only ever free a sig it has actually
-# proven finished-and-empty, never one it merely failed to check.
-_dispatch_evidence_exists() {  # <created_epoch> -> rc0 evidence found or undeterminable; rc1 none
-  local created="$1" since_iso raw grc
+# rc0: attributed evidence found or the check is undeterminable; rc1: POSITIVELY proven
+# empty. Attribution is either a current reservation's own completion/checkpoint/summary
+# artifact or a non-runtime commit since <created_epoch> whose message explicitly names
+# <sig8>. This intentionally does NOT treat another lane's same-clock commit as evidence.
+# The asymmetry is deliberate: any unreadable/malformed input blocks rather than frees.
+_dispatch_handoff_evidence_exists() {  # <sig8> <created_epoch> -> rc0 evidence/unknown; rc1 none
+  local sig8="$1" created="$2" dir artifact mtime
   [[ "${created}" =~ ^[0-9]+$ ]] || return 0
+  dir="${PROJECT_ROOT}/docs/handoff/dispatch-${sig8}"
+  [[ -e "${dir}" ]] || return 1
+  [[ -d "${dir}" && -r "${dir}" ]] || return 0
+  for artifact in "${dir}/SUMMARY.md" "${dir}/summary.md" "${dir}/CHECKPOINT.md" "${dir}/phase8-passed.flag"; do
+    [[ -e "${artifact}" ]] || continue
+    [[ -f "${artifact}" ]] || return 0
+    mtime="$(stat -f %m "${artifact}" 2>/dev/null || stat -c %Y "${artifact}" 2>/dev/null)" || return 0
+    [[ "${mtime}" =~ ^[0-9]+$ ]] || return 0
+    (( mtime >= created )) && return 0
+  done
+  return 1
+}
+
+_dispatch_evidence_exists() {  # <created_epoch> <sig8> -> rc0 evidence/unknown; rc1 none
+  local created="$1" sig8="$2" since_iso raw grc
+  [[ "${created}" =~ ^[0-9]+$ ]] || return 0
+  [[ "${sig8}" =~ ^[a-f0-9]{8}$ ]] || return 0
+  if [[ "${EVIDENCE_ATTRIBUTION}" == "1" ]] && _dispatch_handoff_evidence_exists "${sig8}" "${created}"; then
+    return 0
+  fi
   since_iso="$(python3 -c "
 import datetime, sys
 print(datetime.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))
 " "${created}" 2>/dev/null)"
   [[ -n "${since_iso}" ]] || return 0
-  raw="$(git -C "${PROJECT_ROOT}" log --all --since="${since_iso}" --name-only --pretty=format: 2>/dev/null)"; grc=$?
+  if [[ "${EVIDENCE_ATTRIBUTION}" == "1" ]]; then
+    raw="$(git -C "${PROJECT_ROOT}" log --all --since="${since_iso}" --fixed-strings --grep="${sig8}" --name-only --pretty=format: 2>/dev/null)"; grc=$?
+  else
+    raw="$(git -C "${PROJECT_ROOT}" log --all --since="${since_iso}" --name-only --pretty=format: 2>/dev/null)"; grc=$?
+  fi
   [[ ${grc} -eq 0 ]] || return 0
   printf '%s\n' "${raw}" | grep -vE '^\s*$' | grep -vE "${EVIDENCE_EXCLUDE_RE}" | grep -q .
 }
@@ -507,6 +539,35 @@ _dispatch_checkpoint_marker() {  # <sig8> -> path (stdout)
 }
 _dispatch_completion_sentinel() {  # <sig8> -> path (stdout)
   printf '%s/docs/handoff/dispatch-%s/phase8-passed.flag' "${PROJECT_ROOT}" "$1"
+}
+
+# rc0: this lane's stream positively ends at the provider turn cap and has no completion
+# sentinel, so it is cut off (not complete). Only the final complete JSON record from the
+# last 64KiB is inspected: streams can be megabytes, and malformed/truncated/missing input
+# deliberately returns rc1 so ordinary conservative evidence handling still blocks. The last
+# nonblank line itself must parse; do not skip a malformed tail and mistake an older event for
+# the stream's terminal record.
+_dispatch_maxturns_cutoff() {  # <sig8> <created_epoch> -> rc0 cutoff; rc1 not proven
+  local sig8="$1" created="$2" stream mtime
+  [[ -f "$(_dispatch_completion_sentinel "${sig8}")" ]] && return 1
+  [[ "${created}" =~ ^[0-9]+$ ]] || return 1
+  stream="${PROJECT_ROOT}/docs/handoff/dispatch-${sig8}/developer.stream.jsonl"
+  [[ -f "${stream}" && -r "${stream}" ]] || return 1
+  mtime="$(stat -f %m "${stream}" 2>/dev/null || stat -c %Y "${stream}" 2>/dev/null)" || return 1
+  [[ "${mtime}" =~ ^[0-9]+$ ]] && (( mtime >= created )) || return 1
+  tail -c 65536 "${stream}" 2>/dev/null | python3 -c '
+import json, sys
+lines = [raw for raw in sys.stdin.buffer.read().splitlines() if raw.strip()]
+if not lines:
+    raise SystemExit(1)
+try:
+    event = json.loads(lines[-1])
+except (UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+terminal = event.get("terminal_reason") == "max_turns"
+subtype = event.get("subtype") == "error_max_turns"
+raise SystemExit(0 if terminal or subtype else 1)
+' 2>/dev/null
 }
 
 # rc0: this row is checkpointed-and-cut-off and never recovered -- free it. rc1: not (no
@@ -532,14 +593,18 @@ _dispatch_outcome_blocks() {  # <arm> <handle> <created_epoch> <sig8> -> rc0 blo
   liveness="$(_dispatch_worker_liveness "${arm}" "${handle}")"
   case "${liveness}" in
     dead)
+      if [[ "${EVIDENCE_ATTRIBUTION}" == "1" ]] && _dispatch_maxturns_cutoff "${sig8}" "${created}"; then
+        emit decision "dispatch_reclaimed task=${sig8} arm=${arm} handle=${handle} reason=maxturns_cutoff"
+        return 1
+      fi
       if [[ "${CHECKPOINT_CUTOFF}" == "1" ]] && _dispatch_checkpointed_cutoff "${sig8}" "${created}"; then
         log "dispatch_reclaimed task=${sig8} arm=${arm} handle=${handle} reason=checkpointed_cutoff"
         return 1
       fi
-      if _dispatch_evidence_exists "${created}"; then
+      if _dispatch_evidence_exists "${created}" "${sig8}"; then
         return 0
       fi
-      log "dispatch_reclaimed task=${sig8} arm=${arm} handle=${handle} reason=finished_no_evidence"
+      emit decision "dispatch_reclaimed task=${sig8} arm=${arm} handle=${handle} reason=unattributed_empty"
       return 1
       ;;
     *) return 0 ;;   # alive or unknown -- never free a live or unprovable task

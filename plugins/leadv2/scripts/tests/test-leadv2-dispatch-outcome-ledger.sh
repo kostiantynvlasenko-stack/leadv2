@@ -5,10 +5,8 @@
 # same discipline as test-leadv2-lane-shape.sh — never a hand-reimplemented copy of the
 # decision logic), that the dispatch ledger records OUTCOME, not just intent:
 #
-#   1. A lane that FINISHES with no commit frees its task signature automatically — the
-#      identical mission re-dispatches with no manual step and no --force.
-#   2. A lane that FINISHES having committed real work (a non-runtime-state path) stays
-#      deduped — re-dispatch of the identical mission is still refused.
+#   1. Of two finished lanes, a commit attributed to B frees A but keeps B deduped. This
+#      is the parallel-lane regression: another lane's commit must never be A's evidence.
 #   3. A lane that is still RUNNING never frees its signature, regardless of what it has
 #      or hasn't committed yet.
 #   4. A commit that touches ONLY runtime-state paths (lock file, bus offset, the
@@ -101,6 +99,10 @@ _pid_from_output() {  # <dispatch stdout> -> PID
   sed -n 's/.*handle=PID=\([0-9][0-9]*\).*/\1/p' <<<"$1" | tail -1
 }
 
+_sig8_from_output() {  # <dispatch stdout> -> task signature prefix
+  sed -n 's/.*task=\([a-f0-9][a-f0-9]*\).*/\1/p' <<<"$1" | tail -1
+}
+
 _wait_dead() {  # <pid> <timeout_s>
   local pid="$1" deadline=$(( $(date +%s) + $2 ))
   while kill -0 "${pid}" 2>/dev/null; do
@@ -110,43 +112,28 @@ _wait_dead() {  # <pid> <timeout_s>
   return 0
 }
 
-# ── 1. finished, no commit -> re-dispatch succeeds, no --force ──────────────────────
-m1="task: quick-empty-lane $$ $(date +%s)"
-FAKE_SONNET_BEHAVIOR=quick out1="$(_dispatch "${m1}")"; rc1=$?
-pid1="$(_pid_from_output "${out1}")"
-if [[ ${rc1} -eq 0 && -n "${pid1}" ]]; then
-  if _wait_dead "${pid1}" 5; then
-    sleep 1   # clear any same-second git-log ambiguity before the retry
-    out1b="$(FAKE_SONNET_BEHAVIOR=quick _dispatch "${m1}")"; rc1b=$?
-    if [[ ${rc1b} -eq 0 ]] && grep -q 'route_resolved' <<<"${out1b}"; then
-      pass "1: finished-empty lane frees its signature (re-dispatch rc=0)"
-    else
-      fail "1: expected rc=0/route_resolved on retry, got rc=${rc1b} out=${out1b}"
-    fi
-  else
-    fail "1: setup — fake process never died"
-  fi
-else
-  fail "1: setup — first dispatch failed rc=${rc1} out=${out1}"
-fi
-
-# ── 2. finished, real commit (non-runtime path) -> re-dispatch still refused ────────
-m2="task: quick-real-work-lane $$ $(date +%s)"
-FAKE_SONNET_BEHAVIOR=quick out2="$(_dispatch "${m2}")"; rc2=$?
-pid2="$(_pid_from_output "${out2}")"
-if [[ ${rc2} -eq 0 && -n "${pid2}" ]] && _wait_dead "${pid2}" 5; then
-  sleep 1
+# ── 1. parallel lanes: B's commit must not count as A's evidence ────────────────────
+m1a="task: parallel-empty-A $$ $(date +%s)"
+m1b="task: parallel-committed-B $$ $(date +%s)"
+FAKE_SONNET_BEHAVIOR=quick out1a="$(_dispatch "${m1a}")"; rc1a=$?
+FAKE_SONNET_BEHAVIOR=quick out1b="$(_dispatch "${m1b}")"; rc1b=$?
+pid1a="$(_pid_from_output "${out1a}")"; pid1b="$(_pid_from_output "${out1b}")"
+sig1b="$(_sig8_from_output "${out1b}")"
+if [[ ${rc1a} -eq 0 && ${rc1b} -eq 0 && -n "${pid1a}" && -n "${pid1b}" && -n "${sig1b}" ]] \
+  && _wait_dead "${pid1a}" 5 && _wait_dead "${pid1b}" 5; then
   ( cd "${ROOT}" && printf 'change\n' >> platform/fake_change.py \
-    && git add platform/fake_change.py && git commit -qm "real work" )
+    && git add platform/fake_change.py && git commit -qm "real work dispatch-${sig1b}" )
   sleep 1
-  out2b="$(_dispatch "${m2}")"; rc2b=$?
-  if [[ ${rc2b} -eq 2 ]] && grep -q 'duplicate_task_signature' <<<"${out2b}"; then
-    pass "2: finished lane with a real commit stays deduped (re-dispatch refused)"
+  retry1a="$(_dispatch "${m1a}")"; retry1a_rc=$?
+  retry1b="$(_dispatch "${m1b}")"; retry1b_rc=$?
+  if [[ ${retry1a_rc} -eq 0 ]] && grep -q 'route_resolved' <<<"${retry1a}" \
+    && [[ ${retry1b_rc} -eq 2 ]] && grep -q 'duplicate_task_signature' <<<"${retry1b}"; then
+    pass "1: B commit frees empty A while B remains deduped"
   else
-    fail "2: expected rc=2/duplicate_task_signature, got rc=${rc2b} out=${out2b}"
+    fail "1: expected A rc=0 and B rc=2, got A=${retry1a_rc} (${retry1a}) B=${retry1b_rc} (${retry1b})"
   fi
 else
-  fail "2: setup — first dispatch or process-death wait failed (rc=${rc2})"
+  fail "1: setup — parallel lanes did not dispatch/die cleanly"
 fi
 
 # ── 3. still RUNNING -> signature never freed ───────────────────────────────────────
