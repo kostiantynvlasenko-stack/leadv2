@@ -884,6 +884,7 @@ cmd_status() {
 # ── resolve (default) path ────────────────────────────────────────────────────────
 cmd_resolve() {
   local mission="" protected=0 safety=0 subsystems=0 ui=0 interactive=0 kind="" glmfails=0 lockbusy=0 force=0
+  local lane_writes="" lane_acceptance_cmd="" lane_rollback=0
   local spawn="${LEADV2_DISPATCH_SPAWN:-1}"
   local raw
   while [[ $# -gt 0 ]]; do
@@ -905,6 +906,14 @@ cmd_resolve() {
       --force)        force=1;       shift ;;
       --spawn)        spawn=1;       shift ;;  # default; kept explicit for callers/back-compat
       --no-spawn)     spawn=0;       shift ;;  # resolve+journal only, no worker launched (tests)
+      # LANE-SHAPE-01: optional lane-shape declaration inputs (spec §8 context.yaml
+      # additions). All no-ops when LEADV2_LANE_SHAPE=off (default) — see the gate
+      # block below and leadv2-lane-shape.sh.
+      --writes)          [[ $# -ge 2 ]] || { log_err "--writes requires a value"; usage; }
+                          lane_writes="$2"; shift 2 ;;
+      --acceptance-cmd)  [[ $# -ge 2 ]] || { log_err "--acceptance-cmd requires a value"; usage; }
+                          lane_acceptance_cmd="$2"; shift 2 ;;
+      --rollback-onestep) lane_rollback=1; shift ;;
       -h|--help)      usage ;;
       --*)            log_err "unknown arg: $1"; usage ;;
       *)              mission="${mission}${mission:+ }$1"; shift ;;  # collect positional mission
@@ -931,6 +940,59 @@ cmd_resolve() {
   JOURNAL_TASK="dispatch-${sig8}"
   if [[ -z "${sig}" ]] || ! sig_is_hex "${sig}"; then
     log_err "signature computation failed"; exit 1
+  fi
+
+  # QUESTION-CHANNEL-DEAD-01 (willingness half): dispatch-code.sh is a lane
+  # launcher with NO instruction of its own about the async question channel
+  # -- every prior caller (leadv2-fanout.sh, claude-subsession.sh, ...) had to
+  # remember to inject it into the mission text, and none of them did for the
+  # GLM/Codex/Sonnet arms spawned here. A lane that is never told it may ask
+  # simply never asks, regardless of how well the delivery path works. Append
+  # a fixed, deterministic instruction block to EVERY mission AFTER the sig
+  # is computed, so dedup identity still keys on the caller's actual task
+  # content, not on this constant suffix.
+  mission="${mission}
+
+---
+If you hit a genuine ambiguity you cannot safely resolve yourself (which of
+several destructive options, a policy conflict, missing authorization), ask
+via the async question channel instead of guessing or stalling silently:
+  bash \"\${CLAUDE_PLUGIN_ROOT}/../../scripts/leadv2-ask.sh\" \"${JOURNAL_TASK}\" \"<question>\" \\
+    --option \"a|<label>\" --option \"b|<label>\" [--timeout <sec=1800>]
+It blocks until answered via \`/leadv2 reply <q-id> <option>\` and prints the
+chosen option. On timeout it exits 2 -- fall back to your best-effort default
+and state the assumption explicitly. Do not use this for routine progress or
+confirmation-seeking; only for a decision you cannot make yourself."
+
+  # LANE-SHAPE-01 gate (docs/specs/lane-shape.md task 2): classify solo vs line
+  # BEFORE any ledger reservation or spawn. off (default) = no-op, zero behavior
+  # change (spec §9 Stage 0). enforce refuses a diagnostic mission (names a
+  # defect / uses a fix verb) that carries no ## Evidence block, and refuses a
+  # mission whose declared writes are not shape-eligible (contracts/,
+  # supabase/migrations/, or >=2 core subsystems) by routing it to the
+  # classified pipeline instead of a bare lane dispatch. This never touches the
+  # router/ledger/spawn logic below — a lane-shape refusal exits before any of
+  # that runs, so it composes with the existing duplicate-signature and
+  # refusal-advance behavior rather than replacing it.
+  if [[ "${LEADV2_LANE_SHAPE:-off}" != "off" ]]; then
+    local _ls_bin="${LEADV2_LANE_SHAPE_BIN:-${SCRIPT_DIR}/leadv2-lane-shape.sh}"
+    local _ls_rc=0
+    "${_ls_bin}" classify --task-id "dispatch-${sig8}" --mission "${mission}" \
+      ${lane_writes:+--writes "${lane_writes}"} \
+      ${lane_acceptance_cmd:+--acceptance-cmd "${lane_acceptance_cmd}"} \
+      $([[ "${lane_rollback}" == "1" ]] && printf -- '--rollback-onestep') \
+      || _ls_rc=$?
+    case "${_ls_rc}" in
+      0) : ;;  # accepted (or warn-mode violation, already logged)
+      3) emit decision "dispatch_refused reason=not_shape_eligible task=${sig8}"
+         printf 'dispatch_refused reason=not_shape_eligible task=%s\n' "${sig8}"
+         exit 2 ;;
+      2) emit decision "dispatch_refused reason=diagnostic_mission_missing_evidence task=${sig8}"
+         printf 'dispatch_refused reason=diagnostic_mission_missing_evidence task=%s\n' "${sig8}"
+         exit 2 ;;
+      *) log_err "leadv2-lane-shape.sh classify failed unexpectedly (rc=${_ls_rc}) for task=${sig8}"
+         exit 1 ;;
+    esac
   fi
 
   # FIX PASS 2 (Finding 3 / F1 spoof): a caller-supplied --glm-failures count is

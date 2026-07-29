@@ -496,11 +496,41 @@ else
   log_warning "W4 QUEUE.md not found: ${QUEUE_FILE} — non-blocking"
 fi
 
+# ── A9: lane-shape artifact set + retro shape check (LANE-SHAPE-01) ──────────
+# Additive/optional: only evaluated when docs/handoff/<task_id>/context.yaml
+# carries a `shape` field (dispatched via leadv2-lane-shape.sh classify — the
+# main plan/build/review/verify pipeline never sets this field, so tasks that
+# never opted in are completely unaffected: A9_EVALUATED stays 0 and TOTAL_HARD
+# is not inflated). Gated by LEADV2_LANE_SHAPE, same as classify: off = skipped
+# entirely; warn = runs and logs but never fails; enforce = hard failure.
+A9_EVALUATED=0
+A9_BIN="${SCRIPT_DIR}/leadv2-lane-shape.sh"
+A9_CTX="${LEADV2_HANDOFF_DIR}/${TASK_ID}/context.yaml"
+if [[ "${LEADV2_LANE_SHAPE:-off}" != "off" && -f "${A9_CTX}" && -x "${A9_BIN}" ]]; then
+  if python3 -c "import yaml,sys; sys.exit(0 if (yaml.safe_load(open(sys.argv[1]))or{}).get('shape') else 1)" "${A9_CTX}" 2>/dev/null; then
+    A9_EVALUATED=1
+    A9_FAIL=0
+    if ! "${A9_BIN}" assert-artifacts --task-id "${TASK_ID}"; then
+      A9_FAIL=1
+      failures+=("A9: ${TASK_ID} — per-shape artifact set incomplete, see stderr above; run: ${A9_BIN} assert-artifacts --task-id ${TASK_ID}")
+    fi
+    if ! "${A9_BIN}" retro-check --task-id "${TASK_ID}"; then
+      A9_FAIL=1
+      failures+=("A9: ${TASK_ID} — retro shape check failed: the actual diff needs LINE but the task declared solo (see stderr above)")
+    fi
+    if [[ "${A9_FAIL}" -eq 0 ]]; then
+      log_pass "A9 lane-shape: ${TASK_ID} artifact set + retro shape check OK"
+    else
+      log_fail "A9 lane-shape: ${TASK_ID} failed (see failures above)"
+    fi
+  fi
+fi
+
 # ── result ────────────────────────────────────────────────────────────────────
 # M2: TOTAL_HARD reflects whether A8 was actually evaluated (7 base checks
 # A1-A7 + A8 only when A8_EVALUATED=1) -- a warn-skipped A8 (non-deploy task,
 # check script not vendored) must not inflate the receipt to a false "8/8".
-TOTAL_HARD=$((7 + A8_EVALUATED))
+TOTAL_HARD=$((7 + A8_EVALUATED + A9_EVALUATED))
 A8_SUFFIX=""
 [[ "$A8_EVALUATED" -eq 0 ]] && A8_SUFFIX=" (A8 not evaluated)"
 log_info "=== Phase 8 assertions for ${TASK_ID}: $((TOTAL_HARD - ${#failures[@]})) / ${TOTAL_HARD} HARD checks PASS${A8_SUFFIX} ==="
