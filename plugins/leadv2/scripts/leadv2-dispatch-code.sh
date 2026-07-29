@@ -356,42 +356,6 @@ sig = {
     "glm_lock_busy":           bool(int(e.get("DC_GLM_LOCK_BUSY", "0") or 0)),
 }
 
-# ── SMART-ROUTING-V2 dispatch resolver ─────────────────────────────────────
-# Composes the existing layered components in their strict order: L1 hard
-# filters -> L2 arm-blind task judge -> L3 reserve/score -> L4 bandit samples.
-# It does not implement a second policy predicate.
-resolve_v2_dispatch() { # <mission> <sig8> <class> <kind> <protected>
-  local mission="$1" sig8="$2" class="$3" kind="$4" protected="$5"
-  local rv2_bin="${LEADV2_ROUTER_V2_BIN:-${SCRIPT_DIR}/leadv2-router-v2.sh}"
-  local judge_bin="${LEADV2_TASK_JUDGE_BIN:-${SCRIPT_DIR}/leadv2-task-judge.sh}"
-  local bandit_bin="${LEADV2_ROUTE_BANDIT_BIN:-${SCRIPT_DIR}/leadv2-route-bandit.sh}"
-  local tmp mission_file l1_file estimate_file samples_file weights_file filter_out estimate bandit_out out rc
-  [[ -f "${rv2_bin}" && -f "${judge_bin}" && -f "${bandit_bin}" ]] || { log_err "router v2 dependency missing"; return 1; }
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/leadv2-dispatch-v2.XXXXXX")" || return 1
-  mission_file="${tmp}/mission"; l1_file="${tmp}/l1.json"; estimate_file="${tmp}/estimate.json"
-  samples_file="${tmp}/samples.json"; weights_file="${tmp}/weights.json"
-  printf '%s' "${mission}" > "${mission_file}"
-  filter_out="$(PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_ROUTING_YAML="${ROUTING_YAML}" bash "${rv2_bin}" filter --task-id "${sig8}" --mission-kind "${kind}" $([[ "${protected}" == "1" ]] && printf -- '--protected-path') 2>/dev/null)" || { rm -rf "${tmp}"; return 1; }
-  python3 -c '
-import json,sys
-rows=sys.stdin.read().splitlines(); eligible=next((r[9:] for r in rows if r.startswith("eligible=")), ""); filtered=next((r[9:] for r in rows if r.startswith("filtered=")), "[]")
-json.dump({"eligible":[a for a in eligible.split(",") if a],"filtered":json.loads(filtered)},sys.stdout)
-' <<<"${filter_out}" > "${l1_file}" || { rm -rf "${tmp}"; return 1; }
-  estimate="$(PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_ROUTER_V2=1 bash "${judge_bin}" --mission-file "${mission_file}" --task-id "${sig8}" --class "${class}" 2>/dev/null)" || { rm -rf "${tmp}"; return 1; }
-  printf '%s' "${estimate}" > "${estimate_file}"
-  local allowed task_class
-  allowed="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("eligible", [])))' "${l1_file}")"
-  task_class="$(python3 -c 'import json,sys; e=json.load(open(sys.argv[1])); print("%s:%s"%(e.get("work_kind","unknown"),"short" if e.get("duration_class")=="short" and e.get("complexity") in ("trivial","simple") else "long"))' "${estimate_file}")"
-  bandit_out="$(PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_ROUTER_V2=1 bash "${bandit_bin}" sample --context-key "${task_class}" --allowed "${allowed}" --heuristic glm 2>/dev/null)" || true
-  printf '%s\n' "${bandit_out}" | sed -n 's/^samples=//p' | head -1 > "${samples_file}"
-  if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${samples_file}" >/dev/null 2>&1; then
-    python3 -c 'import json,sys; print(json.dumps({a:0.75 for a in json.load(open(sys.argv[1])).get("eligible",[])},sort_keys=True))' "${l1_file}" > "${samples_file}"
-  fi
-  python3 -c 'import json,sys,yaml; cfg=yaml.safe_load(open(sys.argv[1])) or {}; json.dump(((cfg.get("router_v2") or {}).get("headroom_weights")) or [],open(sys.argv[2],"w"))' "${ROUTING_YAML}" "${weights_file}" || { rm -rf "${tmp}"; return 1; }
-  out="$(PROJECT_ROOT="${PROJECT_ROOT}" LEADV2_ROUTING_YAML="${ROUTING_YAML}" bash "${rv2_bin}" resolve --task-id "${sig8}" --routing-yaml "${ROUTING_YAML}" --l1-json "${l1_file}" --estimate-json "${estimate_file}" --samples-json "${samples_file}" --headroom-weights-json "${weights_file}" --account "${LEADV2_ROUTER_V2_ACCOUNT:-unknown}" 2>/dev/null)"
-  rc=$?; rm -rf "${tmp}"; [[ ${rc} -eq 0 ]] || return "${rc}"
-  printf '%s\n' "${out}"; printf 'tier=%s\n' "${LEADV2_ROUTER_V2_CODEX_TIER:-standard}"
-}
 rules = [
     (bool(sig["mission_kind"]) and sig["mission_kind"] in opus_kinds,
         None, "opus", "opus_mission_kind"),
@@ -423,6 +387,28 @@ if arm == "codex":
     tier = codex_default_tier
 print("arm=%s" % arm); print("rule=%s" % rule); print("reason=%s" % reason); print("tier=%s" % tier)
 PY
+}
+
+# v2's sole dispatch composition: L1 -> L2 -> L3 -> L4.  Policy remains in
+# router-v2's filter, not in this funnel.
+resolve_v2_dispatch() {
+  local mission="$1" sig8="$2" class="$3" kind="$4" protected="$5" tmp out estimate allowed task_class rc
+  local rv2="${LEADV2_ROUTER_V2_BIN:-${SCRIPT_DIR}/leadv2-router-v2.sh}" judge="${LEADV2_TASK_JUDGE_BIN:-${SCRIPT_DIR}/leadv2-task-judge.sh}" bandit="${LEADV2_ROUTE_BANDIT_BIN:-${SCRIPT_DIR}/leadv2-route-bandit.sh}"
+  [[ -f "$rv2" && -f "$judge" && -f "$bandit" ]] || return 1
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/leadv2-dispatch-v2.XXXXXX")" || return 1
+  printf '%s' "$mission" > "$tmp/mission"
+  out="$(PROJECT_ROOT="$PROJECT_ROOT" LEADV2_ROUTING_YAML="$ROUTING_YAML" bash "$rv2" filter --task-id "$sig8" --mission-kind "$kind" $([[ "$protected" == 1 ]] && printf -- '--protected-path') 2>/dev/null)" || { rm -rf "$tmp"; return 1; }
+  python3 -c 'import json,sys; r=sys.stdin.read().splitlines(); e=next((x[9:] for x in r if x.startswith("eligible=")),""); f=next((x[9:] for x in r if x.startswith("filtered=")),"[]"); json.dump({"eligible":[x for x in e.split(",") if x],"filtered":json.loads(f)},sys.stdout)' <<<"$out" > "$tmp/l1.json" || { rm -rf "$tmp"; return 1; }
+  estimate="$(PROJECT_ROOT="$PROJECT_ROOT" LEADV2_ROUTER_V2=1 bash "$judge" --mission-file "$tmp/mission" --task-id "$sig8" --class "$class" 2>/dev/null)" || { rm -rf "$tmp"; return 1; }
+  printf '%s' "$estimate" > "$tmp/estimate.json"
+  allowed="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["eligible"]))' "$tmp/l1.json")"
+  task_class="$(python3 -c 'import json,sys; e=json.load(open(sys.argv[1])); print(e["work_kind"]+":"+("short" if e["duration_class"]=="short" and e["complexity"] in ("trivial","simple") else "long"))' "$tmp/estimate.json")"
+  out="$(PROJECT_ROOT="$PROJECT_ROOT" LEADV2_PROJECT_ROOT="$PROJECT_ROOT" LEADV2_ROUTER_V2=1 bash "$bandit" sample --context-key "$task_class" --allowed "$allowed" --heuristic glm 2>/dev/null)" || true
+  printf '%s\n' "$out" | sed -n 's/^samples=//p' | head -1 > "$tmp/samples.json"
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$tmp/samples.json" >/dev/null 2>&1 || python3 -c 'import json,sys; print(json.dumps({x:.75 for x in json.load(open(sys.argv[1]))["eligible"]}))' "$tmp/l1.json" > "$tmp/samples.json"
+  python3 -c 'import json,sys,yaml; json.dump(((yaml.safe_load(open(sys.argv[1])) or {}).get("router_v2") or {}).get("headroom_weights",[]),open(sys.argv[2],"w"))' "$ROUTING_YAML" "$tmp/weights.json" || { rm -rf "$tmp"; return 1; }
+  out="$(PROJECT_ROOT="$PROJECT_ROOT" LEADV2_ROUTING_YAML="$ROUTING_YAML" bash "$rv2" resolve --task-id "$sig8" --routing-yaml "$ROUTING_YAML" --l1-json "$tmp/l1.json" --estimate-json "$tmp/estimate.json" --samples-json "$tmp/samples.json" --headroom-weights-json "$tmp/weights.json" --account "${LEADV2_ROUTER_V2_ACCOUNT:-unknown}" 2>/dev/null)"; rc=$?
+  rm -rf "$tmp"; [[ $rc -eq 0 ]] || return "$rc"; printf '%s\ntier=%s\n' "$out" "${LEADV2_ROUTER_V2_CODEX_TIER:-standard}"
 }
 
 # ── dispatch-ledger dedup (FIX PASS 4: pending/confirmed + TTL, see doc block above) ──
@@ -1449,8 +1435,8 @@ confirmation-seeking; only for a decision you cannot make yourself."
       log_err "dispatch ledger record failed (rc=${orc}) for task=${sig8}"
       exit 1
     fi
-    emit decision "route_resolved by=router model=opus task=${sig8} rule=${rule} reason=${reason}"
-    printf 'route_resolved by=router model=opus task=%s rule=%s reason=%s\n' "${sig8}" "${rule}" "${reason}"
+    emit decision "route_resolved by=router router=${router_label} model=opus task=${sig8} rule=${rule} reason=${reason}"
+    printf 'route_resolved by=router router=%s model=opus task=%s rule=%s reason=%s\n' "${router_label}" "${sig8}" "${rule}" "${reason}"
     log "route_note model=opus requires_lead_judgment (GLM banned for kind=${kind:-<none>}); not auto-dispatched"
     exit 3
   fi
@@ -1546,8 +1532,8 @@ confirmation-seeking; only for a decision you cannot make yourself."
       exit 2
       ;;
     0)
-      emit decision "route_resolved by=router model=${candidate} task=${sig8} rule=${rule} reason=${reason}"
-      printf 'route_resolved by=router model=%s task=%s rule=%s reason=%s\n' "${candidate}" "${sig8}" "${rule}" "${reason}"
+      emit decision "route_resolved by=router router=${router_label} model=${candidate} task=${sig8} rule=${rule} reason=${reason}"
+      printf 'route_resolved by=router router=%s model=%s task=%s rule=%s reason=%s\n' "${router_label}" "${candidate}" "${sig8}" "${rule}" "${reason}"
       exit 0
       ;;
     7)
@@ -1556,8 +1542,8 @@ confirmation-seeking; only for a decision you cannot make yourself."
       ;;
     4)
       if [[ "${spawn}" != "1" ]]; then
-        emit decision "route_resolved by=router model=${candidate} task=${sig8} rule=${rule} reason=${reason}"
-        printf 'route_resolved by=router model=%s task=%s rule=%s reason=%s\n' "${candidate}" "${sig8}" "${rule}" "${reason}"
+        emit decision "route_resolved by=router router=${router_label} model=${candidate} task=${sig8} rule=${rule} reason=${reason}"
+        printf 'route_resolved by=router router=%s model=%s task=%s rule=%s reason=%s\n' "${router_label}" "${candidate}" "${sig8}" "${rule}" "${reason}"
         emit decision "dispatch_rolled_back reason=no_spawn_dry_run task=${sig8}"
         exit 0
       fi
