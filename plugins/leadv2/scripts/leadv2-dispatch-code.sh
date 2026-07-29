@@ -165,6 +165,39 @@
 #      confirm/abort ever rewrites a row) -- they're simply ignored by dispatch_reserve's
 #      blocking check once past their TTL; the ledger accumulates orphaned rows from dead
 #      launchers over time, an accepted tradeoff (no GC required for correctness).
+#
+# WHAT IT DOES (DISPATCH-OUTCOME-LEDGER-01, 2026-07-29 -- OUTCOME, not intent)
+#   8. The ledger above records that a task was SENT (reserved/confirmed), not whether it
+#      was DONE. Incident: three lanes were dispatched to Codex at 0 credits; each returned
+#      status=completed/phase=done and produced NOTHING -- no commit, no diff, no evidence --
+#      yet their CONFIRMED rows blocked re-dispatch of the identical mission for the full
+#      CONFIRMED_TTL (2h), recoverable only by hand-editing the ledger file (--force is, by
+#      design, never permitted for dedup). FIX: dispatch_reserve now resolves OUTCOME for a
+#      matching CONFIRMED-and-fresh row before treating it as blocking:
+#        - _dispatch_worker_liveness(arm, handle) reuses each arm's OWN spawn-time liveness
+#          check (glm: glm-coder.sh status; sonnet: kill -0; codex: leadv2-lane-liveness.sh,
+#          the shared authoritative-provider-status tool) -- composes with the LANE-SHAPE-01
+#          liveness primitives rather than re-deriving them. "alive" or "unknown" (liveness
+#          can't be proven) BLOCKS, same as today -- a live or unprovable task is never freed.
+#        - Only once liveness says "dead" (finished) does _dispatch_evidence_exists(created_
+#          epoch) run: any commit since the reservation, reachable from any ref (worktrees
+#          share the repo's object store), touching a path outside EVIDENCE_EXCLUDE_RE. A
+#          git failure or undeterminable timestamp defaults to "evidence exists" (blocks) --
+#          the ledger only ever frees a sig it has POSITIVELY proven finished-and-empty.
+#      "Runtime state churn" -- lock files, the bus offset store, the cross-worktree
+#      active.yaml registry -- is excluded from evidence by EVIDENCE_EXCLUDE_RE (override:
+#      LEADV2_DISPATCH_EVIDENCE_EXCLUDE_RE) so a lane that only touched its own bookkeeping
+#      is correctly treated as empty, not as having shipped real work.
+#      PERFORMANCE (do not repeat FIX PASS 4's mistake): liveness/evidence checks are READ-
+#      ONLY external calls (status queries, git log) that can be slow -- they run OUTSIDE the
+#      lock, in a first unlocked pass. dispatch_reserve then re-acquires the short flock and
+#      re-checks with the ORIGINAL pure/local (awk-only, no external calls) TTL logic,
+#      excluding by exact token only the row(s) the unlocked pass already proved reclaimable
+#      -- any OTHER row (e.g. a concurrent caller's fresh reservation racing in that tiny
+#      window) still blocks normally. The lock is never held across a status/evidence check,
+#      exactly as fix-pass-4 requires for spawn.
+#      ONE-STEP ROLLBACK: LEADV2_DISPATCH_OUTCOME_LEDGER=0 restores today's behavior exactly
+#      -- a CONFIRMED row blocks for the full CONFIRMED_TTL regardless of outcome. Default 1.
 
 set -uo pipefail   # -u safe (quote everything, no unbound vars); NO -e (refusals must journal)
 
@@ -188,6 +221,11 @@ ACTIVE_DISPATCH_TOKEN=""
 # must stay above a worker's realistic max lifetime so a still-running task never looks free.
 PENDING_TTL="${LEADV2_DISPATCH_PENDING_TTL_S:-30}"
 CONFIRMED_TTL="${LEADV2_DISPATCH_CONFIRMED_TTL_S:-7200}"
+# DISPATCH-OUTCOME-LEDGER-01 (see doc block item 8): one-step rollback flag + the evidence
+# exclusion list (runtime-state churn that must never count as "real work").
+OUTCOME_LEDGER="${LEADV2_DISPATCH_OUTCOME_LEDGER:-1}"
+_EVIDENCE_EXCLUDE_RE_DEFAULT='\.lock$|(^|/)docs/leadv2/\.bus-offsets/|(^|/)docs/leadv2/active\.yaml$'
+EVIDENCE_EXCLUDE_RE="${LEADV2_DISPATCH_EVIDENCE_EXCLUDE_RE:-${_EVIDENCE_EXCLUDE_RE_DEFAULT}}"
 
 log()        { printf '[%s] %s\n' "$SCRIPT_NAME" "$*" >&2; }
 log_err()    { printf '[%s] ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2; }
@@ -335,24 +373,181 @@ _dispatch_new_token() {
   printf '%s-%s-%s' "${pid}" "$(_now_epoch)" "${rnd}"
 }
 
-# Scans every row for <sig>; blocked (rc0) if ANY row is state=confirmed younger than
-# CONFIRMED_TTL, or state=pending younger than PENDING_TTL -- both mean a live-or-plausibly-
-# live claim on the sig exists right now. A stale pending (dead launcher, never
-# confirmed/aborted) or an expired confirmed row is silently ignored (reclaimable) -- rows
-# are never proactively deleted for this, only exact-token confirm/abort ever rewrites one.
-_dispatch_sig_blocked() {  # <ledger_file> <sig> <now_epoch> -> rc0 blocked; rc1 free/reclaimable
+# ── DISPATCH-OUTCOME-LEDGER-01 helpers (doc block item 8) ─────────────────────────
+# Extracts the fields the outcome check needs from one ledger row, in a SINGLE python
+# call (rows are small, but a sig with an active row is looked up on every dispatch of
+# that mission, so one parse beats five). Missing/unparseable fields come back empty --
+# callers already treat empty arm/handle as "unknown liveness" (blocks, same as today).
+_dispatch_row_fields() {  # <json_line> -> "state<TAB>created_epoch<TAB>arm<TAB>handle<TAB>token"
+  python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    d = {}
+print('\t'.join(str(d.get(k, '') or '') for k in ('state', 'created_epoch', 'arm', 'handle', 'token')))
+" "$1" 2>/dev/null
+}
+
+# Strips a raw launcher handle down to the bare identifier the liveness check needs, and to
+# something safe to hand-embed in JSON (no quotes/backslashes). glm run-ids and codex job-
+# ids are already alnum/dash. sonnet's raw handle is claude-subsession.sh's whole handle
+# line, "PID=<n> LABEL=... SESSION_ID=..." -- only the PID is a liveness token.
+_dispatch_normalize_handle() {  # <arm> <raw_handle> -> normalized handle (may be empty)
+  local arm="$1" raw="$2"
+  case "${arm}" in
+    sonnet) printf '%s\n' "${raw}" | sed -n 's/^PID=\([0-9][0-9]*\).*/\1/p' ;;
+    *)      printf '%s' "${raw//[\"\\]/}" ;;
+  esac
+}
+
+# Per-arm liveness, reusing the SAME checks each arm's own spawn-time verification already
+# performs (glm: glm-coder.sh status; sonnet: kill -0; codex: leadv2-lane-liveness.sh, the
+# shared authoritative-provider-status tool -- composes with it instead of re-deriving codex
+# job state here). "unknown" is the safe default on any ambiguity (unreadable status, no
+# handle recorded -- e.g. a pre-existing row from before this feature shipped, or an opus
+# row that never spawns): a row whose liveness can't be proven dead keeps blocking, exactly
+# like today, never freed on a guess.
+_dispatch_worker_liveness() {  # <arm> <handle> -> alive|dead|unknown (stdout)
+  local arm="$1" handle="$2"
+  [[ -n "${handle}" ]] || { printf 'unknown'; return; }
+  case "${arm}" in
+    glm)
+      local raw status
+      raw="$(bash "${GLM_BIN}" status "${handle}" 2>/dev/null)" || { printf 'unknown'; return; }
+      status="$(printf '%s\n' "${raw}" | sed -n 's/^status:[[:space:]]*//p' | head -1)"
+      case "${status}" in
+        running)         printf 'alive' ;;
+        complete|failed) printf 'dead' ;;
+        *)               printf 'unknown' ;;
+      esac
+      ;;
+    sonnet)
+      if [[ "${handle}" =~ ^[0-9]+$ ]] && kill -0 "${handle}" 2>/dev/null; then
+        printf 'alive'
+      else
+        printf 'dead'
+      fi
+      ;;
+    codex)
+      local liveness_bin verdict
+      liveness_bin="${LEADV2_DISPATCH_LANE_LIVENESS_BIN:-${SCRIPT_DIR}/leadv2-lane-liveness.sh}"
+      [[ -f "${liveness_bin}" ]] || { printf 'unknown'; return; }
+      verdict="$(CODEX_TASK_SH="${CODEX_BIN}" bash "${liveness_bin}" \
+        --project-root "${PROJECT_ROOT}" --job "${handle}" --json 2>/dev/null \
+        | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin); jobs = d.get('jobs') or []
+    print(jobs[0].get('verdict', 'unknown') if jobs else 'unknown')
+except Exception:
+    print('unknown')
+" 2>/dev/null)"
+      case "${verdict}" in
+        running)               printf 'alive' ;;
+        done|failed|cancelled) printf 'dead' ;;
+        *)                     printf 'unknown' ;;
+      esac
+      ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# rc0: at least one commit since <created_epoch>, reachable from any ref (worktrees share
+# the repo's object/ref store), touches a path outside EVIDENCE_EXCLUDE_RE -- OR the check
+# itself is undeterminable (bad timestamp, git failure: not a repo, etc). rc1: POSITIVELY
+# proven no such commit exists. The asymmetry is deliberate -- an undeterminable result
+# defaults to "evidence exists" (blocks) so this can only ever free a sig it has actually
+# proven finished-and-empty, never one it merely failed to check.
+_dispatch_evidence_exists() {  # <created_epoch> -> rc0 evidence found or undeterminable; rc1 none
+  local created="$1" since_iso raw grc
+  [[ "${created}" =~ ^[0-9]+$ ]] || return 0
+  since_iso="$(python3 -c "
+import datetime, sys
+print(datetime.datetime.utcfromtimestamp(int(sys.argv[1])).strftime('%Y-%m-%dT%H:%M:%SZ'))
+" "${created}" 2>/dev/null)"
+  [[ -n "${since_iso}" ]] || return 0
+  raw="$(git -C "${PROJECT_ROOT}" log --all --since="${since_iso}" --name-only --pretty=format: 2>/dev/null)"; grc=$?
+  [[ ${grc} -eq 0 ]] || return 0
+  printf '%s\n' "${raw}" | grep -vE '^\s*$' | grep -vE "${EVIDENCE_EXCLUDE_RE}" | grep -q .
+}
+
+# rc0: this row still blocks (worker alive, liveness undetermined, or finished-with-
+# evidence). rc1: this row no longer blocks (worker finished AND left no evidence -- the
+# mission's failure mode: "returned status=completed and produced nothing").
+_dispatch_outcome_blocks() {  # <arm> <handle> <created_epoch> <sig8> -> rc0 blocks; rc1 free
+  local arm="$1" handle="$2" created="$3" sig8="$4" liveness
+  liveness="$(_dispatch_worker_liveness "${arm}" "${handle}")"
+  case "${liveness}" in
+    dead)
+      if _dispatch_evidence_exists "${created}"; then
+        return 0
+      fi
+      log "dispatch_reclaimed task=${sig8} arm=${arm} handle=${handle} reason=finished_no_evidence"
+      return 1
+      ;;
+    *) return 0 ;;   # alive or unknown -- never free a live or unprovable task
+  esac
+}
+
+# OUTSIDE any lock (see doc block item 8 PERFORMANCE note): walks every row for <sig>. A row
+# that unconditionally blocks (pending-and-fresh, or confirmed-and-fresh whose outcome is
+# alive/unknown/finished-with-evidence) makes the whole sig blocked -- rc0, nothing printed.
+# A confirmed-and-fresh row that resolves to finished-with-no-evidence does NOT block; its
+# token is echoed on stdout (space-separated, one call may accumulate several) so the
+# caller's short in-lock re-check can exclude EXACTLY that row by identity without re-running
+# the slow checks that already decided it -- never a blanket sig-level bypass.
+_dispatch_sig_blocked() {  # <ledger_file> <sig> <now_epoch> -> rc0 blocked; rc1 free (stdout: reclaimed tokens)
   local f="$1" sig="$2" now="$3"
   [[ -f "${f}" ]] || return 1
-  awk -v needle="\"task_sig\":\"${sig}\"" -v now="${now}" -v ptt="${PENDING_TTL}" -v ctt="${CONFIRMED_TTL}" '
+  local needle="\"task_sig\":\"${sig}\"" line fields state created arm handle token age sig8 reclaimed=""
+  sig8="${sig:0:8}"
+  while IFS= read -r line; do
+    [[ -n "${line}" && "${line}" == *"${needle}"* ]] || continue
+    fields="$(_dispatch_row_fields "${line}")"
+    IFS=$'\t' read -r state created arm handle token <<< "${fields}"
+    [[ "${created}" =~ ^[0-9]+$ ]] || created=0
+    age=$(( now - created ))
+    if [[ "${state}" == "pending" && ${age} -lt ${PENDING_TTL} ]]; then
+      printf '%s' "${reclaimed}"; return 0
+    fi
+    if [[ "${state}" == "confirmed" && ${age} -lt ${CONFIRMED_TTL} ]]; then
+      if [[ "${OUTCOME_LEDGER}" != "1" ]]; then
+        printf '%s' "${reclaimed}"; return 0
+      fi
+      if _dispatch_outcome_blocks "${arm}" "${handle}" "${created}" "${sig8}"; then
+        printf '%s' "${reclaimed}"; return 0
+      fi
+      reclaimed="${reclaimed}${reclaimed:+ }${token}"
+    fi
+  done < "${f}"
+  printf '%s' "${reclaimed}"
+  return 1
+}
+
+# Pure/local (awk, instant -- no external calls): the ORIGINAL fix-pass-4 semantics, blocked
+# if ANY row for <sig> is confirmed-and-fresh or pending-and-fresh, EXCEPT a row whose token
+# is in <exclude_tokens> (space-separated). This is the short in-lock race-guard run AFTER
+# the slower, unlocked, outcome-aware _dispatch_sig_blocked above has already decided which
+# specific rows are reclaimable -- see doc block item 8 PERFORMANCE note for why the outcome
+# check itself must never run under the lock.
+_dispatch_sig_blocked_fast() {  # <ledger_file> <sig> <now_epoch> <exclude_tokens> -> rc0 blocked
+  local f="$1" sig="$2" now="$3" exclude="$4"
+  [[ -f "${f}" ]] || return 1
+  awk -v needle="\"task_sig\":\"${sig}\"" -v now="${now}" -v ptt="${PENDING_TTL}" -v ctt="${CONFIRMED_TTL}" -v excl=" ${exclude} " '
     index($0, needle) == 0 { next }
     {
-      state = ""; created = 0
+      state = ""; created = 0; token = ""
       if (match($0, /"state":"[a-z]+"/)) {
         s = substr($0, RSTART, RLENGTH); gsub(/"state":"|"/, "", s); state = s
       }
       if (match($0, /"created_epoch":[0-9]+/)) {
         c = substr($0, RSTART, RLENGTH); sub(/"created_epoch":/, "", c); created = c + 0
       }
+      if (match($0, /"token":"[^"]*"/)) {
+        t = substr($0, RSTART, RLENGTH); gsub(/"token":"|"/, "", t); token = t
+      }
+      if (index(excl, " " token " ") > 0) next
       age = now - created
       if (state == "confirmed" && age < ctt) { print "blocked"; exit }
       if (state == "pending"   && age < ptt) { print "blocked"; exit }
@@ -376,15 +571,29 @@ dispatch_reserve() {  # <sig> <arm> <rule> -> stdout: token (rc0 only)
   local sig="$1" arm="$2" rule="$3" lockf f
   f="$(dispatch_ledger_file)"; lockf="$(dispatch_lock_file)"
   mkdir -p "${DISPATCH_LEDGER_DIR}"
+
+  # DISPATCH-OUTCOME-LEDGER-01: outcome resolution (liveness + evidence) happens in a FIRST
+  # pass OUTSIDE any lock -- these are read-only external calls (status queries, git log)
+  # that can be slow, and fix-pass-4 already learned the hard way that holding the per-repo
+  # lock across a slow call blocks every OTHER task's dispatch too. The result is only ever
+  # "which specific rows (by exact token) are proven reclaimable" -- the lock still governs
+  # every actual write.
+  local now reclaimed="" outer_rc=0
+  now="$(_now_epoch)"
+  if [[ "${ENFORCE}" == "1" ]]; then
+    reclaimed="$(_dispatch_sig_blocked "${f}" "${sig}" "${now}")"; outer_rc=$?
+    [[ ${outer_rc} -eq 0 ]] && return 2
+  fi
+
   (
     flock -w 10 -x 9 || exit 3
-    local now token
-    now="$(_now_epoch)"
-    if [[ "${ENFORCE}" == "1" ]] && _dispatch_sig_blocked "${f}" "${sig}" "${now}"; then
+    local now2 token
+    now2="$(_now_epoch)"
+    if [[ "${ENFORCE}" == "1" ]] && _dispatch_sig_blocked_fast "${f}" "${sig}" "${now2}" "${reclaimed}"; then
       exit 2
     fi
     token="$(_dispatch_new_token)"
-    if ! _dispatch_append_pending_locked "${f}" "${sig}" "${arm}" "${rule}" "${token}" "${now}"; then
+    if ! _dispatch_append_pending_locked "${f}" "${sig}" "${arm}" "${rule}" "${token}" "${now2}"; then
       exit 1
     fi
     printf '%s' "${token}"
@@ -396,13 +605,21 @@ dispatch_reserve() {  # <sig> <arm> <rule> -> stdout: token (rc0 only)
 # Both match by the EXACT unique token -- never a blanket task_sig filter -- so a concurrent
 # caller's own in-flight or already-confirmed row for the SAME sig is never collaterally
 # touched (mission: "SAME-SECOND UNIQUE ... each rollback removes only its own row").
-_dispatch_confirm_locked() {  # <file> <token> -> rc0 confirmed; rc1 write failed; rc2 row not found
-  local f="$1" token="$2" tmp found=0 ln
+_dispatch_confirm_locked() {  # <file> <token> <handle> -> rc0 confirmed; rc1 write failed; rc2 row not found
+  local f="$1" token="$2" handle="${3:-}" tmp found=0 ln new
   [[ -f "${f}" ]] || return 2
   tmp="$(mktemp "${f}.confirm.XXXXXX")" || return 1
   while IFS= read -r ln || [[ -n "${ln}" ]]; do
     if [[ "${ln}" == *"\"token\":\"${token}\""* && "${ln}" == *'"state":"pending"'* ]]; then
-      printf '%s\n' "${ln/\"state\":\"pending\"/\"state\":\"confirmed\"}" >> "${tmp}"
+      new="${ln/\"state\":\"pending\"/\"state\":\"confirmed\"}"
+      # DISPATCH-OUTCOME-LEDGER-01: persist the launcher handle on the row so a later
+      # dispatch of the SAME sig can resolve this row's liveness/evidence outcome (doc
+      # block item 8). Only glm/sonnet/codex confirms carry a handle; opus never spawns.
+      if [[ -n "${handle}" ]]; then
+        new="${new%\}}"
+        new="${new},\"handle\":\"${handle}\"}"
+      fi
+      printf '%s\n' "${new}" >> "${tmp}"
       found=1
     else
       printf '%s\n' "${ln}" >> "${tmp}"
@@ -427,11 +644,11 @@ _dispatch_abort_locked() {  # <file> <token> -> rc0 removed (or already absent);
   fi
   return 0
 }
-dispatch_confirm() {  # <token> -> rc0 confirmed; rc1 write-fail(hard); rc2 not-found; rc3 lock-timeout
-  local token="$1" f lockf
+dispatch_confirm() {  # <token> <handle> -> rc0 confirmed; rc1 write-fail(hard); rc2 not-found; rc3 lock-timeout
+  local token="$1" handle="${2:-}" f lockf
   f="$(dispatch_ledger_file)"; lockf="$(dispatch_lock_file)"
   ( flock -w 10 -x 9 || exit 3
-    _dispatch_confirm_locked "${f}" "${token}"
+    _dispatch_confirm_locked "${f}" "${token}" "${handle}"
   ) 9>"${lockf}"
 }
 dispatch_abort() {  # <token> -> rc0 removed/absent; rc1 write-fail(hard); rc3 lock-timeout
@@ -752,17 +969,23 @@ atomic_dispatch_reserve_spawn_confirm() {  # <sig> <arm> <rule> <mission> <sig8>
   esac
   ACTIVE_DISPATCH_TOKEN="${token}"
 
-  local src=1
+  local src=1 spawn_out=""
   if [[ "${do_spawn}" == "1" ]]; then
-    spawn_worker "${arm}" "${mission}" "${sig8}"; src=$?
+    spawn_out="$(spawn_worker "${arm}" "${mission}" "${sig8}")"; src=$?
+    printf '%s\n' "${spawn_out}"
   fi
   if [[ "${do_spawn}" == "1" && ${src} -eq 0 ]]; then
     # spawn_worker only ever returns 0 after POSITIVELY verifying liveness (glm: run-dir
     # status check; sonnet: kill -0 on a parsed PID) -- "real liveness or drop the claim"
     # is already enforced by spawn_worker's own return contract, so confirming right after
     # a 0 return never confirms a merely-unproven worker.
-    local crc
-    dispatch_confirm "${token}"; crc=$?
+    # DISPATCH-OUTCOME-LEDGER-01: parse the handle spawn_worker just printed (its one
+    # "worker_spawned ... handle=<h>" line) and persist a normalized form on the confirmed
+    # row so a LATER dispatch of the same sig can resolve this row's outcome.
+    local crc raw_handle handle
+    raw_handle="$(printf '%s\n' "${spawn_out}" | sed -n 's/.*[[:space:]]handle=\(.*\)$/\1/p' | tail -1)"
+    handle="$(_dispatch_normalize_handle "${arm}" "${raw_handle}")"
+    dispatch_confirm "${token}" "${handle}"; crc=$?
     ACTIVE_DISPATCH_TOKEN=""
     [[ ${crc} -eq 0 ]] && return 0
     return 5   # worker IS live but the ledger write to record it failed -- hard error
