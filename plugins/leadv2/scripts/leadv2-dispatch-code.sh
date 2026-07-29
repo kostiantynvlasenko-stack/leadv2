@@ -898,14 +898,30 @@ architect_prepass() { # <raw mission> <sig8> <writes> -> 0 ran/skipped/disabled,
   printf '%s\n' "You are the architect prepass. Turn this mission into a scoped implementation design. State: changes, exact files, acceptance evidence, and explicit non-goals. Do not implement.\n\nMISSION:\n${raw}" > "${mfile}"
   out="$(PROJECT_ROOT="${PROJECT_ROOT}" bash "${ARCHITECT_BIN}" --role architect --model "${LEADV2_DISPATCH_ARCHITECT_MODEL:-opus}" --task-id "dispatch-${sig8}-architect" --mission-file "${mfile}" --wait 2>&1)"; rc=$?
   rm -f "${mfile}"
-  if [[ ${rc} -ne 0 ]]; then
+  # PREPASS-READS-ARTIFACT-01 (2026-07-29): the design is NOT on the launcher's stdout.
+  # claude-subsession.sh writes the agent's actual text to its handoff dir and prints only
+  # a handle on stdout / cost+session diagnostics on stderr -- exactly the trap FIX PASS 5
+  # documents for spawn_worker below, repeated here. Capturing `2>&1` therefore wrote log
+  # metadata into architect-prepass.md, workers found no design, and the gate then killed
+  # or stalled every product dispatch (observed live 2026-07-29: the architect had in fact
+  # produced a correct 21KB design that nobody ever read). Read the ARTIFACT.
+  local adir="${PROJECT_ROOT}/docs/handoff/dispatch-${sig8}-architect"
+  local design=""
+  for cand in "${adir}/architect.full.md" "${adir}/architect.md" "${adir}/architect.summary.md"; do
+    [[ -s "${cand}" ]] && { design="${cand}"; break; }
+  done
+  if [[ ${rc} -ne 0 && -z "${design}" ]]; then
     emit decision "architect_prepass task=${sig8} status=failed rc=${rc}"
     log_err "architect prepass failed: ${out}"
     return 1
   fi
-  printf '%s\n' "${out}" > "${f}" || return 1
+  if [[ -n "${design}" ]]; then
+    cat "${design}" > "${f}" || return 1
+  else
+    printf '%s\n' "${out}" > "${f}" || return 1
+  fi
   [[ -s "${f}" ]] || { emit decision "architect_prepass task=${sig8} status=failed reason=empty_output"; return 1; }
-  emit decision "architect_prepass task=${sig8} status=ran artifact=docs/handoff/dispatch-${sig8}/architect-prepass.md"
+  emit decision "architect_prepass task=${sig8} status=ran artifact=docs/handoff/dispatch-${sig8}/architect-prepass.md source=${design:-stdout}"
 }
 
 # ── spawn: actually launch the resolved worker (Finding 2) ────────────────────────
@@ -1392,13 +1408,32 @@ cmd_resolve() {
   IFS=$'\t' read -r product_class classification_reason <<< "$(classify_product_work "${kind}" "${mission}")"
   emit decision "dispatch_classified task=${sig8} class=${product_class} reason=${classification_reason} kind=${kind:-unknown}"
   if [[ "${product_class}" == "product" ]]; then
+    # PREPASS-DEGRADES-01 (2026-07-29): a prepass failure must NEVER stop the work. On
+    # 2026-07-29 this hard exit killed product dispatches outright -- the task never
+    # launched at all -- which is strictly worse than dispatching an unrefined mission.
+    # The gate exists to IMPROVE a mission when it can, not to hold the fleet hostage when
+    # it cannot. Degrade to the raw mission and journal why, loudly.
     if ! architect_prepass "${mission}" "${sig8}" "${lane_writes}"; then
-      log_err "architect prepass did not produce a scoped design for product task=${sig8}"
-      exit 1
+      emit decision "architect_prepass task=${sig8} status=degraded reason=no_design action=dispatch_raw_mission"
+      log_err "architect prepass produced no design for product task=${sig8} -- dispatching the raw mission instead"
     fi
-    # The developer receives the independently-produced design artifact, never the
-    # supervisor's raw prose.  The artifact is also the durable audit record.
-    mission="Product implementation task dispatch-${sig8}. Read and implement ONLY the scoped design in docs/handoff/dispatch-${sig8}/architect-prepass.md. Preserve its non-goals. Before closing, run the required end-to-end gate and cross-provider review gate recorded for this task."
+    # The developer receives the independently-produced design -- but INLINE, and only
+    # when one actually exists. Two failures on 2026-07-29 came from this line: it replaced
+    # the mission with a bare pointer to a file that was empty (so the worker closed as a
+    # no-op) or that the worker was unsure it was allowed to read (so it asked and stalled
+    # for 51 minutes). A pointer is not a mission. Inline the design, keep the original
+    # mission as context, and if there is no design, dispatch the original unchanged.
+    local _pp_file; _pp_file="$(_prepass_file "${sig8}")"
+    if [[ -s "${_pp_file}" ]]; then
+      mission="Product implementation task dispatch-${sig8}. Implement ONLY the scoped design below; preserve its non-goals. Before closing, run the required end-to-end gate and the cross-provider review gate recorded for this task.
+
+===== SCOPED DESIGN (authoritative) =====
+$(cat "${_pp_file}")
+===== END SCOPED DESIGN =====
+
+===== ORIGINAL MISSION (context only; the design above wins on any conflict) =====
+${mission}"
+    fi
   fi
 
   # QUESTION-CHANNEL-DEAD-01 (willingness half): dispatch-code.sh is a lane
