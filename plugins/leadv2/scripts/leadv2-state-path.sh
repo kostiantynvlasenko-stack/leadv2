@@ -104,6 +104,47 @@ fi
 
 mkdir -p "$STATE_ROOT"
 
+# ── Orphan-root reconciliation (QUESTION-CHANNEL-DEAD-01) ──────────────────
+# A prior control-plane root has been observed at "${COMMON_DIR}/leadv2-state"
+# (i.e. INSIDE .git, not under ~/.claude/leadv2-state/<slug>) holding real
+# question files (e.g. active.yaml, questions/*.yaml) that this resolver's
+# canonical STATE_ROOT never reads -- a silent, undelivered-forever question
+# looks identical to "nobody asked". The exact caller that produced that root
+# was never pinned down (no code path in this script or its known callers
+# computes it), so treat it as a standing hazard rather than a one-off: on
+# every resolution, if that path exists and differs from STATE_ROOT, absorb
+# any file not already present in STATE_ROOT (never clobber existing
+# content) and warn loudly so a future orphan is visible instead of silent.
+if [[ -n "${COMMON_DIR:-}" ]]; then
+  ORPHAN_ROOT="${COMMON_DIR}/leadv2-state"
+  if [[ -d "$ORPHAN_ROOT" && "$ORPHAN_ROOT" != "$STATE_ROOT" ]]; then
+    python3 - "$ORPHAN_ROOT" "$STATE_ROOT" <<'PYEOF' || true
+import os, shutil, sys
+
+orphan_root, state_root = sys.argv[1], sys.argv[2]
+for dirpath, dirnames, filenames in os.walk(orphan_root):
+    rel = os.path.relpath(dirpath, orphan_root)
+    dst_dir = state_root if rel == "." else os.path.join(state_root, rel)
+    os.makedirs(dst_dir, exist_ok=True)
+    for fn in filenames:
+        if fn.startswith(".") and fn.endswith(".lock"):
+            continue
+        src = os.path.join(dirpath, fn)
+        dst = os.path.join(dst_dir, fn)
+        if os.path.exists(dst):
+            continue
+        try:
+            shutil.move(src, dst)
+            sys.stderr.write(
+                "[leadv2-state-path] absorbed orphaned control-plane file: "
+                "%s -> %s\n" % (src, dst)
+            )
+        except OSError:
+            continue
+PYEOF
+  fi
+fi
+
 # ── Migration + symlink repair (idempotent, best-effort, never fatal) ──────
 if [[ "$NO_LINK" -eq 0 ]]; then
   python3 - "$STATE_ROOT" "$LINK_ROOT" <<'PYEOF' 2>/dev/null || true
