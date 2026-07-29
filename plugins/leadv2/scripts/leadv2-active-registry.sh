@@ -7,6 +7,8 @@
 #   leadv2_active_unregister <task_id>
 #   leadv2_active_update_phase <task_id> <phase>
 #   leadv2_active_update_pulse <task_id>
+#   leadv2_active_heartbeat <task_id> <checkpoint>              (PULSE-01)
+#   leadv2_active_mark_finished <task_id> <outcome> [<evidence_json>]  (PULSE-01)
 #   leadv2_active_render_index
 #   leadv2_active_list
 #   leadv2_active_check_limits <class>
@@ -276,6 +278,56 @@ try:
                 s["updated_at"] = _now_iso()
                 break
 
+    # PULSE-01: durable per-task heartbeat. Written by ANY arm (Sonnet
+    # subagent, Codex/GLM job wrapper) at a low cadence -- NOT per-tool-call
+    # (leadv2-pulse-json.sh's <50ms/no-python3 hot-path budget forbids a
+    # flock+python write on every tool call; that hook keeps writing its own
+    # local pulse.json, and a caller reconciles it into here occasionally).
+    # heartbeat_checkpoint is bounded so a runaway caller can't bloat the
+    # registry; last_pulse_at is the SAME field the (until now unused)
+    # update_pulse op already wrote, so an old row upgrades in place.
+    elif op == "heartbeat":
+        task_id, ts, checkpoint = args
+        checkpoint = (checkpoint or "")[:200]
+        for s in sessions:
+            if s.get("task_id") == task_id:
+                s["last_pulse_at"] = ts
+                s["heartbeat_checkpoint"] = checkpoint
+                s["updated_at"] = ts
+                break
+        else:
+            print(f"[registry] heartbeat: task not registered: {task_id}", file=sys.stderr)
+            sys.exit(4)
+
+    # PULSE-01: terminal report. `outcome` is the CALLER's claim
+    # (completed/finished_empty/failed/cancelled); `evidence` is a JSON object
+    # the caller computed independently (e.g. {"has_diff": true, "diff_stat_lines": N}
+    # from `git diff --stat`). The reader (leadv2-lane-heartbeat.sh status),
+    # not this writer, decides whether "completed" without evidence gets
+    # downgraded to finished_empty -- this op just records the claim + proof
+    # verbatim so that decision stays auditable and re-derivable.
+    elif op == "mark_finished":
+        task_id, outcome, evidence_json = args
+        try:
+            evidence = json.loads(evidence_json) if evidence_json not in ("", "null") else {}
+        except json.JSONDecodeError as exc:
+            print(f"[registry] mark_finished: invalid evidence JSON: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not isinstance(evidence, dict):
+            print("[registry] mark_finished: evidence must be a JSON object", file=sys.stderr)
+            sys.exit(2)
+        now = _now_iso()
+        for s in sessions:
+            if s.get("task_id") == task_id:
+                s["terminal_status"] = outcome
+                s["terminal_evidence"] = evidence
+                s["terminal_at"] = now
+                s["updated_at"] = now
+                break
+        else:
+            print(f"[registry] mark_finished: task not registered: {task_id}", file=sys.stderr)
+            sys.exit(4)
+
     elif op == "append_provider_receipt":
         task_id, receipt_json = args
         try:
@@ -499,6 +551,39 @@ leadv2_active_update_pulse() {
   lockfile="$(_leadv2_yaml_lockfile)"
   [[ -f "$yaml_file" ]] || return 0
   _leadv2_yaml_py_lock "$lockfile" "$yaml_file" update_pulse "$task_id" "$ts"
+}
+
+# leadv2_active_heartbeat <task_id> <checkpoint>
+# Durable per-task heartbeat (PULSE-01). Call at low cadence (not per tool
+# call) from any arm's wrapper/hook. Returns non-zero if task_id is not
+# registered.
+leadv2_active_heartbeat() {
+  local task_id="${1:?task_id required}"
+  local checkpoint="${2:-}"
+  local ts
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local yaml_file lockfile
+  yaml_file="$(_leadv2_yaml_file)"
+  lockfile="$(_leadv2_yaml_lockfile)"
+  [[ -f "$yaml_file" ]] || return 4
+  _leadv2_yaml_py_lock "$lockfile" "$yaml_file" heartbeat "$task_id" "$ts" "$checkpoint"
+}
+
+# leadv2_active_mark_finished <task_id> <outcome> [<evidence_json>]
+# outcome: completed | finished_empty | failed | cancelled
+# evidence_json: JSON object the caller computed (default '{}' = no proof of
+# output -- the reader treats outcome=completed with empty evidence as
+# finished_empty, never trusting a bare self-report).
+leadv2_active_mark_finished() {
+  local task_id="${1:?task_id required}"
+  local outcome="${2:?outcome required}"
+  local evidence_json="${3:-}"
+  [[ -n "$evidence_json" ]] || evidence_json='{}'
+  local yaml_file lockfile
+  yaml_file="$(_leadv2_yaml_file)"
+  lockfile="$(_leadv2_yaml_lockfile)"
+  [[ -f "$yaml_file" ]] || return 4
+  _leadv2_yaml_py_lock "$lockfile" "$yaml_file" mark_finished "$task_id" "$outcome" "$evidence_json"
 }
 
 # leadv2_active_append_provider_receipt <task_id> <receipt_json>
