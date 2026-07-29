@@ -134,12 +134,22 @@ CLAUDE_BIN="${LEADV2_FANOUT_CLAUDE_BIN:-claude}"
 CLAUDE_MAX_TURNS="${LEADV2_CLAUDE_MAX_TURNS:-60}"
 CLAUDE_MAX_BUDGET_USD="${LEADV2_CLAUDE_MAX_BUDGET_USD:-}"
 CLAUDE_PERMISSION_MODE="${LEADV2_CLAUDE_PERMISSION_MODE:-acceptEdits}"
+# LANE-TURNCAP-CHECKPOINT-01: exported so leadv2-turncap-checkpoint-hook.sh
+# (running INSIDE the spawned claude process) can see the actual cap this
+# attempt was launched with, and warn the model as it approaches it. Empty
+# in any session not launched by this runner, which is the hook's own gate.
+export LEADV2_CLAUDE_MAX_TURNS_EFFECTIVE="$CLAUDE_MAX_TURNS"
+TURNCAP_CHECKPOINT_SCRIPT="${SCRIPT_DIR}/leadv2-turncap-checkpoint-commit.sh"
+TURNCAP_STATE_DIR="${LEADV2_TURNCAP_STATE_DIR:-$HOME/.claude/state/leadv2}"
+TURNCAP_SAFE_ID="$(printf -- '%s' "$TASK_ID" | tr -cd 'A-Za-z0-9._-')"
+TURNCAP_COUNT_FILE="${TURNCAP_STATE_DIR}/${TURNCAP_SAFE_ID}.turncap-count"
 # These are the only interactive-side-effect commands that may be pre-approved
 # after the registry has entered Deploy or Verify. Keep this list script-only.
 LEADV2_PHASE67_ALLOWED_TOOLS="${LEADV2_PHASE67_ALLOWED_TOOLS:-Bash(plugins/leadv2/scripts/leadv2-deploy-merge.sh:*),Bash(.claude/leadv2-overrides/deploy.sh:*),Bash(.claude/leadv2-overrides/verify.sh:*)}"
 
 TASK_DIR="${PROJECT_ROOT}/docs/handoff/${TASK_ID}"
 mkdir -p "$TASK_DIR"
+CHECKPOINT_NOTE="${TASK_DIR}/CHECKPOINT.md"
 SENTINEL="${LEADV2_COMPLETION_SENTINEL:-${TASK_DIR}/phase8-passed.flag}"
 COMPLETION_RECEIPT="${LEADV2_COMPLETION_RECEIPT:-$(
   env PROJECT_ROOT="$PROJECT_ROOT" \
@@ -305,15 +315,25 @@ while (( attempt < MAX_ATTEMPTS )); do
     force_close_only=1
   fi
 
+  # LANE-TURNCAP-CHECKPOINT-01: a prior attempt (turn-cap death or otherwise)
+  # may have left a handoff note — self-authored or the auto-fallback from
+  # leadv2-turncap-checkpoint-commit.sh. Point every resume at it; reading
+  # what a previous attempt already established is cheaper than repeating
+  # the investigation from zero.
+  checkpoint_hint=""
+  if [[ "$attempt" -gt 0 && -f "$CHECKPOINT_NOTE" ]]; then
+    checkpoint_hint=" Read docs/handoff/${TASK_ID}/CHECKPOINT.md FIRST — it records what a previous attempt already established and what remains; do not repeat that investigation."
+  fi
+
   if [[ "$attempt" -eq 0 ]]; then
     prompt="/leadv2 ${TASK_ID}"
   elif [[ "$force_close_only" -eq 1 ]]; then
-    prompt="/leadv2 ${TASK_ID} -- CONTINUE: Your previous turn ended in success but the Phase-8 sentinel is missing. Do NOT redo any build/review/deploy work — git log shows it already landed. Run ONLY .claude/scripts/leadv2-phase8-close.sh (and its prerequisite leadv2-phase8-assert.sh / leadv2-phase8-e2e-gate.sh) to completion now (attempt ${attempt}/${MAX_ATTEMPTS})."
+    prompt="/leadv2 ${TASK_ID} -- CONTINUE: Your previous turn ended in success but the Phase-8 sentinel is missing. Do NOT redo any build/review/deploy work — git log shows it already landed. Run ONLY .claude/scripts/leadv2-phase8-close.sh (and its prerequisite leadv2-phase8-assert.sh / leadv2-phase8-e2e-gate.sh) to completion now (attempt ${attempt}/${MAX_ATTEMPTS}).${checkpoint_hint}"
     force_close_only=0
   else
     # Imperative continue prompt — same --session-id, so this is a
     # resume of the prior conversation, not a fresh /leadv2 dispatch.
-    prompt="/leadv2 ${TASK_ID} -- CONTINUE: this session exited before canonical Phase-8 completion proof was written (attempt ${attempt}/${MAX_ATTEMPTS}). Resume from the current phase. Re-check every sentinel/receipt already on disk before repeating ANY side-effecting step (spawn, merge, deploy, close) — do not blindly re-run prior actions. Drive the task through plan, build, review, deploy-gate, verify, close without stopping for confirmation; only a genuinely typed founder decision may call scripts/leadv2-ask.sh."
+    prompt="/leadv2 ${TASK_ID} -- CONTINUE: this session exited before canonical Phase-8 completion proof was written (attempt ${attempt}/${MAX_ATTEMPTS}). Resume from the current phase. Re-check every sentinel/receipt already on disk before repeating ANY side-effecting step (spawn, merge, deploy, close) — do not blindly re-run prior actions. Drive the task through plan, build, review, deploy-gate, verify, close without stopping for confirmation; only a genuinely typed founder decision may call scripts/leadv2-ask.sh.${checkpoint_hint}"
   fi
 
   # RESUME-FLAG-FIX: `--session-id` only WORKS to CREATE a fresh session
@@ -332,6 +352,10 @@ while (( attempt < MAX_ATTEMPTS )); do
   fi
 
   log "attempt ${attempt}/${MAX_ATTEMPTS}: launching claude -p (session-id=${SESSION_ID}, flag=${session_flag[0]})"
+  # LANE-TURNCAP-CHECKPOINT-01: fresh per-attempt turn budget -> fresh
+  # per-attempt counter, so the in-session budget hook's 0..CAP count
+  # matches the fresh --max-turns this attempt was just launched with.
+  rm -f "$TURNCAP_COUNT_FILE"
   progress_before="$("$PROGRESS_TOOL" "$TASK_ID" 2>/dev/null || printf -- 'unknown-before')"
   log_size_before="$( { [ -f "$LOGF" ] && wc -c <"$LOGF"; } 2>/dev/null || echo 0)"
   claude_args=(
@@ -370,6 +394,15 @@ while (( attempt < MAX_ATTEMPTS )); do
   if [[ -n "$_turn_cap_turns" ]]; then
     _receipt_status="turn_cap_exhausted"
     log "attempt ${attempt} exhausted max_turns (${_turn_cap_turns}/${CLAUDE_MAX_TURNS}) — NOT a crash; next attempt will resume with a fresh turn budget"
+    # LANE-TURNCAP-CHECKPOINT-01 backstop: the in-session budget hook may
+    # have gotten the model to self-checkpoint before the cap hit; this is
+    # the deterministic net for when it didn't (killed mid tool-call, or
+    # simply ignored the warning). Runs from OUTSIDE the now-dead process.
+    # Non-fatal: a failure here must never abort the resume loop.
+    if [[ -x "$TURNCAP_CHECKPOINT_SCRIPT" ]]; then
+      "$TURNCAP_CHECKPOINT_SCRIPT" "$TASK_ID" "$PROJECT_ROOT" "$attempt" "$MAX_ATTEMPTS" "$CLAUDE_MAX_TURNS" \
+        || log_error "turncap checkpoint-commit failed for ${TASK_ID} attempt ${attempt} — continuing resume loop regardless"
+    fi
   fi
   _append_provider_receipt "$_receipt_status" "$rc" "$attempt"
   if [[ -z "$_turn_cap_turns" ]]; then

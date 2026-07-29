@@ -427,6 +427,13 @@
           },
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-turncap-checkpoint-hook.sh\"",
+            "timeout": 5,
+            "continueOnBlock": true,
+            "statusMessage": "Turn-cap budget signal..."
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/leadv2-task-budget-tracker.sh\"",
             "timeout": 3,
             "continueOnBlock": true
