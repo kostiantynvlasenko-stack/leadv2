@@ -125,13 +125,23 @@ else:
 CUMULATIVE=$(python3 -c "print(float('${PRIOR_COST}') + float('${COST}'))")
 
 # ── Gate decisions ────────────────────────────────────────────────────────────
+# PLUGIN-COST-METRIC-RATELIMIT-01: no dollar figures in what we report — PCT is
+# already a ratio (not a currency amount); pair it with the fleet-wide
+# rate-limit window usage instead of the $ cap. Single source of that number:
+# leadv2-quota-status.sh (same script leadv2-status.sh's quota block calls) —
+# best-effort, never fatal if it's missing or fails.
+if [[ "$PCT" -ge 75 ]]; then
+  RATE_LIMIT_LINE=$(bash "${SCRIPT_DIR}/leadv2-quota-status.sh" --report 2>/dev/null | head -1 || true)
+  [[ -z "${RATE_LIMIT_LINE:-}" ]] && RATE_LIMIT_LINE="rate-limit: unavailable"
+fi
+
 if [[ "$PCT" -ge 100 ]]; then
-  echo "BUDGET_ABORT: ${TASK_ID} at ${PCT}% of \$${CLASS_CAP_USD} cap" >&2
+  echo "BUDGET_ABORT: ${TASK_ID} at ${PCT}% of task budget cap (${RATE_LIMIT_LINE})" >&2
   exit 1
 fi
 
 if [[ "$PCT" -ge 75 ]]; then
-  echo "BUDGET_WARN: ${TASK_ID} at ${PCT}% of \$${CLASS_CAP_USD} cap (warn threshold)"
+  echo "BUDGET_WARN: ${TASK_ID} at ${PCT}% of task budget cap (warn threshold) — ${RATE_LIMIT_LINE}"
 fi
 
 # ── Append entry to phase-costs.yaml ─────────────────────────────────────────

@@ -53,9 +53,17 @@ mkdir -p "$HANDOFF_DIR"
 PRIOR_ART_YAML="$HANDOFF_DIR/prior-art.yaml"
 OUTPUT_YAML="$HANDOFF_DIR/cost-estimate.yaml"
 
+# PLUGIN-COST-METRIC-RATELIMIT-01: the human-readable summary below reports
+# %-of-cap ratios, never $ figures. Single source of the fleet-wide rate-limit
+# number: leadv2-quota-status.sh --report (same script leadv2-status.sh's
+# quota block and phase-advance.sh's budget gate call) — best-effort, never
+# fatal if it's missing or fails.
+RATE_LIMIT_LINE="$(bash "${SCRIPT_DIR}/leadv2-quota-status.sh" --report 2>/dev/null | head -1 || true)"
+[[ -z "$RATE_LIMIT_LINE" ]] && RATE_LIMIT_LINE="rate-limit: unavailable"
+
 python3 - \
   "$ROUTING_YAML" "$STATE_MD" "$PRIOR_ART_YAML" "$MAIN_MODEL_YAML" \
-  "$TASK_ID" "$MAIN_MODEL" "$OUTPUT_YAML" <<'PYEOF'
+  "$TASK_ID" "$MAIN_MODEL" "$OUTPUT_YAML" "$RATE_LIMIT_LINE" <<'PYEOF'
 import sys
 import os
 import math
@@ -68,7 +76,7 @@ except ImportError:
     sys.exit(1)
 
 routing_yaml_path, state_md_path, prior_art_path, main_model_yaml_path, \
-    task_id, main_model, output_yaml_path = sys.argv[1:]
+    task_id, main_model, output_yaml_path, rate_limit_line = sys.argv[1:]
 
 # ---------------------------------------------------------------------------
 # Pricing (USD per 1M tokens)
@@ -266,15 +274,25 @@ Path(output_yaml_path).write_text(yaml.dump(output, default_flow_style=False, so
 
 # ---------------------------------------------------------------------------
 # Human-readable summary to stdout
+# PLUGIN-COST-METRIC-RATELIMIT-01: the founder banned dollar cost figures — we
+# report %-of-class-cap ratios (derived from the same $ estimate that still
+# drives phase-advance.sh's internal gate math in cost-estimate.yaml, which is
+# untouched) plus the live fleet-wide rate-limit window usage. No $ printed.
 # ---------------------------------------------------------------------------
 within_str = "WITHIN CAP" if within_cap else "EXCEEDS CAP"
+pct_low  = (cost_low  / class_cap * 100) if class_cap > 0 else 0.0
+pct_mean = (cost_mean / class_cap * 100) if class_cap > 0 else 0.0
+pct_high = (cost_high / class_cap * 100) if class_cap > 0 else 0.0
+sonnet_pct = (sonnet_cost / class_cap * 100) if class_cap > 0 else 0.0
+premium_pct = (opus_premium / class_cap * 100) if class_cap > 0 else 0.0
 print(f"Cost estimate for {task_id} ({classification}, main={main_model}):")
-print(f"  Expected: ${cost_low:.2f} – ${cost_mean:.2f} – ${cost_high:.2f} (low/mean/high)")
+print(f"  Expected: {pct_low:.0f}% – {pct_mean:.0f}% – {pct_high:.0f}% of {classification} budget cap (low/mean/high)  [{within_str}]")
 print(f"  Tokens: {total_input_tokens:,} in / {total_output_tokens:,} out")
 print(f"  Cache fraction: {CACHED_FRACTION:.0%}")
 if prior_art_cost is not None:
-    print(f"  Prior-art avg (top-3): ${prior_art_cost:.2f}")
-print(f"  Cap ({classification}): ${class_cap:.2f}  [{within_str}]")
-print(f"  Sonnet equiv: ${sonnet_cost:.2f} | Opus premium: ${opus_premium:.2f}")
+    prior_art_pct = (prior_art_cost / class_cap * 100) if class_cap > 0 else 0.0
+    print(f"  Prior-art avg (top-3): {prior_art_pct:.0f}% of cap")
+print(f"  Sonnet-equivalent: {sonnet_pct:.0f}% of cap | Opus premium: {premium_pct:.0f}% of cap")
+print(f"  {rate_limit_line}")
 print(f"  Written to: {output_yaml_path}")
 PYEOF

@@ -35,7 +35,6 @@ Env vars (read on start, can be overridden by flags):
   LEADV2_POLL_SECONDS              default 1800
   LEADV2_QUIET_HOURS               default "23-06" (UTC), format "HH-HH"; set "" to disable
   LEADV2_MAX_CONSECUTIVE_FAILURES  default 3
-  LEADV2_COST_CEILING_USD          default 50 (informational, via helpers leadv2_cost_check)
   LEADV2_QUEUE_FILE                default "${LEADV2_TASK_QUEUE:-docs/leadv2/tasks.yaml}"
   LEADV2_MAX_PARALLEL              default 1 (parallel independent tasks when > 1)
   LEADV2_STATE_FILE                default "docs/LEAD_V2_STATE.md" (overridable for testing)

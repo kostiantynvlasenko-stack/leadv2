@@ -671,6 +671,37 @@ PY
   fi
 }
 
+# ── Rate-limit window summary (PLUGIN-COST-METRIC-RATELIMIT-01) ────────────
+# The founder banned dollar cost figures: the ONLY cost metrics we report to a
+# human are 5h/weekly rate-limit window usage. Single source of the number —
+# leadv2-quota-status.sh --json (backed by ~/.claude/burn/history.db) — reused
+# here so every human-facing surface (status line, founder decision question,
+# budget-gate warning) shows the same figure instead of each deriving its own.
+# Never fabricates a percentage: degrades to "rate-limit: unavailable" on any
+# read failure.
+leadv2_rate_limit_summary() {
+  local quota_script="${LEADV2_QUOTA_STATUS_SCRIPT:-${_LV2_D}/leadv2-quota-status.sh}"
+  if [[ ! -f "$quota_script" ]]; then
+    echo "rate-limit: unavailable"
+    return 0
+  fi
+  bash "$quota_script" --json 2>/dev/null | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    p5 = (d.get('window_5h') or {}).get('pct')
+    pw = (d.get('window_weekly') or {}).get('pct')
+    if p5 is None and pw is None:
+        print('rate-limit: unavailable')
+    else:
+        p5s = str(p5) if p5 is not None else '?'
+        pws = str(pw) if pw is not None else '?'
+        print(f'rate-limit: 5h {p5s}% | weekly {pws}%')
+except Exception:
+    print('rate-limit: unavailable')
+" || echo "rate-limit: unavailable"
+}
+
 # ── Dry-run gate ──────────────────────────────────────────────────────────
 leadv2_dry_run_enabled() {
   [[ "${LEADV2_DRY_RUN:-0}" == "1" ]]

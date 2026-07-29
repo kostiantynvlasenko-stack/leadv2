@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-temp.sh"
+# leadv2_rate_limit_summary (PLUGIN-COST-METRIC-RATELIMIT-01) — best-effort,
+# never fatal if helpers are unavailable (e.g. standalone invocation).
+_LV2_STATUS_HELPERS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leadv2-helpers.sh"
+[[ -f "$_LV2_STATUS_HELPERS" ]] && { source "$_LV2_STATUS_HELPERS" 2>/dev/null || true; }
+unset _LV2_STATUS_HELPERS
 # leadv2-status.sh — Compact founder-facing status summary for /leadv2 daemon.
 #
 # Usage: leadv2-status.sh [--json]
@@ -415,30 +420,23 @@ fi
 
 # ── Human-friendly output ──────────────────────────────────────────────────────
 
-# Compact cost line — always shown (top of output)
+# Compact cost line — always shown (top of output).
+# PLUGIN-COST-METRIC-RATELIMIT-01: no dollar figures — the only cost metrics
+# reported are the task's %-of-budget-cap (a ratio, not a currency amount) and
+# the fleet-wide 5h/weekly rate-limit window usage (single source:
+# leadv2-quota-status.sh --json, same one leadv2-helpers.sh's
+# leadv2_rate_limit_summary wraps).
 _print_cost_compact() {
-  [[ -f "$DAILY_BUDGET_SCRIPT" ]] || return 0
   local task_id
   task_id=$(awk '/^task:/ {print $2; exit}' "$LEAD_STATE" 2>/dev/null || true)
 
-  # Daily totals
-  local daily_info
-  daily_info=$(bash "$DAILY_BUDGET_SCRIPT" --report 2>/dev/null | grep 'Spent today:' | head -1 || true)
-
-  # Per-task burn
-  local task_burn="" task_cap="" task_pct=""
+  # Per-task burn, expressed as % of its class cap (never as $).
+  local task_pct=""
   if [[ -n "$task_id" ]]; then
     local task_class
     task_class=$(awk '/^classification:/ {print $2; exit}' "$LEAD_STATE" 2>/dev/null || true)
     local costs_file="${PROJECT_ROOT}/docs/handoff/${task_id}/costs.yaml"
-    if [[ -f "$costs_file" ]]; then
-      task_burn=$(python3 -c "
-import yaml, sys
-entries = yaml.safe_load(open(sys.argv[1])) or []
-total = sum(float(e.get('cost_usd',0)) for e in entries if isinstance(e, dict) and 'cost_usd' in e)
-print(f'\${total:.2f}')
-" "$costs_file" 2>/dev/null || true)
-    fi
+    local task_cap
     case "${task_class:-Standard}" in
       Light)    task_cap="0.50"  ;;
       Standard) task_cap="2.00"  ;;
@@ -446,44 +444,35 @@ print(f'\${total:.2f}')
       Strategic) task_cap="20.00" ;;
       *)        task_cap="2.00"  ;;
     esac
-    if [[ -n "$task_burn" && -n "$task_cap" ]]; then
+    if [[ -f "$costs_file" ]]; then
       task_pct=$(python3 -c "
-b=float('${task_burn/\$/}')
-c=float('${task_cap}')
-print(f'{b/c*100:.0f}%' if c>0 else '?')
-" 2>/dev/null || true)
+import yaml, sys
+entries = yaml.safe_load(open(sys.argv[1])) or []
+total = sum(float(e.get('cost_usd',0)) for e in entries if isinstance(e, dict) and 'cost_usd' in e)
+cap = float(sys.argv[2])
+print(f'{total/cap*100:.0f}%' if cap > 0 else '?')
+" "$costs_file" "$task_cap" 2>/dev/null || true)
     fi
   fi
 
-  # Daily totals from report line
-  local daily_spent daily_pct
-  daily_spent=$(echo "$daily_info" | python3 -c "
-import sys, re
-line = sys.stdin.read()
-m = re.search(r'\\\$([0-9.]+) / \\\$([0-9.]+)', line)
-if m: print(f'\${m.group(1)} / \${m.group(2)}')
-" 2>/dev/null || true)
-  daily_pct=$(echo "$daily_info" | python3 -c "
-import sys, re
-line = sys.stdin.read()
-m = re.search(r'\(([0-9.]+%)\)', line)
-if m: print(m.group(1))
-" 2>/dev/null || true)
+  # Fleet-wide rate-limit window usage — one source, reused everywhere.
+  local rl_line
+  if [[ -x "$QUOTA_SCRIPT" ]]; then
+    rl_line=$(LEADV2_QUOTA_STATUS_SCRIPT="$QUOTA_SCRIPT" leadv2_rate_limit_summary 2>/dev/null || true)
+  fi
+  [[ -z "${rl_line:-}" ]] && rl_line="rate-limit: unavailable"
 
-  local task_part="" daily_part=""
-  [[ -n "$task_burn" ]] && task_part="task ${task_burn} / \$${task_cap} cap (${task_pct})"
-  [[ -n "$daily_spent" ]] && daily_part="today ${daily_spent} (${daily_pct:-?})"
+  local task_part=""
+  [[ -n "$task_pct" ]] && task_part="task ${task_pct} of budget cap"
 
   local cost_line=""
-  [[ -n "$task_part" && -n "$daily_part" ]] && cost_line="${task_part} | ${daily_part}"
-  [[ -n "$task_part" && -z "$daily_part" ]] && cost_line="${task_part}"
-  [[ -z "$task_part" && -n "$daily_part" ]] && cost_line="${daily_part}"
-  [[ -z "$cost_line" ]] && return 0
+  [[ -n "$task_part" ]] && cost_line="${task_part} | ${rl_line}"
+  [[ -z "$cost_line" ]] && cost_line="${rl_line}"
 
-  # Color: task >60% = yellow, >85% = red; daily >80% = red
+  # Color: task >=85% = red, >=60% = yellow.
   local color="${NC}"
   local pct_num
-  pct_num=$(printf '%s' "${task_pct/\%/}" | tr -d '\$' | grep -Eo '[0-9]+' | head -1 || true)
+  pct_num=$(printf '%s' "${task_pct/\%/}" | grep -Eo '[0-9]+' | head -1 || true)
   if [[ -n "$pct_num" ]]; then
     if [[ "$pct_num" -ge 85 ]]; then
       color="${RED}"

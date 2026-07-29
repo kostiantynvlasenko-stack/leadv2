@@ -568,11 +568,11 @@ _check_cost_ceiling() {
       over_100=$(python3 -c "print(1 if float('${current_burn}') >= float('${ceiling_usd}') else 0)" 2>/dev/null || echo "0")
     fi
     if [[ "$over_100" == "1" ]]; then
-      echo "[claude-subsession] AUTO-ABORT: task burn ${current_burn} >= cap ${ceiling_usd} — composing Tier B decision" >&2
+      echo "[claude-subsession] AUTO-ABORT: task budget cap reached — composing Tier B decision" >&2
       _write_auto_abort_decision "$current_burn" "$ceiling_usd"
     else
       echo "[claude-subsession] HARD STOP: task burn >= 95% of ${task_class} ceiling — refusing spawn of ${ROLE}" >&2
-      _write_85pct_decision "$current_burn" "$ceiling_usd"
+      _write_85pct_decision "$current_burn" "$ceiling_usd" "95"
     fi
     exit 1
   fi
@@ -588,9 +588,10 @@ print(int(b/c*100) if c>0 else 0)
     fi
     if [[ "$burn_pct" -ge 85 ]]; then
       echo "[claude-subsession] BLOCKED: burn ${burn_pct}% >= 85% ceiling — Tier B override required for ${ROLE}" >&2
-      _write_85pct_decision "$current_burn" "$ceiling_usd"
-      # Log WARN in LEAD_V2_STATUS
-      _append_status_warn "cost_ceiling_85pct: burn ${current_burn} / ${ceiling_usd} (${burn_pct}%) — spawn ${ROLE} blocked"
+      _write_85pct_decision "$current_burn" "$ceiling_usd" "$burn_pct"
+      # Log WARN in LEAD_V2_STATUS — PLUGIN-COST-METRIC-RATELIMIT-01: % of budget
+      # cap only, no dollar figures.
+      _append_status_warn "cost_ceiling_85pct: ${burn_pct}% of budget cap — spawn ${ROLE} blocked"
       exit 1
     fi
   fi
@@ -681,18 +682,25 @@ _log_downgrade_event() {
 # _write_85pct_decision — compose Tier B decision requiring founder override
 # ---------------------------------------------------------------------------
 _write_85pct_decision() {
-  local current_burn="${1:-?}" ceiling="${2:-?}"
+  # PLUGIN-COST-METRIC-RATELIMIT-01: $1/$2 (current_burn/ceiling) are internal
+  # accounting values that drive the gate math elsewhere in this file — they
+  # are NOT shown to the founder. The founder-facing question reports only
+  # the %-of-budget-cap ratio plus the fleet-wide rate-limit window usage.
+  local current_burn="${1:-?}" ceiling="${2:-?}" pct="${3:-85}"
   local decisions_dir="$PROJECT_ROOT/docs/leadv2-decisions"
   mkdir -p "$decisions_dir" 2>/dev/null || true
   local decision_file="$decisions_dir/cost-override-${TASK_ID}.yaml"
   [[ -f "$decision_file" ]] && return 0  # already written
+  local rl_line
+  rl_line="$(leadv2_rate_limit_summary 2>/dev/null || true)"
+  [[ -z "$rl_line" ]] && rl_line="rate-limit: unavailable"
   {
     printf -- 'id: cost-override-%s\n' "$TASK_ID"
     printf -- 'task_id: %s\n' "$TASK_ID"
     printf -- 'trigger: cost_ceiling_85pct\n'
     printf -- 'status: pending\n'
-    printf -- 'question: "Task burn $%s has reached 85%% of the $%s cap. Continue spawning %s?"\n' \
-      "$current_burn" "$ceiling" "$ROLE"
+    printf -- 'question: "Task %s spawn is at %s%% of its budget cap (%s). Continue spawning %s?"\n' \
+      "$TASK_ID" "$pct" "$rl_line" "$ROLE"
     printf -- 'options:\n'
     printf -- '  A: "Override cap for this spawn only (continue on opus)"\n'
     printf -- '  B: "Force sonnet for all remaining spawns in this task (default)"\n'
@@ -726,14 +734,18 @@ _write_auto_abort_decision() {
     "$ROLE" "$current_burn" "$ceiling" "$(date -u +%FT%TZ)")
   _costs_append "$costs_file" "$_row"
 
-  # Compose decision file
+  # Compose decision file. PLUGIN-COST-METRIC-RATELIMIT-01: report the founder
+  # question in rate-limit-window terms, never as a dollar spend/cap.
+  local rl_line
+  rl_line="$(leadv2_rate_limit_summary 2>/dev/null || true)"
+  [[ -z "$rl_line" ]] && rl_line="rate-limit: unavailable"
   {
     printf -- 'id: auto-abort-%s\n' "$TASK_ID"
     printf -- 'task_id: %s\n' "$TASK_ID"
     printf -- 'trigger: cost_ceiling_100pct\n'
     printf -- 'status: pending\n'
-    printf -- 'question: "Task %s exceeded 100%% of its $%s cap (spent $%s). Choose next action:"\n' \
-      "$TASK_ID" "$ceiling" "$current_burn"
+    printf -- 'question: "Task %s exceeded 100%% of its budget cap (%s). Choose next action:"\n' \
+      "$TASK_ID" "$rl_line"
     printf -- 'options:\n'
     printf -- '  A: "Continue anyway — raise cap to 2x for this task only (founder override)"\n'
     printf -- '  B: "Auto-downgrade remaining work to sonnet (recommended if feasible)"\n'
